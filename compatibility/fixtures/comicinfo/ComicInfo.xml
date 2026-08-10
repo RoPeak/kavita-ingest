@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ComicInfo xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <Title>Original Issue Title</Title>
+  <Series>Original Series</Series>
+  <Number>001</Number>
+  <Volume>7</Volume>
+  <Summary>Preserve this summary</Summary>
+  <Notes>Preserve these notes</Notes>
+  <Year>2024</Year>
+  <Month>6</Month>
+  <Day>5</Day>
+  <Writer>Original Writer</Writer>
+  <Editor>Original Editor</Editor>
+  <Translator>Original Translator</Translator>
+  <Publisher>Original Publisher</Publisher>
+  <LanguageISO>en-GB</LanguageISO>
+  <Format>Digital</Format>
+  <StoryArc>Preserved Arc</StoryArc>
+  <SeriesGroup>Preserved Group</SeriesGroup>
+  <GTIN>9780000000002</GTIN>
+  <FixtureExtension fixture="true">preserve unknown extension</FixtureExtension>
+</ComicInfo>
