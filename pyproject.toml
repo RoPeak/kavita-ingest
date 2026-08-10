@@ -3,11 +3,20 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "kavita-ingest-compatibility"
-version = "0.0.0"
-description = "Disposable Milestone 0 compatibility harness for kavita-ingest."
+name = "kavita-ingest"
+version = "0.1.0"
+description = "Read-only discovery and classification for Kavita-bound libraries."
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+  "lxml==6.1.1",
+  "pikepdf==10.11.0",
+  "platformdirs>=4.2,<5",
+  "rarfile==4.5",
+  "typer>=0.12,<1",
+]
+
+[project.scripts]
+kavita-ingest = "kavita_ingest.cli:app"
 
 [project.optional-dependencies]
 compatibility = [
@@ -17,11 +26,39 @@ compatibility = [
   "pytest==9.1.1",
   "rarfile==4.5",
 ]
+dev = [
+  "mypy>=1.11,<2",
+  "pytest==9.1.1",
+  "ruff>=0.9,<1",
+]
 
 [tool.pytest.ini_options]
-testpaths = ["tests/compatibility"]
+testpaths = ["tests"]
 addopts = "-ra"
-pythonpath = ["."]
+pythonpath = ["src", "."]
 
-[tool.setuptools]
-packages = []
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+kavita_ingest = ["migrations/*.sql", "schemas/*.xsd"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/compatibility/*" = ["E501", "SIM117"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+packages = ["kavita_ingest"]
+mypy_path = ["src"]
+
+[[tool.mypy.overrides]]
+module = ["lxml", "lxml.*", "rarfile"]
+ignore_missing_imports = true
