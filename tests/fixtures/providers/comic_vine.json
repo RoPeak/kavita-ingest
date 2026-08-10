@@ -1,0 +1,21 @@
+{
+  "status_code": 1,
+  "results": [
+    {
+      "id": 140001,
+      "resource_type": "issue",
+      "api_detail_url": "https://comicvine.gamespot.com/api/issue/4000-140001/",
+      "name": "The Zoo",
+      "issue_number": "14",
+      "cover_date": "2026-01-15",
+      "volume": {
+        "name": "Absolute Batman",
+        "start_year": "2024",
+        "publisher": {"name": "DC Comics"}
+      },
+      "person_credits": [
+        {"name": "Scott Snyder", "role": "writer"}
+      ]
+    }
+  ]
+}

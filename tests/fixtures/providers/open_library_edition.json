@@ -1,0 +1,10 @@
+{
+  "key": "/books/OL456M",
+  "title": "Crime and Punishment",
+  "publishers": ["Penguin Classics"],
+  "publish_date": "2003",
+  "isbn_10": ["0140449132"],
+  "isbn_13": ["9780140449136"],
+  "languages": [{"key": "/languages/eng"}],
+  "works": [{"key": "/works/OL123W"}]
+}

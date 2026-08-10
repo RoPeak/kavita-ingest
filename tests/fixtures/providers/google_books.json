@@ -1,0 +1,18 @@
+{
+  "totalItems": 1,
+  "items": [
+    {
+      "id": "google-volume-1",
+      "volumeInfo": {
+        "title": "The Odyssey",
+        "authors": ["Homer"],
+        "publisher": "Fixture Classics",
+        "publishedDate": "2020-05-01",
+        "language": "en",
+        "industryIdentifiers": [
+          {"type": "ISBN_13", "identifier": "9780140268867"}
+        ]
+      }
+    }
+  ]
+}

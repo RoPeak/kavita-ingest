@@ -12,6 +12,7 @@ dependencies = [
   "pikepdf==10.11.0",
   "platformdirs>=4.2,<5",
   "rarfile==4.5",
+  "rich>=13.8,<16",
   "typer>=0.12,<1",
 ]
 

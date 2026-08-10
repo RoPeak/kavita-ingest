@@ -183,7 +183,7 @@ def _comic_hypothesis(
     )
     if collection:
         series_text, creator, collection_label, number = collection.groups()
-        series = series or _clean_title(series_text)
+        series = _clean_title(series_text)
         title = title or (
             f"{collection_label} Book {number}" if collection_label else f"Book {number}"
         )

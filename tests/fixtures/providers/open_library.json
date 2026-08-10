@@ -1,0 +1,15 @@
+{
+  "numFound": 1,
+  "docs": [
+    {
+      "key": "/works/OL123W",
+      "title": "Crime and Punishment",
+      "author_name": ["Fyodor Dostoevsky"],
+      "first_publish_year": 1866,
+      "edition_key": ["OL456M"],
+      "isbn": ["9780140449136"],
+      "publisher": ["Penguin Classics"],
+      "language": ["eng"]
+    }
+  ]
+}

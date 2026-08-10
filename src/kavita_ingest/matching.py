@@ -1,0 +1,518 @@
+from __future__ import annotations
+
+import hashlib
+import json
+import re
+from dataclasses import asdict, dataclass
+from difflib import SequenceMatcher
+from enum import StrEnum
+from typing import Any
+
+from .config import MatchingSettings
+from .domain import Classification, MediaKind, SequenceNumber
+from .providers.models import Identifier, NormalizedCandidate, RecordType
+
+
+class ComparisonKind(StrEnum):
+    EXACT = "exact"
+    SIMILAR = "similar"
+    SUPPORTING = "supporting"
+    MISSING = "missing"
+    CONFLICT = "conflict"
+    HARD_CONTRADICTION = "hard_contradiction"
+
+
+@dataclass(frozen=True, slots=True)
+class LocalIdentity:
+    kind: MediaKind
+    subtype: str
+    classification_confidence: float
+    title: str
+    creators: tuple[str, ...] = ()
+    identifiers: tuple[Identifier, ...] = ()
+    series_title: str | None = None
+    sequence: SequenceNumber | None = None
+    year: int | None = None
+    run_start_year: int | None = None
+    publisher: str | None = None
+    language: str | None = None
+
+    def evidence_hash(self) -> str:
+        payload = json.dumps(asdict(self), sort_keys=True, default=str)
+        return hashlib.sha256(payload.encode()).hexdigest()
+
+
+@dataclass(frozen=True, slots=True)
+class FieldComparison:
+    field: str
+    local_value: str | None
+    candidate_value: str | None
+    kind: ComparisonKind
+    score_delta: float
+    confidence: float
+    reason: str
+    provenance: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class CandidateScore:
+    candidate: NormalizedCandidate
+    score: float
+    classification_confidence: float
+    comparisons: tuple[FieldComparison, ...]
+    contradictions: tuple[str, ...]
+    hard_contradiction: bool
+    identity_fields_high: bool
+    rank: int = 0
+    runner_up_margin: float = 0.0
+    eligible: bool = False
+    suppressed: bool = False
+
+    def explanation(self) -> tuple[str, ...]:
+        lines = [
+            f"Candidate {self.candidate.key}: score {self.score:.1f}",
+            f"Classification confidence: {self.classification_confidence:.2f}",
+            f"Runner-up margin: {self.runner_up_margin:.1f}",
+        ]
+        lines.extend(
+            f"{item.field}: {item.kind.value} ({item.score_delta:+.1f}) - {item.reason}"
+            for item in self.comparisons
+        )
+        lines.extend(f"CONTRADICTION: {item}" for item in self.contradictions)
+        lines.append(f"Eligible for explicit acceptance: {'yes' if self.eligible else 'no'}")
+        return tuple(lines)
+
+
+@dataclass(frozen=True, slots=True)
+class FieldResolution:
+    field: str
+    value: Any
+    confidence: float
+    provenance: tuple[str, ...]
+    decision_source: str
+    alternatives: tuple[Any, ...] = ()
+    conflicts: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class Reconciliation:
+    work_state: str | None
+    edition_state: str | None
+    fields: tuple[FieldResolution, ...]
+    reason: tuple[str, ...]
+
+
+def local_identity(classification: Classification, metadata: dict[str, Any]) -> LocalIdentity:
+    hypothesis = classification.hypotheses[0]
+    identifiers = _local_identifiers(metadata)
+    publisher = _string(metadata.get("publisher"))
+    language = _string(metadata.get("language"))
+    return LocalIdentity(
+        classification.kind,
+        hypothesis.subtype,
+        classification.confidence,
+        hypothesis.title or hypothesis.series or "",
+        hypothesis.creators,
+        identifiers,
+        hypothesis.series,
+        hypothesis.sequence,
+        hypothesis.year,
+        None,
+        publisher,
+        language,
+    )
+
+
+def score_candidates(
+    local: LocalIdentity,
+    candidates: list[NormalizedCandidate],
+    settings: MatchingSettings,
+) -> list[CandidateScore]:
+    raw = [_score(local, candidate) for candidate in candidates]
+    raw.sort(key=lambda item: (-item.score, item.candidate.key))
+    output: list[CandidateScore] = []
+    for index, item in enumerate(raw):
+        runner = raw[index + 1].score if index + 1 < len(raw) else 0.0
+        margin = item.score - runner if index == 0 else 0.0
+        eligible = (
+            index == 0
+            and item.score >= settings.eligible_score
+            and margin >= settings.eligible_margin
+            and local.classification_confidence >= settings.classification_confidence
+            and not item.hard_contradiction
+            and item.identity_fields_high
+        )
+        output.append(
+            CandidateScore(
+                item.candidate,
+                item.score,
+                item.classification_confidence,
+                item.comparisons,
+                item.contradictions,
+                item.hard_contradiction,
+                item.identity_fields_high,
+                index + 1,
+                margin,
+                eligible,
+                item.suppressed,
+            )
+        )
+    return output
+
+
+def reconcile(local: LocalIdentity, score: CandidateScore | None) -> Reconciliation:
+    if score is None:
+        return Reconciliation(
+            "unresolved" if local.kind is MediaKind.BOOK else None,
+            "unresolved" if local.kind is MediaKind.BOOK else None,
+            (),
+            ("no external candidate",),
+        )
+    candidate = score.candidate
+    fields = []
+    mapping = {
+        "title": candidate.title,
+        "publisher": candidate.publisher,
+        "publication_date": candidate.publication_date,
+        "language": candidate.language,
+        "series_title": candidate.series_title,
+        "sequence": candidate.sequence.normalized if candidate.sequence else None,
+    }
+    comparisons = {item.field: item for item in score.comparisons}
+    for field, value in mapping.items():
+        if value is None:
+            continue
+        comparison = comparisons.get(field)
+        confidence = comparison.confidence if comparison else min(score.score / 100, 0.85)
+        fields.append(
+            FieldResolution(
+                field,
+                value,
+                confidence,
+                (candidate.provider.value, candidate.provider_id),
+                "provider_candidate",
+                conflicts=(comparison.reason,)
+                if comparison and comparison.kind is ComparisonKind.CONFLICT
+                else (),
+            )
+        )
+    if local.kind is not MediaKind.BOOK:
+        return Reconciliation(None, None, tuple(fields), tuple(score.contradictions))
+    exact_edition_identifier = any(
+        item.field == "identifier" and item.kind is ComparisonKind.EXACT
+        for item in score.comparisons
+    )
+    work_state = "accepted" if score.score >= 80 and not score.hard_contradiction else "unresolved"
+    edition_state = (
+        "accepted"
+        if candidate.record_type is RecordType.BOOK_EDITION
+        and exact_edition_identifier
+        and score.score >= 92
+        else "unresolved"
+    )
+    reasons = []
+    if work_state == "accepted" and edition_state == "unresolved":
+        reasons.append(
+            "work identity is strong but no exact edition identifier resolves the edition"
+        )
+    reasons.extend(score.contradictions)
+    return Reconciliation(work_state, edition_state, tuple(fields), tuple(reasons))
+
+
+def _score(local: LocalIdentity, candidate: NormalizedCandidate) -> CandidateScore:
+    comparisons: list[FieldComparison] = []
+    contradictions: list[str] = []
+    if local.kind is not candidate.media_kind:
+        contradictions.append("book/comic media type conflict")
+        comparisons.append(
+            _comparison(
+                "media_kind",
+                local.kind,
+                candidate.media_kind,
+                ComparisonKind.HARD_CONTRADICTION,
+                -100,
+                1,
+                contradictions[-1],
+            )
+        )
+    collected = local.subtype == "collected-edition"
+    if collected and candidate.record_type is RecordType.COMIC_ISSUE:
+        contradictions.append("collected edition cannot resolve to a regular issue")
+        comparisons.append(
+            _comparison(
+                "item_type",
+                local.subtype,
+                candidate.record_type,
+                ComparisonKind.HARD_CONTRADICTION,
+                -100,
+                1,
+                contradictions[-1],
+            )
+        )
+    if (
+        not collected
+        and local.kind is MediaKind.COMIC
+        and candidate.record_type is RecordType.COMIC_COLLECTION
+    ):
+        contradictions.append("regular issue evidence conflicts with a collected edition candidate")
+        comparisons.append(
+            _comparison(
+                "item_type",
+                local.subtype,
+                candidate.record_type,
+                ComparisonKind.HARD_CONTRADICTION,
+                -100,
+                1,
+                contradictions[-1],
+            )
+        )
+
+    _identifier_score(local, candidate, comparisons, contradictions)
+    local_title = local.series_title if local.kind is MediaKind.COMIC else local.title
+    candidate_title = candidate.series_title if local.kind is MediaKind.COMIC else candidate.title
+    similarity = _similarity(local_title or "", candidate_title or "")
+    if similarity >= 0.96:
+        comparisons.append(
+            _comparison(
+                "title",
+                local_title,
+                candidate_title,
+                ComparisonKind.EXACT,
+                32,
+                similarity,
+                "normalized titles agree",
+            )
+        )
+    elif similarity >= 0.82:
+        comparisons.append(
+            _comparison(
+                "title",
+                local_title,
+                candidate_title,
+                ComparisonKind.SIMILAR,
+                22,
+                similarity,
+                "titles are strongly similar",
+            )
+        )
+    elif similarity >= 0.65:
+        comparisons.append(
+            _comparison(
+                "title",
+                local_title,
+                candidate_title,
+                ComparisonKind.SUPPORTING,
+                8,
+                similarity,
+                "titles partially agree",
+            )
+        )
+    else:
+        comparisons.append(
+            _comparison(
+                "title",
+                local_title,
+                candidate_title,
+                ComparisonKind.CONFLICT,
+                -18,
+                1 - similarity,
+                "titles disagree",
+            )
+        )
+
+    local_creators = {_normalize(name) for name in local.creators}
+    candidate_creators = {_normalize(item.name) for item in candidate.creators}
+    if local_creators and candidate_creators:
+        overlap = local_creators & candidate_creators
+        comparisons.append(
+            _comparison(
+                "creators",
+                ", ".join(local.creators),
+                ", ".join(item.name for item in candidate.creators),
+                ComparisonKind.EXACT if overlap else ComparisonKind.CONFLICT,
+                18 if overlap else -12,
+                1.0,
+                "creator names overlap" if overlap else "creator names disagree",
+            )
+        )
+
+    if local.sequence and candidate.sequence:
+        exact = local.sequence.normalized == candidate.sequence.normalized
+        kind = ComparisonKind.EXACT if exact else ComparisonKind.HARD_CONTRADICTION
+        delta = 30 if exact else -100
+        reason = "sequence numbers agree" if exact else "sequence numbers conflict"
+        comparisons.append(
+            _comparison(
+                "sequence",
+                local.sequence.normalized,
+                candidate.sequence.normalized,
+                kind,
+                delta,
+                1,
+                reason,
+            )
+        )
+        if not exact and local.kind is MediaKind.COMIC:
+            contradictions.append(reason)
+
+    candidate_year = _candidate_year(candidate)
+    if local.year and candidate_year:
+        difference = abs(local.year - candidate_year)
+        if difference == 0:
+            comparisons.append(
+                _comparison(
+                    "year", local.year, candidate_year, ComparisonKind.EXACT, 8, 1, "years agree"
+                )
+            )
+        elif difference == 1:
+            comparisons.append(
+                _comparison(
+                    "year",
+                    local.year,
+                    candidate_year,
+                    ComparisonKind.SUPPORTING,
+                    3,
+                    0.6,
+                    "years differ by one",
+                )
+            )
+        else:
+            comparisons.append(
+                _comparison(
+                    "year",
+                    local.year,
+                    candidate_year,
+                    ComparisonKind.CONFLICT,
+                    -7,
+                    min(difference / 10, 1),
+                    "years disagree",
+                )
+            )
+    if local.run_start_year and candidate.run_start_year:
+        exact_run = local.run_start_year == candidate.run_start_year
+        comparisons.append(
+            _comparison(
+                "run_start_year",
+                local.run_start_year,
+                candidate.run_start_year,
+                ComparisonKind.EXACT if exact_run else ComparisonKind.CONFLICT,
+                8 if exact_run else -10,
+                1,
+                "run-start years agree" if exact_run else "run-start years disagree",
+            )
+        )
+    total = max(0.0, min(100.0, 40.0 + sum(item.score_delta for item in comparisons)))
+    hard = any(item.kind is ComparisonKind.HARD_CONTRADICTION for item in comparisons)
+    title_high = any(item.field == "title" and item.confidence >= 0.82 for item in comparisons)
+    sequence_high = (
+        local.kind is not MediaKind.COMIC
+        or local.sequence is None
+        or any(
+            item.field == "sequence" and item.kind is ComparisonKind.EXACT for item in comparisons
+        )
+    )
+    return CandidateScore(
+        candidate,
+        total,
+        local.classification_confidence,
+        tuple(comparisons),
+        tuple(contradictions),
+        hard,
+        title_high and sequence_high,
+    )
+
+
+def _identifier_score(
+    local: LocalIdentity,
+    candidate: NormalizedCandidate,
+    comparisons: list[FieldComparison],
+    contradictions: list[str],
+) -> None:
+    local_by_scheme = _identifier_map(local.identifiers)
+    candidate_by_scheme = _identifier_map(candidate.identifiers)
+    for scheme in sorted(local_by_scheme.keys() & candidate_by_scheme.keys()):
+        overlap = local_by_scheme[scheme] & candidate_by_scheme[scheme]
+        if overlap:
+            comparisons.append(
+                _comparison(
+                    "identifier",
+                    ",".join(local_by_scheme[scheme]),
+                    ",".join(candidate_by_scheme[scheme]),
+                    ComparisonKind.EXACT,
+                    55,
+                    1,
+                    f"exact {scheme} identifier",
+                )
+            )
+        else:
+            reason = f"conflicting exact {scheme} identifiers"
+            comparisons.append(
+                _comparison(
+                    "identifier",
+                    ",".join(local_by_scheme[scheme]),
+                    ",".join(candidate_by_scheme[scheme]),
+                    ComparisonKind.HARD_CONTRADICTION,
+                    -100,
+                    1,
+                    reason,
+                )
+            )
+            contradictions.append(reason)
+
+
+def _local_identifiers(metadata: dict[str, Any]) -> tuple[Identifier, ...]:
+    output = []
+    for value in metadata.get("identifiers", []):
+        text = str(value).strip()
+        digits = re.sub(r"[^0-9Xx]", "", text)
+        if len(digits) in {10, 13}:
+            output.append(Identifier("isbn", digits.upper()))
+    comicinfo = metadata.get("comicinfo", {})
+    if isinstance(comicinfo, dict) and comicinfo.get("GTIN"):
+        output.append(Identifier("gtin", str(comicinfo["GTIN"])))
+    return tuple(output)
+
+
+def _identifier_map(values: tuple[Identifier, ...]) -> dict[str, set[str]]:
+    output: dict[str, set[str]] = {}
+    for item in values:
+        output.setdefault(item.scheme.casefold(), set()).add(_normalize(item.value))
+    return output
+
+
+def _comparison(
+    field: str,
+    local: object,
+    candidate: object,
+    kind: ComparisonKind,
+    delta: float,
+    confidence: float,
+    reason: str,
+) -> FieldComparison:
+    return FieldComparison(
+        field,
+        str(local) if local is not None else None,
+        str(candidate) if candidate is not None else None,
+        kind,
+        delta,
+        confidence,
+        reason,
+        ("local", "provider"),
+    )
+
+
+def _similarity(left: str, right: str) -> float:
+    return SequenceMatcher(None, _normalize(left), _normalize(right)).ratio()
+
+
+def _normalize(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", value.casefold()).strip()
+
+
+def _candidate_year(candidate: NormalizedCandidate) -> int | None:
+    match = re.match(r"(\d{4})", candidate.publication_date or "")
+    return int(match.group(1)) if match else candidate.run_start_year
+
+
+def _string(value: object) -> str | None:
+    return str(value) if isinstance(value, (str, int)) else None

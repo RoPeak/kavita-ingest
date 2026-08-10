@@ -4,7 +4,13 @@ from pathlib import Path
 
 import pytest
 
-from kavita_ingest.domain import InspectionResult, InspectionStatus, MediaKind, SourceFormat
+from kavita_ingest.domain import (
+    Evidence,
+    InspectionResult,
+    InspectionStatus,
+    MediaKind,
+    SourceFormat,
+)
 from kavita_ingest.parsing import classify, tokenize_filename
 
 EMPTY = InspectionResult(InspectionStatus.OK, SourceFormat.UNKNOWN)
@@ -180,3 +186,36 @@ def test_tokenizer_retains_raw_spans() -> None:
     assert any(token.raw == "001" and token.kind == "sequence" for token in tokens)
     assert any(token.raw == "Digital" and token.is_noise for token in tokens)
     assert any(token.raw == "2025" and token.kind == "year" for token in tokens)
+
+
+def test_structured_collection_filename_outweighs_overloaded_embedded_series() -> None:
+    inspection = InspectionResult(
+        InspectionStatus.OK,
+        SourceFormat.CBR,
+        metadata={
+            "comicinfo": {
+                "Series": "Animal Man by Grant Morrison Book One",
+                "Number": "1",
+            }
+        },
+        evidence=(
+            Evidence(
+                "series",
+                "Animal Man by Grant Morrison Book One",
+                "Animal Man by Grant Morrison Book One",
+                "comicinfo",
+                0.99,
+            ),
+        ),
+    )
+    result = classify(
+        Path("Animal Man by Grant Morrison Book 01 (2020).cbr"),
+        SourceFormat.CBR,
+        inspection,
+    )
+    assert result.hypotheses[0].subtype == "collected-edition"
+    assert result.hypotheses[0].series == "Animal Man"
+    assert any(
+        item.source == "comicinfo" and item.raw == "Animal Man by Grant Morrison Book One"
+        for item in result.hypotheses[0].evidence
+    )
