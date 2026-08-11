@@ -108,20 +108,7 @@ def interactive_review(
                     output.print("Manual override recorded with user provenance.")
                     continue
                 if action == "I":
-                    title_field = "series_title" if current.local.kind.value == "comic" else "title"
-                    title = typer.prompt(
-                        "Canonical title",
-                        default=current.local.series_title or current.local.title,
-                    )
-                    fields = {title_field: title}
-                    if current.local.kind.value == "comic":
-                        fields["item_type"] = typer.prompt(
-                            "Comic item type", default=current.local.subtype
-                        )
-                        if current.local.sequence:
-                            fields["sequence"] = typer.prompt(
-                                "Sequence", default=current.local.sequence.raw
-                            )
+                    fields = _manual_identity_fields(current)
                     add_manual_identity(
                         repository,
                         current.scan.source,
@@ -259,3 +246,61 @@ def _show_item(console: Console, item: ReviewItem) -> None:
         )
     if item.generation.unavailable:
         console.print("Unavailable: " + "; ".join(item.generation.unavailable))
+
+
+def _manual_identity_fields(item: ReviewItem) -> dict[str, str]:
+    local = item.local
+    if local.kind.value == "book":
+        fields = {
+            "title": typer.prompt("Canonical title", default=local.title),
+            "authors": typer.prompt(
+                "Author(s), comma separated", default=", ".join(local.creators)
+            ),
+        }
+        _optional_prompt(fields, "series_title", "Series")
+        _optional_prompt(fields, "series_index", "Series index")
+        _optional_prompt(fields, "publisher", "Publisher")
+        _optional_prompt(fields, "publication_date", "Publication date (YYYY-MM-DD)")
+        _optional_prompt(fields, "language", "Language tag")
+        _optional_prompt(fields, "isbn", "ISBN")
+        return fields
+    fields = {
+        "series_title": typer.prompt(
+            "Canonical series", default=local.series_title or local.title
+        ),
+        "title": typer.prompt("Issue/collection title", default=local.title),
+    }
+    item_type = typer.prompt(
+        "Comic item type",
+        default=local.subtype
+        if local.subtype
+        in {
+            "issue",
+            "annual",
+            "special",
+            "one-shot",
+            "trade",
+            "collected-edition",
+            "omnibus",
+            "graphic-novel",
+        }
+        else "issue",
+    )
+    fields["item_type"] = item_type
+    if item_type not in {"one-shot", "graphic-novel"}:
+        fields["sequence"] = typer.prompt(
+            "Sequence", default=local.sequence.raw if local.sequence else "1"
+        )
+    if item_type in {"issue", "annual", "special"}:
+        fields["run_start_year"] = typer.prompt(
+            "Run start year", default=str(local.run_start_year or local.year or "")
+        )
+    if item_type in {"trade", "collected-edition", "omnibus"}:
+        _optional_prompt(fields, "collection_volume", "Integer collection volume")
+    return fields
+
+
+def _optional_prompt(fields: dict[str, str], key: str, label: str) -> None:
+    value = typer.prompt(f"{label} (optional)", default="").strip()
+    if value:
+        fields[key] = value

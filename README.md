@@ -46,7 +46,7 @@ For an isolated command-line installation, use `pipx` from a local clone:
 
 ```bash
 sudo apt install calibre unrar pipx
-pipx install '/path/to/kavita-ingest[compatibility]'
+pipx install '/path/to/kavita-ingest'
 kavita-ingest --version
 ```
 
@@ -54,7 +54,7 @@ For development:
 
 ```bash
 python3 -m venv .venv
-.venv/bin/pip install -e '.[dev,compatibility]'
+.venv/bin/pip install -e '.[dev,compatibility-test]'
 .venv/bin/pytest -q
 .venv/bin/ruff check src tests
 .venv/bin/mypy --strict src
@@ -62,6 +62,11 @@ python3 -m venv .venv
 
 The package exposes the `kavita-ingest` console script and is currently version
 `0.1.0`, a pre-1.0 MVP.
+
+The `compatibility-test` extra is only for rerunning Milestone 0 experiments. It
+includes `comicinfoxml`, which those experiments found unsuitable for production
+round-trip preservation; production ComicInfo writing uses the hardened `lxml`
+implementation included in the normal package.
 
 ## Configuration
 
@@ -93,6 +98,17 @@ lifecycle = "preserve"
 
 [cbr]
 convert_to_cbz = true
+
+[naming]
+book_folder = "{series_or_title}"
+book = "{title}"
+book_series = "{series} - {number} - {title}"
+comic_folder = "{series}"
+comic = "{series} - {number} - {title}"
+comic_specials_subfolder = true
+
+[sequence]
+integer_padding = 3
 
 [providers.comic_vine]
 enabled = false
@@ -131,7 +147,7 @@ kavita-ingest doctor
 kavita-ingest scan /path/to/incoming
 kavita-ingest audit /path/to/incoming
 kavita-ingest review /path/to/incoming
-kavita-ingest plan create resolved-plan.json
+kavita-ingest plan create /path/to/incoming
 kavita-ingest plan show 1
 kavita-ingest plan approve 1 --digest DISPLAYED_SHA256
 kavita-ingest apply 1
@@ -140,7 +156,9 @@ kavita-ingest status
 
 `scan` fingerprints and inspects sources without modifying them. `audit` queries
 enabled providers or their caches and ranks candidates, but accepts nothing.
-`review` records explicit append-only decisions. A high confidence score means
+`review` records explicit append-only decisions. Manual identity entry covers
+book authors/series/edition fields and comic run year, type, sequence, and
+collection volume. A high confidence score means
 only that a candidate is eligible for convenient review; it never authorizes a
 filesystem change.
 
@@ -160,12 +178,34 @@ language, and identifiers, untouched.
 SQLite stores the sole authoritative canonical JSON bytes for each immutable
 plan. Exports are exact derivatives. A plan snapshot contains the resolved
 metadata, Kavita projection, writer requirements, source SHA-256, destination,
-transformation, verification requirements, and source lifecycle.
+transformation, source inventory, verification requirements, source lifecycle,
+naming policy, archive safety limits, and CBR conversion policy.
 
-`plan create` imports a fully resolved canonical plan as a draft. `plan show`
-displays its digest and contents. `plan approve --digest` explicitly binds
-approval to those exact bytes. Apply has no flag that manufactures approval or
-reinterprets the plan using current provider data.
+`plan create ROOT` consumes only persisted scan/classification evidence and the
+latest explicit review decisions under `ROOT`. It re-fingerprints every source,
+resolves canonical identity from the accepted decision snapshot, projects the
+configured Kavita destination, freezes all effective policy, and stores a draft.
+It performs no provider lookup. Unapproved, rejected, unresolved, skipped,
+stale, unsupported, or conflicting items are reported rather than inferred into
+the plan.
+
+`plan show` displays the digest and authoritative contents. `plan approve
+--digest` explicitly binds approval to those exact bytes. A later identity or
+comic run-group decision invalidates affected plans; a newer unapplied plan for
+the same source supersedes the older one. Apply has no flag that manufactures
+approval or reinterprets the plan using current provider data.
+
+`plan import FILE` is the advanced path for an already canonical, schema-valid
+plan document. It always creates an unapproved draft and does not replace the
+normal scan-review-create workflow.
+
+### Naming defaults
+
+Standalone books default to `Title/Title.ext`. Series books default to
+`Series/Series - 001 - Title.ext`. Comics use their projected, year-disambiguated
+Series for both grouping and naming. Simple integers are padded to the configured
+width; fractional and symbolic values such as `0.5`, `1A`, `1-5`, and `TPB1`
+remain meaningful. Missing cosmetic issue titles are omitted cleanly.
 
 ## Apply guarantees
 

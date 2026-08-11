@@ -46,7 +46,7 @@ def _export_fixture_plan(fixture: ApplyFixture, destination: Path) -> None:
 
 
 def _create_and_approve(runner: CliRunner, config: Path, plan: Path) -> tuple[str, str]:
-    created = runner.invoke(app, ["plan", "create", str(plan), "--config", str(config)])
+    created = runner.invoke(app, ["plan", "import", str(plan), "--config", str(config)])
     assert created.exit_code == 0, created.output
     match = re.search(r"plan (\d+) sha256=([0-9a-f]{64})", created.output)
     assert match

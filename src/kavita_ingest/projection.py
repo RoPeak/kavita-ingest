@@ -6,7 +6,7 @@ from typing import Any
 
 from .canonical import CanonicalIdentity, ResolutionLevel
 from .domain import MediaKind
-from .naming import join_optional, render_sequence, sanitize_component
+from .naming import NamingPolicy, render_component, render_sequence
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,7 +72,11 @@ _FORMATS = {
 }
 
 
-def project_comic(identity: CanonicalIdentity, extension: str = ".cbz") -> KavitaProjection:
+def project_comic(
+    identity: CanonicalIdentity,
+    extension: str = ".cbz",
+    naming: NamingPolicy | None = None,
+) -> KavitaProjection:
     if identity.media_kind is not MediaKind.COMIC:
         raise ValueError("comic projection requires a comic identity")
     blocks = identity.planning_blocks()
@@ -93,12 +97,21 @@ def project_comic(identity: CanonicalIdentity, extension: str = ".cbz") -> Kavit
         "Format": comic_format,
         "Title": identity.title,
     }
-    rendered = render_sequence(identity.sequence)
-    base = join_optional([series, rendered, identity.title or None])
-    folder = PurePosixPath(sanitize_component(series))
-    if comic_format:
+    policy = naming or NamingPolicy()
+    policy.validate()
+    naming_values = {
+        "title": identity.title or None,
+        "series": series,
+        "series_or_title": series,
+        "number": render_sequence(identity.sequence, policy.integer_padding),
+        "year": identity.run_start_year,
+        "author": identity.creators[0] if identity.creators else None,
+        "format": comic_format or None,
+    }
+    folder = PurePosixPath(render_component(policy.comic_folder, naming_values))
+    if comic_format and policy.comic_specials_subfolder:
         folder /= "Specials"
-    filename = sanitize_component(base) + _extension(extension)
+    filename = render_component(policy.comic_file, naming_values) + _extension(extension)
     owned = OwnershipManifest(
         set_fields={key: value for key, value in metadata.items() if value != ""},
         clear_fields=tuple(key for key in ("Volume", "Format") if metadata[key] == ""),
@@ -107,23 +120,39 @@ def project_comic(identity: CanonicalIdentity, extension: str = ".cbz") -> Kavit
     return KavitaProjection(MediaKind.COMIC, metadata, filename, folder, owned)
 
 
-def project_book(identity: CanonicalIdentity, extension: str = ".epub") -> KavitaProjection:
+def project_book(
+    identity: CanonicalIdentity,
+    extension: str = ".epub",
+    naming: NamingPolicy | None = None,
+) -> KavitaProjection:
     if identity.media_kind is not MediaKind.BOOK:
         raise ValueError("book projection requires a book identity")
     blocks = identity.planning_blocks()
     if blocks:
         raise ValueError("; ".join(blocks))
-    author = identity.creators[0]
-    folder = PurePosixPath(sanitize_component(author))
-    sequence = render_sequence(identity.sequence)
+    policy = naming or NamingPolicy()
+    policy.validate()
+    series_or_title = identity.series_title or identity.title
+    naming_values = {
+        "title": identity.title,
+        "series": identity.series_title,
+        "series_or_title": series_or_title,
+        "number": render_sequence(identity.sequence, policy.integer_padding),
+        "year": identity.publication_date[:4] if identity.publication_date else None,
+        "author": identity.creators[0],
+        "format": None,
+    }
+    folder = PurePosixPath(render_component(policy.book_folder, naming_values))
+    template = policy.book_series_file if identity.series_title else policy.book_file
+    filename = render_component(template, naming_values) + _extension(extension)
+    metadata_values: dict[str, Any] = {
+        "title": identity.title,
+        "authors": list(identity.creators),
+    }
     if identity.series_title:
-        folder /= sanitize_component(identity.series_title)
-    filename = sanitize_component(join_optional([sequence, identity.title])) + _extension(extension)
-    values: dict[str, Any] = {"title": identity.title, "authors": list(identity.creators)}
-    if identity.series_title:
-        values["series"] = identity.series_title
+        metadata_values["series"] = identity.series_title
     if identity.sequence:
-        values["series_index"] = identity.sequence.normalized
+        metadata_values["series_index"] = identity.sequence.normalized
     edition_values = {
         "publisher": identity.publisher,
         "date": identity.publication_date,
@@ -136,16 +165,16 @@ def project_book(identity: CanonicalIdentity, extension: str = ".epub") -> Kavit
         if identity.resolution is ResolutionLevel.WORK_ONLY:
             preserve.append(field_name)
         elif value is not None:
-            values[field_name] = value
+            metadata_values[field_name] = value
         else:
             unresolved.append(field_name)
     return KavitaProjection(
         MediaKind.BOOK,
-        values,
+        metadata_values,
         filename,
         folder,
         OwnershipManifest(
-            set_fields=values,
+            set_fields=metadata_values,
             preserve_fields=tuple(preserve + ["manifest", "spine", "cover", "custom_metadata"]),
             unresolved_fields=tuple(unresolved),
         ),

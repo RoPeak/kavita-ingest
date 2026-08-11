@@ -29,7 +29,7 @@ dependencies = [
 kavita-ingest = "kavita_ingest.cli:app"
 
 [project.optional-dependencies]
-compatibility = [
+compatibility-test = [
   "comicinfoxml==0.5.1",
   "lxml==6.1.1",
   "pikepdf==10.11.0",

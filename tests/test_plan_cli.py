@@ -47,23 +47,21 @@ def _plan_file(tmp_path: Path) -> Path:
         verification_requirements=("metadata_readback",),
     )
     path = tmp_path / "resolved.json"
-    path.write_text(
-        json.dumps(new_plan("cli-plan", (snapshot,)).to_dict(), indent=2), encoding="utf-8"
-    )
+    path.write_bytes(new_plan("cli-plan", (snapshot,)).canonical_bytes())
     return path
 
 
-def test_plan_cli_create_show_approve_export_and_import_are_digest_bound(tmp_path: Path) -> None:
+def test_plan_cli_import_show_approve_export_and_reimport_are_digest_bound(tmp_path: Path) -> None:
     runner = CliRunner()
     config = _config(tmp_path)
     source = _plan_file(tmp_path)
-    created = runner.invoke(app, ["plan", "create", str(source), "--config", str(config)])
+    created = runner.invoke(app, ["plan", "import", str(source), "--config", str(config)])
     assert created.exit_code == 0, created.output
     match = re.search(r"plan (\d+) sha256=([0-9a-f]{64})", created.output)
     assert match
     plan_id, digest = match.groups()
     shown = runner.invoke(app, ["plan", "show", plan_id, "--config", str(config)])
-    assert shown.exit_code == 0 and digest in shown.output and '"schema_version":1' in shown.output
+    assert shown.exit_code == 0 and digest in shown.output and '"schema_version":2' in shown.output
     refused = runner.invoke(
         app, ["plan", "approve", plan_id, "--digest", "0" * 64, "--config", str(config)]
     )

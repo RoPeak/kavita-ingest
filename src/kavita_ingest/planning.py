@@ -7,10 +7,51 @@ from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from .archive_safety import ArchiveLimits
 from .canonical import CanonicalIdentity
+from .naming import NamingPolicy
 from .projection import KavitaProjection
 
-PLAN_SCHEMA_VERSION = 1
+PLAN_SCHEMA_VERSION = 2
+SUPPORTED_PLAN_SCHEMA_VERSIONS = {1, PLAN_SCHEMA_VERSION}
+
+
+@dataclass(frozen=True, slots=True)
+class PlanningPolicySnapshot:
+    naming: NamingPolicy
+    source_lifecycle: str
+    source_archive_root: str | None
+    cbr_conversion_enabled: bool
+    archive_limits: ArchiveLimits
+    version: int = 1
+    projection_policy_version: int = 1
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "version": self.version,
+            "projection_policy_version": self.projection_policy_version,
+            "naming": self.naming.to_dict(),
+            "source_lifecycle": self.source_lifecycle,
+            "source_archive_root": self.source_archive_root,
+            "cbr_conversion_enabled": self.cbr_conversion_enabled,
+            "archive_limits": {
+                "max_entries": self.archive_limits.max_entries,
+                "max_entry_bytes": self.archive_limits.max_entry_bytes,
+                "max_total_bytes": self.archive_limits.max_total_bytes,
+                "max_path_depth": self.archive_limits.max_path_depth,
+                "max_ratio": self.archive_limits.max_ratio,
+            },
+        }
+
+    def digest(self) -> str:
+        payload = json.dumps(
+            self.to_dict(), ensure_ascii=True, sort_keys=True, separators=(",", ":")
+        ).encode()
+        return hashlib.sha256(payload).hexdigest()
+
+
+def default_planning_policy() -> PlanningPolicySnapshot:
+    return PlanningPolicySnapshot(NamingPolicy(), "move_after_verify", None, True, ArchiveLimits())
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,6 +97,7 @@ class ResolvedItemSnapshot:
     expected_inventory: tuple[dict[str, Any], ...]
     verification_requirements: tuple[str, ...]
     lifecycle_actions: tuple[dict[str, Any], ...]
+    planning_policy: dict[str, Any]
     conflicts: tuple[PlanConflict, ...] = ()
 
     @property
@@ -78,6 +120,7 @@ class ResolvedItemSnapshot:
             "expected_inventory": list(self.expected_inventory),
             "verification_requirements": list(self.verification_requirements),
             "lifecycle_actions": list(self.lifecycle_actions),
+            "planning_policy": self.planning_policy,
             "conflicts": [conflict.to_dict() for conflict in self.conflicts],
             "blocked": self.blocked,
         }
@@ -88,6 +131,7 @@ class PlanDocument:
     plan_id: str
     created_at: str
     items: tuple[ResolvedItemSnapshot, ...]
+    planning_policy: dict[str, Any]
     conflicts: tuple[PlanConflict, ...] = ()
     schema_version: int = PLAN_SCHEMA_VERSION
 
@@ -97,6 +141,7 @@ class PlanDocument:
             "plan_id": self.plan_id,
             "created_at": self.created_at,
             "items": [item.to_dict() for item in self.items],
+            "planning_policy": self.planning_policy,
             "conflicts": [conflict.to_dict() for conflict in self.conflicts],
         }
 
@@ -124,6 +169,7 @@ def build_snapshot(
     lifecycle_policy: str = "move_after_verify",
     archive_path: str | None = None,
     destination_root: str | None = None,
+    planning_policy: PlanningPolicySnapshot | None = None,
 ) -> ResolvedItemSnapshot:
     conflicts = tuple(
         PlanConflict("unresolved_identity", explanation)
@@ -166,6 +212,7 @@ def build_snapshot(
             "unresolved": list(identity.unresolved_fields),
         }
     )
+    policy = planning_policy or default_planning_policy()
     return ResolvedItemSnapshot(
         item_id=item_id,
         source=source,
@@ -183,11 +230,19 @@ def build_snapshot(
         expected_inventory=expected_inventory,
         verification_requirements=verification_requirements,
         lifecycle_actions=lifecycle,
+        planning_policy=policy.to_dict(),
         conflicts=conflicts,
     )
 
 
-def new_plan(plan_id: str, items: tuple[ResolvedItemSnapshot, ...]) -> PlanDocument:
+def new_plan(
+    plan_id: str,
+    items: tuple[ResolvedItemSnapshot, ...],
+    planning_policy: PlanningPolicySnapshot | None = None,
+) -> PlanDocument:
+    policy = planning_policy or default_planning_policy()
+    if any(item.planning_policy != policy.to_dict() for item in items):
+        raise ValueError("every plan item must carry the plan's exact planning policy")
     destinations: dict[str, list[str]] = {}
     for item in items:
         projection = item.kavita_projection
@@ -201,7 +256,13 @@ def new_plan(plan_id: str, items: tuple[ResolvedItemSnapshot, ...]) -> PlanDocum
         for ids in destinations.values()
         if len(ids) > 1
     )
-    return PlanDocument(plan_id, datetime.now(UTC).isoformat(), items, conflicts)
+    return PlanDocument(
+        plan_id,
+        datetime.now(UTC).isoformat(),
+        items,
+        policy.to_dict(),
+        conflicts,
+    )
 
 
 def validate_plan_payload(payload: bytes) -> dict[str, Any]:
@@ -209,11 +270,23 @@ def validate_plan_payload(payload: bytes) -> dict[str, Any]:
         document = json.loads(payload)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ValueError(f"invalid plan JSON: {exc}") from exc
-    if not isinstance(document, dict) or document.get("schema_version") != PLAN_SCHEMA_VERSION:
-        raise ValueError(f"unsupported plan schema version; expected {PLAN_SCHEMA_VERSION}")
+    if (
+        not isinstance(document, dict)
+        or document.get("schema_version") not in SUPPORTED_PLAN_SCHEMA_VERSIONS
+    ):
+        raise ValueError(
+            "unsupported plan schema version; expected one of "
+            f"{sorted(SUPPORTED_PLAN_SCHEMA_VERSIONS)}"
+        )
     items = document.get("items")
     if not isinstance(items, list):
         raise ValueError("plan items must be a list")
+    if document["schema_version"] == PLAN_SCHEMA_VERSION:
+        policy = document.get("planning_policy")
+        if not isinstance(policy, dict) or policy.get("version") != 1:
+            raise ValueError("schema 2 plans require planning_policy version 1")
+    else:
+        policy = None
     for item in items:
         if not isinstance(item, dict) or "item_id" not in item or "source" not in item:
             raise ValueError("each plan item requires item_id and source")
@@ -223,6 +296,8 @@ def validate_plan_payload(payload: bytes) -> dict[str, Any]:
             not isinstance(provenance, dict) or provenance.get("explicit_approval") is not True
         ):
             raise ValueError("every projected item requires an explicit approval decision")
+        if policy is not None and item.get("planning_policy") != policy:
+            raise ValueError("plan item policy must equal the authoritative plan policy")
     canonical = json.dumps(
         document, ensure_ascii=True, sort_keys=True, separators=(",", ":")
     ).encode()

@@ -29,7 +29,7 @@ from .db import connect, migrate
 from .filesystem import DestinationExists, LinuxFilesystem, NoClobberFilesystem, sha256_file
 from .locking import ProcessLock, lock_path
 from .plan_store import PlanStore, StoredPlan
-from .planning import PLAN_SCHEMA_VERSION, validate_plan_payload
+from .planning import SUPPORTED_PLAN_SCHEMA_VERSIONS, validate_plan_payload
 from .writers.comic import verify_cbz, write_cbz_metadata
 from .writers.common import VerificationResult
 from .writers.epub import CALIBRE_FIELDS, verify_epub, write_epub
@@ -158,7 +158,11 @@ class WriterDispatcher:
             )
         if item.source_format == "cbr":
             return repack_cbr_to_cbz(
-                item.source, destination, set_fields=set_fields, clear_fields=clear_fields
+                item.source,
+                destination,
+                set_fields=set_fields,
+                clear_fields=clear_fields,
+                limits=_archive_limits(item),
             )
         if item.source_format == "pdf":
             return write_pdf_metadata(item.source, destination, fields=_pdf_fields(set_fields))
@@ -340,7 +344,7 @@ class ApplyEngine:
             raise ApplyRefused(f"authoritative plan validation failed: {exc}") from exc
         if plan.status != "approved" or plan.approval_digest != plan.sha256:
             raise ApplyRefused("plan is not explicitly approved for its exact digest")
-        if plan.schema_version != PLAN_SCHEMA_VERSION:
+        if plan.schema_version not in SUPPORTED_PLAN_SCHEMA_VERSIONS:
             raise ApplyRefused(f"unsupported plan schema version: {plan.schema_version}")
         invalidated = connection.execute(
             "SELECT reason FROM plan_invalidations WHERE plan_id=?", (plan_id,)
@@ -352,6 +356,28 @@ class ApplyEngine:
         ).fetchone()
         if superseded:
             raise ApplyRefused(f"plan is superseded by plan {superseded[0]}")
+        stale_decision = connection.execute(
+            "SELECT item_id FROM plan_preconditions p WHERE p.plan_id=? AND "
+            "p.decision_head_id<>(SELECT max(d.id) FROM decisions d "
+            "WHERE d.source_fingerprint=p.source_fingerprint) LIMIT 1",
+            (plan_id,),
+        ).fetchone()
+        if stale_decision:
+            raise ApplyRefused(
+                f"plan identity precondition is stale for item {stale_decision[0]}; "
+                "create a new plan"
+            )
+        stale_run = connection.execute(
+            "SELECT item_id FROM plan_preconditions p WHERE p.plan_id=? "
+            "AND p.run_group_key IS NOT NULL AND p.run_group_decision_id IS NOT "
+            "(SELECT max(r.id) FROM run_group_decisions r WHERE r.group_key=p.run_group_key "
+            "AND r.provider='comic_vine') LIMIT 1",
+            (plan_id,),
+        ).fetchone()
+        if stale_run:
+            raise ApplyRefused(
+                f"plan run-group precondition is stale for item {stale_run[0]}; create a new plan"
+            )
         document = validate_plan_payload(plan.canonical_json)
         if document.get("conflicts"):
             raise ApplyRefused("plan has unresolved plan-level conflicts")
@@ -534,7 +560,7 @@ class ApplyEngine:
                 members = archive.infolist()
                 validate_inventory(
                     members,
-                    ArchiveLimits(),
+                    _archive_limits(item),
                     link_names={member.filename for member in members if member.is_symlink()},
                     encrypted_names={
                         member.filename for member in members if member.needs_password()
@@ -1044,6 +1070,23 @@ def _estimated_space(item: PreparedItem) -> int:
     else:
         estimate = max(item.source_size * 2, inventory_total + item.source_size)
     return max(64 * 1024 * 1024, int(estimate * 1.25))
+
+
+def _archive_limits(item: PreparedItem) -> ArchiveLimits:
+    policy = item.document.get("planning_policy", {})
+    values = policy.get("archive_limits", {}) if isinstance(policy, dict) else {}
+    if not isinstance(values, dict) or not values:
+        return ArchiveLimits()
+    try:
+        return ArchiveLimits(
+            max_entries=int(values["max_entries"]),
+            max_entry_bytes=int(values["max_entry_bytes"]),
+            max_total_bytes=int(values["max_total_bytes"]),
+            max_path_depth=int(values["max_path_depth"]),
+            max_ratio=float(values["max_ratio"]),
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ApplyRefused("plan contains invalid immutable archive safety limits") from exc
 
 
 def _epub_roles(item: dict[str, Any]) -> dict[str, Sequence[str]]:

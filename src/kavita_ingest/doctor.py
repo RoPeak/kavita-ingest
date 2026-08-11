@@ -54,6 +54,7 @@ def checks(
         Check("helpers", "rarfile", "OK", rarfile.__version__),
     ]
     output.extend(_path_checks(config))
+    output.extend(_planning_checks(config))
     output.extend(_helper_checks())
     output.extend(_format_checks())
     output.extend(_provider_checks(config))
@@ -147,6 +148,47 @@ def _path_checks(config: AppConfig) -> list[Check]:
     return output
 
 
+def _planning_checks(config: AppConfig) -> list[Check]:
+    naming = config.naming_policy()
+    archive_root = (
+        str(config.source_archive_root)
+        if config.source_archive_root is not None
+        else "not configured"
+    )
+    return [
+        Check(
+            "planning",
+            "source-lifecycle",
+            "OK",
+            f"{config.source_lifecycle}; archive_root={archive_root}",
+        ),
+        Check(
+            "planning",
+            "cbr-conversion",
+            "OK" if config.cbr_conversion_enabled else "INFO",
+            "CBR -> CBZ enabled"
+            if config.cbr_conversion_enabled
+            else "disabled; CBR items cannot enter an actionable plan",
+        ),
+        Check(
+            "planning",
+            "naming",
+            "OK",
+            f"book={naming.book_file!r}; book_series={naming.book_series_file!r}; "
+            f"comic={naming.comic_file!r}; integer_padding={naming.integer_padding}; "
+            f"specials_subfolder={str(naming.comic_specials_subfolder).lower()}",
+        ),
+        Check(
+            "planning",
+            "archive-limits",
+            "OK",
+            f"entries={config.archive_entry_limit}; entry_bytes={config.archive_entry_size_limit}; "
+            f"total_bytes={config.archive_total_size_limit}; "
+            f"depth={config.archive_path_depth_limit}; ratio={config.archive_ratio_limit:g}",
+        ),
+    ]
+
+
 def _path_check(category: str, name: str, path: Path) -> Check:
     if not path.exists():
         return Check(category, name, "BLOCKED", f"path does not exist: {path}")
@@ -234,7 +276,10 @@ def _provider_checks(config: AppConfig) -> list[Check]:
         Check(
             "providers",
             "google-books",
-            "INFO" if not config.providers.google_books_enabled else "OK",
+            "INFO"
+            if not config.providers.google_books_enabled
+            or not config.providers.google_books_api_key
+            else "OK",
             "disabled"
             if not config.providers.google_books_enabled
             else (

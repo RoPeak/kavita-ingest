@@ -20,6 +20,9 @@ both originals with the `preserve` lifecycle.
 ## Apply and inspect
 
 ```bash
+kavita-ingest plan create /path/to/trial-incoming
+kavita-ingest plan show PLAN_ID
+kavita-ingest plan approve PLAN_ID --digest DISPLAYED_SHA256
 kavita-ingest apply PLAN_ID
 kavita-ingest apply-status PLAN_ID
 ```

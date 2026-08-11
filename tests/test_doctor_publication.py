@@ -52,6 +52,23 @@ def test_doctor_empirically_probes_no_clobber_without_leaving_files(tmp_path: Pa
     assert "api_key" not in serialized.casefold()
 
 
+def test_doctor_reports_effective_planning_policy_and_anonymous_provider_constraint(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    result = CliRunner().invoke(app, ["doctor", "--json", "--config", str(config)])
+    assert result.exit_code == 0, result.output
+    checks = json.loads(result.stdout)["checks"]
+    planning = {item["name"]: item for item in checks if item["category"] == "planning"}
+    assert planning["source-lifecycle"]["detail"].startswith("move_after_verify")
+    assert "CBR -> CBZ enabled" in planning["cbr-conversion"]["detail"]
+    assert "integer_padding=3" in planning["naming"]["detail"]
+    assert "entries=5000" in planning["archive-limits"]["detail"]
+    google = next(item for item in checks if item["name"] == "google-books")
+    assert google["status"] == "INFO"
+    assert google["detail"] == "anonymous access"
+
+
 def test_publication_probe_blocks_filesystems_without_hard_links(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

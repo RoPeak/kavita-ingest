@@ -8,6 +8,7 @@ from kavita_ingest.decisions import (
     DecisionType,
     accept_candidate,
     add_manual_identity,
+    add_manual_override,
 )
 from kavita_ingest.domain import MediaKind, SourceFormat, SourceRecord
 from kavita_ingest.matching import CandidateScore, Reconciliation
@@ -81,3 +82,30 @@ def test_latest_unresolved_decision_blocks_an_older_acceptance(tmp_path: Path) -
         resolved = resolve_explicit_identity(repository, source, MediaKind.BOOK)
     assert not resolved.eligible
     assert resolved.blocks == ("latest explicit decision is unresolved",)
+
+
+def test_all_supported_manual_override_types_affect_resolved_identity(tmp_path: Path) -> None:
+    database = tmp_path / "state.sqlite3"
+    migrate(database)
+    source = _source()
+    with connect(database) as connection:
+        repository = DecisionRepository(connection)
+        add_manual_identity(
+            repository,
+            source,
+            "evidence",
+            {"title": "Known", "authors": "Original Author"},
+        )
+        for field, value in (
+            ("isbn", "978-0-140-26886-7"),
+            ("translators", "Terry Translator"),
+            ("run_start_year", "2024"),
+            ("collection_volume", "2"),
+        ):
+            add_manual_override(repository, source, "evidence", field, value)
+        resolved = resolve_explicit_identity(repository, source, MediaKind.BOOK)
+    assert resolved.identity is not None
+    assert resolved.identity.identifiers == {"isbn": "9780140268867"}
+    assert resolved.identity.contributors == {"translators": ("Terry Translator",)}
+    assert resolved.identity.run_start_year == 2024
+    assert resolved.identity.collection_volume == 2

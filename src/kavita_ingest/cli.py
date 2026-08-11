@@ -18,7 +18,7 @@ from .locking import LockUnavailable
 from .logging_config import configure_logging, provider_secrets
 from .paths import AppPaths
 from .plan_store import PlanStore
-from .planning import validate_plan_payload
+from .planning_service import PlanBuilder
 from .providers.models import NormalizedCandidate, ProviderName, RecordType
 from .review import interactive_review
 from .rollback import preview_rollback
@@ -409,17 +409,45 @@ def rollback_command(
 
 @plan_app.command("create")
 def plan_create(
-    resolved_plan: Annotated[Path, typer.Argument(exists=True, dir_okay=False)],
+    root: Annotated[Path, typer.Argument(exists=True, file_okay=False, resolve_path=True)],
     config: Annotated[Path | None, typer.Option("--config")] = None,
+    name: Annotated[str | None, typer.Option("--name", help="Human-readable plan label.")] = None,
+    as_json: Annotated[bool, typer.Option("--json", help="Emit versioned JSON.")] = False,
 ) -> None:
-    """Canonicalize and store a fully resolved plan document as a new draft."""
-    raw = json.loads(resolved_plan.read_text(encoding="utf-8"))
-    payload = json.dumps(raw, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode()
-    validate_plan_payload(payload)
-    connection, store = _plan_store(config)
+    """Build a draft immutable plan from explicitly reviewed state under ROOT."""
+    settings = load_config(config)
+    connection = _state_connection(config)
     try:
-        plan = store.import_bytes(payload)
-        typer.echo(f"Created draft plan {plan.id} sha256={plan.sha256} bytes={plan.byte_length}")
+        result = PlanBuilder(connection, settings).build(root, name=name)
+        plan = PlanStore(connection).add(result.document)
+        payload = {
+            "plan_id": plan.id,
+            "sha256": plan.sha256,
+            "byte_length": plan.byte_length,
+            "accepted_included": result.accepted_included,
+            "work_only_included": result.work_only_included,
+            "manual_included": result.manual_included,
+            "unapproved_excluded": result.unapproved_excluded,
+            "unresolved_blocked": result.unresolved_blocked,
+            "skipped": result.skipped,
+            "conflicts": result.conflicts,
+            "exclusions": [asdict(item) for item in result.exclusions],
+        }
+        if as_json:
+            _emit_json("plan-create", payload)
+            return
+        typer.echo(
+            f"Created draft plan {plan.id} sha256={plan.sha256} bytes={plan.byte_length}"
+        )
+        for key, value in payload.items():
+            if key not in {"plan_id", "sha256", "byte_length", "exclusions"}:
+                typer.echo(f"{key:24} {value}")
+        for exclusion in result.exclusions:
+            typer.echo(f"excluded {exclusion.category:16} {exclusion.path}")
+            typer.echo(f"  {exclusion.explanation}")
+    except ValueError as exc:
+        typer.echo(f"REFUSED: {exc}", err=True)
+        raise typer.Exit(2) from exc
     finally:
         connection.close()
 
@@ -445,6 +473,17 @@ def plan_show(
             "schema_version": plan.schema_version,
             "approved_at": plan.approved_at,
         }
+        invalidated = connection.execute(
+            "SELECT reason, invalidated_at FROM plan_invalidations WHERE plan_id=?",
+            (plan_id,),
+        ).fetchone()
+        superseded = connection.execute(
+            "SELECT new_plan_id, superseded_at FROM plan_supersessions WHERE old_plan_id=?",
+            (plan_id,),
+        ).fetchone()
+        metadata["invalidation"] = dict(invalidated) if invalidated else None
+        metadata["superseded_by"] = int(superseded[0]) if superseded else None
+        metadata["superseded_at"] = str(superseded[1]) if superseded else None
         if as_json:
             payload: dict[str, object] = {"plan": metadata}
             if not summary_only:
@@ -454,6 +493,13 @@ def plan_show(
         typer.echo(
             f"plan={plan.id} status={plan.status} sha256={plan.sha256} bytes={plan.byte_length}"
         )
+        if invalidated:
+            typer.echo(f"invalidated={invalidated['reason']} at {invalidated['invalidated_at']}")
+        if superseded:
+            typer.echo(
+                f"superseded_by={superseded['new_plan_id']} "
+                f"at {superseded['superseded_at']}"
+            )
         if not summary_only:
             typer.echo(plan.canonical_json.decode("utf-8"))
     finally:
@@ -645,7 +691,8 @@ def _workflow_menu() -> None:
             review_command(root, config=None)
         return
     if choice == "4":
-        typer.echo("Use `kavita-ingest plan create FILE` or `plan show PLAN_ID`.")
+        root = Path(typer.prompt("Reviewed incoming directory")).expanduser().resolve()
+        plan_create(root, config=None, name=None, as_json=False)
         return
     if choice == "5":
         plan_id = typer.prompt("Plan ID", type=int)

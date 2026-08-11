@@ -105,17 +105,29 @@ class RunGroupRepository:
                 previous.id if previous else None,
             ),
         )
-        self.connection.commit()
         if cursor.lastrowid is None:
             raise RuntimeError("run-group decision insert returned no id")
+        decision_id = int(cursor.lastrowid)
+        self.connection.execute(
+            "INSERT OR IGNORE INTO plan_invalidations(plan_id, reason, invalidated_at) "
+            "SELECT DISTINCT plan_id, ?, ? FROM plan_preconditions "
+            "WHERE run_group_key=? AND run_group_decision_id IS NOT ?",
+            (
+                "comic run-group decision changed after plan creation",
+                created_at,
+                group_key,
+                decision_id,
+            ),
+        )
+        self.connection.commit()
         LOGGER.info(
             "recorded run-group decision id=%s group=%s type=%s",
-            cursor.lastrowid,
+            decision_id,
             group_key,
             decision_type.value,
         )
         return RunGroupDecision(
-            int(cursor.lastrowid),
+            decision_id,
             group_key,
             provider,
             decision_type,

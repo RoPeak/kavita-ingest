@@ -35,6 +35,17 @@ staging = "/srv/staging"
 ignore = ["/srv/ignore"]
 [archive]
 max_entries = 42
+[source]
+lifecycle = "archive_after_verify"
+archive_root = "/srv/archive"
+[cbr]
+convert_to_cbz = false
+[naming]
+book_folder = "{author} - {title}"
+comic = "{number} - {title}"
+comic_specials_subfolder = false
+[sequence]
+integer_padding = 5
 [logging]
 level = "debug"
 """,
@@ -42,6 +53,13 @@ level = "debug"
     )
     config = load_config(config_file, _paths(tmp_path))
     assert config.archive_entry_limit == 42
+    assert config.source_lifecycle == "archive_after_verify"
+    assert config.source_archive_root == Path("/srv/archive")
+    assert config.cbr_conversion_enabled is False
+    assert config.naming_policy().book_folder == "{author} - {title}"
+    assert config.naming_policy().comic_file == "{number} - {title}"
+    assert config.naming_policy().integer_padding == 5
+    assert config.naming_policy().comic_specials_subfolder is False
     assert config.log_level == "DEBUG"
     assert config.incoming_roots[0] == Path("~/Incoming").expanduser()
     assert {
@@ -70,7 +88,7 @@ def test_missing_toml_still_loads_provider_environment(
 def test_new_database_applies_numbered_migration_without_backup(tmp_path: Path) -> None:
     database = tmp_path / "state.sqlite3"
     result = migrate(database)
-    assert result.applied == (1, 2, 3, 4)
+    assert result.applied == (1, 2, 3, 4, 5)
     assert result.backup_path is None
     with connect(database) as connection:
         tables = {
@@ -86,7 +104,7 @@ def test_existing_unmigrated_database_is_backed_up_and_validated(tmp_path: Path)
         connection.execute("CREATE TABLE existing(value TEXT)")
         connection.execute("INSERT INTO existing VALUES ('preserve me')")
     result = migrate(database)
-    assert result.applied == (1, 2, 3, 4)
+    assert result.applied == (1, 2, 3, 4, 5)
     assert result.backup_path is not None and result.backup_path.exists()
     with sqlite3.connect(result.backup_path) as backup:
         assert backup.execute("PRAGMA integrity_check").fetchone() == ("ok",)
@@ -124,7 +142,7 @@ def test_provider_migration_backs_up_version_one_before_schema_change(tmp_path: 
         connection.executescript(migration)
         connection.execute("INSERT INTO schema_migrations VALUES (1, 'fixture')")
     result = migrate(database)
-    assert result.applied == (2, 3, 4)
+    assert result.applied == (2, 3, 4, 5)
     assert result.backup_path is not None
     with sqlite3.connect(result.backup_path) as backup:
         assert backup.execute("SELECT version FROM schema_migrations").fetchall() == [(1,)]
@@ -148,7 +166,7 @@ def test_planning_migration_backs_up_version_two_before_schema_change(tmp_path: 
             connection.executescript(migrations.joinpath(filename).read_text(encoding="utf-8"))
             connection.execute("INSERT INTO schema_migrations VALUES (?, 'fixture')", (version,))
     result = migrate(database)
-    assert result.applied == (3, 4)
+    assert result.applied == (3, 4, 5)
     assert result.backup_path is not None
     with sqlite3.connect(result.backup_path) as backup:
         assert backup.execute("SELECT version FROM schema_migrations").fetchall() == [(1,), (2,)]
@@ -172,7 +190,7 @@ def test_apply_migration_backs_up_version_three_before_journal_schema(tmp_path: 
             connection.executescript(migrations.joinpath(filename).read_text(encoding="utf-8"))
             connection.execute("INSERT INTO schema_migrations VALUES (?, 'fixture')", (version,))
     result = migrate(database)
-    assert result.applied == (4,)
+    assert result.applied == (4, 5)
     assert result.backup_path is not None
     with sqlite3.connect(result.backup_path) as backup:
         assert backup.execute("PRAGMA integrity_check").fetchone() == ("ok",)

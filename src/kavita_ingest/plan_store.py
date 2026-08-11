@@ -49,6 +49,7 @@ class PlanStore:
                 raise RuntimeError("plan insert returned no id")
             plan_id = int(cursor.lastrowid)
             self._derive_indexes(plan_id, document)
+            self._supersede_prior_unapplied_plans(plan_id)
             self.connection.commit()
         except sqlite3.IntegrityError as exc:
             self.connection.rollback()
@@ -70,6 +71,16 @@ class PlanStore:
         plan = self.get(plan_id)
         if digest != plan.sha256:
             raise ValueError("approval digest does not match the exact authoritative plan bytes")
+        invalidated = self.connection.execute(
+            "SELECT reason FROM plan_invalidations WHERE plan_id=?", (plan_id,)
+        ).fetchone()
+        if invalidated:
+            raise ValueError(f"invalidated plan cannot be approved: {invalidated[0]}")
+        superseded = self.connection.execute(
+            "SELECT new_plan_id FROM plan_supersessions WHERE old_plan_id=?", (plan_id,)
+        ).fetchone()
+        if superseded:
+            raise ValueError(f"superseded plan cannot be approved; use plan {superseded[0]}")
         document = validate_plan_payload(plan.canonical_json)
         if document.get("conflicts") or any(item.get("blocked") for item in document["items"]):
             raise ValueError("plans with unresolved conflicts cannot be approved")
@@ -103,6 +114,35 @@ class PlanStore:
                     int(bool(item.get("blocked", False))),
                 ),
             )
+            provenance = item.get("provenance", {})
+            decision_head = (
+                provenance.get("decision_head_id") if isinstance(provenance, dict) else None
+            )
+            if decision_head is not None:
+                self.connection.execute(
+                    "INSERT INTO plan_preconditions(plan_id, item_id, source_fingerprint, "
+                    "decision_head_id, run_group_key, run_group_decision_id) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (
+                        plan_id,
+                        str(item["item_id"]),
+                        str(item["source"]["sha256"]),
+                        int(decision_head),
+                        provenance.get("run_group_key"),
+                        provenance.get("run_group_decision_id"),
+                    ),
+                )
+
+    def _supersede_prior_unapplied_plans(self, plan_id: int) -> None:
+        self.connection.execute(
+            "INSERT OR IGNORE INTO plan_supersessions(old_plan_id, new_plan_id, superseded_at) "
+            "SELECT DISTINCT old.plan_id, ?, ? FROM plan_items_index old "
+            "JOIN plan_items_index new ON new.plan_id=? "
+            "AND new.source_fingerprint=old.source_fingerprint "
+            "WHERE old.plan_id<>? AND NOT EXISTS "
+            "(SELECT 1 FROM apply_runs WHERE apply_runs.plan_id=old.plan_id)",
+            (plan_id, datetime.now(UTC).isoformat(), plan_id, plan_id),
+        )
 
     @staticmethod
     def _verify(plan: StoredPlan) -> None:

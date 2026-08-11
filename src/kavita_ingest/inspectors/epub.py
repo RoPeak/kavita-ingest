@@ -36,6 +36,16 @@ def inspect_epub(path: Path, limits: ArchiveLimits) -> InspectionResult:
             _require_small_entry(archive, str(roots[0]))
             opf = _xml(archive.read(str(roots[0])))
             metadata = _metadata(opf)
+            metadata["inventory"] = [
+                {
+                    "path": item.filename.replace("\\", "/"),
+                    "size": item.file_size,
+                    "compressed_size": item.compress_size,
+                    "is_directory": item.is_dir(),
+                    "is_link": False,
+                }
+                for item in members
+            ]
         evidence = tuple(
             Evidence(key, str(value), str(value), "epub-opf", 0.98)
             for key, value in metadata.items()

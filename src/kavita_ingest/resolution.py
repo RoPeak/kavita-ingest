@@ -79,6 +79,7 @@ def _candidate_identity(decision: DecisionRecord) -> CanonicalIdentity:
             "provider": candidate.provider.value,
             "provider_id": candidate.provider_id,
             "record_type": candidate.record_type.value,
+            **({"run_id": candidate.run_id} if candidate.run_id else {}),
         },
         resolution=ResolutionLevel.WORK_ONLY if work_only else ResolutionLevel.COMPLETE,
         provenance={"decision_id": str(decision.id), "decision_type": decision.decision_type.value},
@@ -98,6 +99,8 @@ def _manual_identity(decision: DecisionRecord, kind: MediaKind) -> CanonicalIden
         series_title=_optional_string(fields.get("series_title")),
         sequence=sequence,
         item_type=_optional_string(fields.get("item_type")),
+        run_start_year=_optional_int(fields.get("run_start_year")),
+        collection_volume=_optional_int(fields.get("collection_volume")),
         publisher=_optional_string(fields.get("publisher")),
         publication_date=_optional_string(fields.get("publication_date")),
         language=_optional_string(fields.get("language")),
@@ -109,7 +112,13 @@ def _manual_identity(decision: DecisionRecord, kind: MediaKind) -> CanonicalIden
 
 def _apply_overrides(identity: CanonicalIdentity, values: dict[str, Any]) -> CanonicalIdentity:
     updates: dict[str, Any] = {}
-    mapping = {"authors": "creators", "series_index": "sequence"}
+    identifiers = dict(identity.identifiers)
+    contributors = dict(identity.contributors)
+    mapping = {
+        "authors": "creators",
+        "series_index": "sequence",
+        "date": "publication_date",
+    }
     allowed = {
         "title",
         "series_title",
@@ -117,10 +126,18 @@ def _apply_overrides(identity: CanonicalIdentity, values: dict[str, Any]) -> Can
         "publication_date",
         "language",
         "item_type",
+        "run_start_year",
+        "collection_volume",
         "creators",
         "sequence",
     }
     for field, value in values.items():
+        if field in {"isbn", "isbn10", "isbn13"}:
+            identifiers[field] = str(value)
+            continue
+        if field in {"translators", "editors", "illustrators"}:
+            contributors[field] = _strings(value)
+            continue
         target = mapping.get(field, field)
         if target not in allowed:
             continue
@@ -130,6 +147,10 @@ def _apply_overrides(identity: CanonicalIdentity, values: dict[str, Any]) -> Can
             updates[target] = _strings(value)
         else:
             updates[target] = value
+    if identifiers != identity.identifiers:
+        updates["identifiers"] = identifiers
+    if contributors != identity.contributors:
+        updates["contributors"] = contributors
     return replace(identity, **updates)
 
 
@@ -141,3 +162,11 @@ def _strings(value: object) -> tuple[str, ...]:
 
 def _optional_string(value: object) -> str | None:
     return str(value) if value is not None else None
+
+
+def _optional_int(value: object) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, (str, bytes, bytearray, int, float)):
+        return int(value)
+    raise ValueError(f"expected an integer-compatible value, got {type(value).__name__}")

@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .archive_safety import ArchiveLimits
+from .naming import NamingPolicy
 from .paths import AppPaths
 
 
@@ -52,9 +54,13 @@ class AppConfig:
     source_lifecycle: str = "move_after_verify"
     source_archive_root: Path | None = None
     cbr_conversion_enabled: bool = True
-    book_filename_template: str = "{title} ({year})"
+    book_folder_template: str = "{series_or_title}"
+    book_filename_template: str = "{title}"
+    book_series_filename_template: str = "{series} - {number} - {title}"
+    comic_folder_template: str = "{series}"
     comic_filename_template: str = "{series} - {number} - {title}"
     integer_sequence_padding: int = 3
+    comic_specials_subfolder: bool = True
     providers: ProviderSettings = ProviderSettings()
     matching: MatchingSettings = MatchingSettings()
 
@@ -64,6 +70,26 @@ class AppConfig:
             path for path in (self.books_root, self.comics_root, self.staging_root) if path
         )
         return tuple(_resolved(path) for path in values)
+
+    def archive_limits(self) -> ArchiveLimits:
+        return ArchiveLimits(
+            self.archive_entry_limit,
+            self.archive_entry_size_limit,
+            self.archive_total_size_limit,
+            self.archive_path_depth_limit,
+            self.archive_ratio_limit,
+        )
+
+    def naming_policy(self) -> NamingPolicy:
+        return NamingPolicy(
+            book_folder=self.book_folder_template,
+            book_file=self.book_filename_template,
+            book_series_file=self.book_series_filename_template,
+            comic_folder=self.comic_folder_template,
+            comic_file=self.comic_filename_template,
+            integer_padding=self.integer_sequence_padding,
+            comic_specials_subfolder=self.comic_specials_subfolder,
+        )
 
 
 def load_config(path: Path | None = None, app_paths: AppPaths | None = None) -> AppConfig:
@@ -126,12 +152,21 @@ def load_config(path: Path | None = None, app_paths: AppPaths | None = None) -> 
         archive_ratio_limit=float(archive.get("max_ratio", 1_000.0)),
         source_lifecycle=str(source.get("lifecycle", "move_after_verify")),
         source_archive_root=_optional_path(source.get("archive_root")),
-        cbr_conversion_enabled=bool(cbr.get("convert_to_cbz", True)),
-        book_filename_template=str(naming.get("book", "{title} ({year})")),
+        cbr_conversion_enabled=_boolean(cbr.get("convert_to_cbz", True), "cbr.convert_to_cbz"),
+        book_folder_template=str(naming.get("book_folder", "{series_or_title}")),
+        book_filename_template=str(naming.get("book", "{title}")),
+        book_series_filename_template=str(
+            naming.get("book_series", "{series} - {number} - {title}")
+        ),
+        comic_folder_template=str(naming.get("comic_folder", "{series}")),
         comic_filename_template=str(
             naming.get("comic", "{series} - {number} - {title}")
         ),
         integer_sequence_padding=int(sequence.get("integer_padding", 3)),
+        comic_specials_subfolder=_boolean(
+            naming.get("comic_specials_subfolder", True),
+            "naming.comic_specials_subfolder",
+        ),
         providers=provider_settings,
         matching=MatchingSettings(
             eligible_score=float(matching.get("eligible_score", 92.0)),
@@ -186,6 +221,15 @@ def validate_config(config: AppConfig) -> None:
         )
     if config.source_lifecycle == "archive_after_verify" and config.source_archive_root is None:
         errors.append("archive_after_verify requires source.archive_root")
+    if config.source_archive_root is not None:
+        archive = _resolved(config.source_archive_root)
+        for other in (*config.incoming_roots, *destinations):
+            resolved = _resolved(other)
+            if archive == resolved or _contains(archive, resolved) or _contains(resolved, archive):
+                errors.append(
+                    f"source archive root {config.source_archive_root} must be separate "
+                    f"from {other}"
+                )
     if min(
         config.archive_entry_limit,
         config.archive_entry_size_limit,
@@ -205,6 +249,10 @@ def validate_config(config: AppConfig) -> None:
         errors.append("matching classification_confidence must be between 0 and 1")
     if not 1 <= config.integer_sequence_padding <= 12:
         errors.append("sequence integer_padding must be between 1 and 12")
+    try:
+        config.naming_policy().validate()
+    except ValueError as exc:
+        errors.append(str(exc))
     if errors:
         raise ValueError("invalid configuration:\n- " + "\n- ".join(errors))
 
@@ -311,8 +359,12 @@ lifecycle = "preserve"
 convert_to_cbz = true
 
 [naming]
-book = "{title} ({year})"
+book_folder = "{series_or_title}"
+book = "{title}"
+book_series = "{series} - {number} - {title}"
+comic_folder = "{series}"
 comic = "{series} - {number} - {title}"
+comic_specials_subfolder = true
 
 [sequence]
 integer_padding = 3

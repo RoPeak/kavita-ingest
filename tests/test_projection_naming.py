@@ -6,7 +6,7 @@ import pytest
 
 from kavita_ingest.canonical import CanonicalIdentity, ResolutionLevel, work_only_identity
 from kavita_ingest.domain import MediaKind, SequenceNumber
-from kavita_ingest.naming import detect_collisions
+from kavita_ingest.naming import NamingPolicy, detect_collisions
 from kavita_ingest.projection import OwnershipManifest, project_book, project_comic
 
 
@@ -111,6 +111,54 @@ def test_work_only_book_preserves_all_unresolved_edition_metadata() -> None:
         "identifiers",
     }
     assert not projection.ownership.unresolved_fields
+
+
+def test_book_default_hierarchy_is_title_or_series_oriented() -> None:
+    standalone = CanonicalIdentity(MediaKind.BOOK, "Dune", ("Frank Herbert",))
+    series = CanonicalIdentity(
+        MediaKind.BOOK,
+        "The Tombs of Atuan",
+        ("Ursula K. Le Guin",),
+        series_title="Earthsea",
+        sequence=SequenceNumber.parse("2"),
+    )
+    assert project_book(standalone).destination == PurePosixPath("Dune/Dune.epub")
+    assert project_book(series).destination == PurePosixPath(
+        "Earthsea/Earthsea - 002 - The Tombs of Atuan.epub"
+    )
+
+
+def test_naming_policy_controls_padding_templates_and_optional_cosmetic_title() -> None:
+    policy = NamingPolicy(
+        comic_folder="{series} ({format})",
+        comic_file="{number} - {title}",
+        integer_padding=5,
+        comic_specials_subfolder=False,
+    )
+    numbered = CanonicalIdentity(
+        MediaKind.COMIC,
+        "",
+        (),
+        series_title="Watchmen",
+        sequence=SequenceNumber.parse("1"),
+        run_start_year=1986,
+        item_type="issue",
+    )
+    symbolic = CanonicalIdentity(
+        MediaKind.COMIC,
+        "",
+        (),
+        series_title="Watchmen",
+        sequence=SequenceNumber.parse("TPB1"),
+        run_start_year=1986,
+        item_type="trade",
+    )
+    assert project_comic(numbered, naming=policy).filename == "00001.cbz"
+    projected = project_comic(symbolic, naming=policy)
+    assert projected.filename == "TPB1.cbz"
+    assert projected.destination_folder == PurePosixPath(
+        "Watchmen (1986) (Trade Paperback)"
+    )
 
 
 def test_unresolved_comic_blocks_with_precise_reasons() -> None:

@@ -79,17 +79,29 @@ class DecisionRepository:
                 batch_id,
             ),
         )
-        self.connection.commit()
         if cursor.lastrowid is None:
             raise RuntimeError("decision insert did not return an identifier")
+        decision_id = int(cursor.lastrowid)
+        self.connection.execute(
+            "INSERT OR IGNORE INTO plan_invalidations(plan_id, reason, invalidated_at) "
+            "SELECT DISTINCT plan_id, ?, ? FROM plan_preconditions "
+            "WHERE source_fingerprint=? AND decision_head_id<>?",
+            (
+                "explicit identity decision changed after plan creation",
+                created_at,
+                source.sha256,
+                decision_id,
+            ),
+        )
+        self.connection.commit()
         LOGGER.info(
             "recorded explicit decision id=%s type=%s source=%s",
-            cursor.lastrowid,
+            decision_id,
             decision_type.value,
             source.sha256[:12],
         )
         return DecisionRecord(
-            int(cursor.lastrowid),
+            decision_id,
             source.sha256,
             media_signature,
             decision_type,
@@ -277,6 +289,16 @@ def validate_manual_override(field: str, value: str) -> Any:
         return digits
     if field in {"sequence", "series_index"}:
         return SequenceNumber.parse(cleaned).normalized
+    if field == "run_start_year":
+        year = int(cleaned)
+        if not 1800 <= year <= datetime.now(UTC).year + 1:
+            raise ValueError("run_start_year is outside the supported range")
+        return year
+    if field == "collection_volume":
+        volume = int(cleaned)
+        if volume < 1:
+            raise ValueError("collection_volume must be a positive integer")
+        return volume
     if field in {"publication_date", "date"}:
         return date.fromisoformat(cleaned).isoformat()
     if field == "language":

@@ -3,6 +3,7 @@ from __future__ import annotations
 import zipfile
 from functools import lru_cache
 from pathlib import Path
+from typing import Any
 
 import rarfile
 
@@ -31,7 +32,7 @@ def inspect_cbz(path: Path, limits: ArchiveLimits) -> InspectionResult:
             )
             return _comic_result(
                 SourceFormat.CBZ,
-                [item.filename for item in members],
+                [_inventory_item(item, item.filename in links) for item in members],
                 _comicinfo_bytes_zip(archive, members),
             )
     except (OSError, ValueError, zipfile.BadZipFile, UnsafeArchive, ComicInfoError) as exc:
@@ -65,20 +66,29 @@ def inspect_cbr(path: Path, limits: ArchiveLimits) -> InspectionResult:
             encrypted = {item.filename for item in members if item.needs_password()}
             validate_inventory(members, limits, link_names=links, encrypted_names=encrypted)
             comicinfo = _comicinfo_bytes_rar(archive, members)
-            return _comic_result(SourceFormat.CBR, [item.filename for item in members], comicinfo)
+            return _comic_result(
+                SourceFormat.CBR,
+                [_inventory_item(item, item.filename in links) for item in members],
+                comicinfo,
+            )
     except (OSError, ValueError, rarfile.Error, UnsafeArchive, ComicInfoError) as exc:
         return _failed(SourceFormat.CBR, "invalid_cbr", exc)
 
 
 def _comic_result(
-    format_: SourceFormat, names: list[str], comicinfo: bytes | None
+    format_: SourceFormat, inventory: list[dict[str, object]], comicinfo: bytes | None
 ) -> InspectionResult:
+    names = [str(item["path"]) for item in inventory]
     images = [
         name
         for name in names
         if Path(name).suffix.casefold() in {".jpg", ".jpeg", ".png", ".webp", ".gif"}
     ]
-    metadata: dict[str, object] = {"entry_count": len(names), "page_count": len(images)}
+    metadata: dict[str, object] = {
+        "entry_count": len(names),
+        "page_count": len(images),
+        "inventory": inventory,
+    }
     warnings: list[str] = []
     evidence: list[Evidence] = []
     if comicinfo is not None:
@@ -121,6 +131,16 @@ def _failed(format_: SourceFormat, code: str, exc: Exception) -> InspectionResul
         error_code=code,
         error_message=f"{type(exc).__name__}: {exc}",
     )
+
+
+def _inventory_item(item: Any, is_link: bool) -> dict[str, object]:
+    return {
+        "path": str(item.filename).replace("\\", "/"),
+        "size": int(item.file_size),
+        "compressed_size": int(item.compress_size),
+        "is_directory": bool(item.is_dir()),
+        "is_link": is_link,
+    }
 
 
 @lru_cache(maxsize=1)
