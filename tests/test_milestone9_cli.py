@@ -8,9 +8,10 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
+import kavita_ingest.cli as cli_module
 from kavita_ingest import __version__
 from kavita_ingest.cli import OUTPUT_VERSION, app
-from kavita_ingest.config import load_config
+from kavita_ingest.config import AppConfig, load_config
 from kavita_ingest.db import connect
 from kavita_ingest.plan_store import PlanStore
 from tests.apply_helpers import ApplyFixture, make_apply_fixture
@@ -137,6 +138,22 @@ def test_version_help_bare_non_tty_help_and_versioned_json(tmp_path: Path) -> No
         app, ["audit", str(incoming), "--json", "--config", str(config)]
     )
     assert json.loads(audited.stdout)["command"] == "audit"
+
+
+def test_bare_tty_launches_the_same_wizard_as_explicit_command(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[AppConfig] = []
+    settings = AppConfig()
+    monkeypatch.setattr(cli_module, "_interactive_terminal", lambda: True)
+    monkeypatch.setattr(cli_module, "load_config", lambda *args, **kwargs: settings)
+    monkeypatch.setattr(cli_module, "configure_logging", lambda *args, **kwargs: None)
+    monkeypatch.setattr(cli_module, "run_wizard", lambda config, **kwargs: calls.append(config))
+
+    result = CliRunner().invoke(app, [])
+
+    assert result.exit_code == 0, result.output
+    assert calls == [settings]
 
 
 @pytest.mark.parametrize(

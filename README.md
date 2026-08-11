@@ -142,12 +142,25 @@ never prints values. Provider cache and durable rate-limit state live in SQLite.
 
 ## Workflow
 
-Run the guided workflow with `kavita-ingest wizard` (or bare `kavita-ingest` in
-an interactive terminal). It summarizes configuration and preflight, discovers
-and audits sources, guides explicit review, creates and displays the immutable
-plan, binds approval to its full digest, and asks separately before apply. Draft,
-approved, and interrupted apply state is detected from SQLite on restart. Bare
-invocation in a pipe or other non-interactive session prints deterministic help.
+For normal interactive use, start with:
+
+```bash
+kavita-ingest
+```
+
+The state-aware home screen shows configured paths and lifecycle. With one valid
+incoming root, Enter begins immediately; source selection can still be changed.
+The wizard performs preflight and discovery, presents compact review controls,
+offers human metadata and technical immutable-plan views, binds approval to the
+exact persisted digest, and asks separately before apply. It finishes with
+verified publication and source-lifecycle results.
+
+`kavita-ingest wizard` is the explicit equivalent. Draft plans, approved
+unapplied plans, unresolved review, accepted decisions awaiting a plan, and
+interrupted apply state are detected from SQLite on restart. Accepted reviewed
+state resumes directly into offline planning without repeating provider work.
+Recovery-required state takes priority over starting new work. Bare invocation
+in a pipe or other non-interactive session prints deterministic help.
 
 Every operation remains available as a scriptable subcommand:
 
@@ -216,6 +229,11 @@ comic run-group decision invalidates affected plans; a newer unapplied plan for
 the same source supersedes the older one. Apply has no flag that manufactures
 approval or reinterprets the plan using current provider data.
 
+Plans created with planning-policy version 1 remain readable, exportable and
+reportable as history, but cannot be newly approved or applied. Those plans did
+not freeze publication file/directory modes and must be regenerated with the
+current policy rather than silently acquiring `0644`/`0755` semantics later.
+
 `plan import FILE` is the advanced path for an already canonical, schema-valid
 plan document. It always creates an unapproved draft and does not replace the
 normal scan-review-create workflow.
@@ -280,6 +298,11 @@ case when an unchanged destination and a proven preserved/archived original
 exist. It refuses changed destinations and explains when `move_after_verify`
 deleted the only original. Transformed EPUB/PDF/CBZ output cannot recreate an
 original CBR or original metadata bytes.
+
+Normal `kavita-ingest status` reports the last ingest, recovery state, reviewed
+items, active draft/approved plans and the next useful action. Raw table counters
+remain available with `status --metrics`; additional plan-state counts use
+`status --details`, and stable machine output remains available with `--json`.
 
 ## JSON and logging
 

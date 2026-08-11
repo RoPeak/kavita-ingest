@@ -22,7 +22,7 @@ from .matching import CandidateScore, usable_identity_scores
 from .paths import AppPaths
 from .plan_store import PlanStore
 from .planning_service import PlanBuilder
-from .presentation import render_plan_summary
+from .presentation import render_human_status, render_plan_summary
 from .providers.models import NormalizedCandidate, ProviderName, RecordType
 from .review import interactive_review
 from .rollback import preview_rollback
@@ -45,6 +45,10 @@ def _version_callback(value: bool) -> None:
     if value:
         typer.echo(f"kavita-ingest {__version__}")
         raise typer.Exit()
+
+
+def _interactive_terminal() -> bool:
+    return sys.stdin.isatty() and sys.stdout.isatty()
 
 
 @app.callback(invoke_without_command=True)
@@ -70,7 +74,7 @@ def main(
     del version
     set_console_verbosity(verbose=verbose, debug=debug)
     if context.invoked_subcommand is None:
-        if not sys.stdin.isatty() or not sys.stdout.isatty():
+        if not _interactive_terminal():
             typer.echo(context.get_help())
             return
         settings = load_config()
@@ -267,6 +271,9 @@ def status(
     metrics: Annotated[
         bool, typer.Option("--metrics", help="Show raw persisted table counts.")
     ] = False,
+    details: Annotated[
+        bool, typer.Option("--details", help="Show additional plan-state detail.")
+    ] = False,
 ) -> None:
     """Show persisted matching and decision counts without network access."""
     settings = load_config(config)
@@ -303,10 +310,10 @@ def status(
                 typer.echo(f"{table:20} {count}")
         else:
             state = detect_resume_state(settings)
-            typer.echo("Kavita Ingest state")
-            typer.echo(f"Reviewed decisions: {counts['decisions']}")
-            typer.echo(f"Plans: {counts['plans']}  Apply runs: {counts['apply_runs']}")
-            typer.echo(f"Next: {state.detail if state else 'start a new guided ingest'}")
+            next_action = state.action_label if state else "Start a new guided ingest"
+            render_human_status(
+                connection, Console(), next_action=next_action, details=details
+            )
     finally:
         connection.close()
 

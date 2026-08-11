@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from typer.testing import CliRunner
 
 from kavita_ingest.apply_engine import ApplyEngine, InjectedCrash
 from kavita_ingest.cli import app
+from kavita_ingest.config import load_config
 from kavita_ingest.db import connect
 from kavita_ingest.plan_store import PlanStore
 from kavita_ingest.wizard import detect_resume_state
@@ -41,11 +43,11 @@ def test_wizard_resumes_draft_and_binds_full_digest_without_applying(tmp_path: P
     fixture = make_apply_fixture(tmp_path, "cbz", lifecycle="preserve", approve=False)
     config = _config(tmp_path, fixture)
 
-    result = CliRunner().invoke(app, ["wizard", "--config", str(config)], input="y\ny\nn\n")
+    result = CliRunner().invoke(app, ["wizard", "--config", str(config)], input="r\na\nn\n")
 
     assert result.exit_code == 0, result.output
-    assert "Resume available" in result.output
-    assert "full digest was bound internally" in result.output
+    assert "A draft plan is ready to review" in result.output
+    assert "exact displayed plan digest is now locked" in result.output
     with connect(fixture.config.database_path) as connection:  # type: ignore[arg-type]
         plan = PlanStore(connection).get(fixture.plan_id)
     assert plan.status == "approved" and plan.approval_digest == plan.sha256
@@ -55,7 +57,7 @@ def test_wizard_resumes_draft_and_binds_full_digest_without_applying(tmp_path: P
 def test_wizard_resumes_approved_plan_without_reapproval(tmp_path: Path) -> None:
     fixture = make_apply_fixture(tmp_path, "cbz", lifecycle="preserve")
     result = CliRunner().invoke(
-        app, ["wizard", "--config", str(_config(tmp_path, fixture))], input="y\nn\n"
+        app, ["wizard", "--config", str(_config(tmp_path, fixture))], input="r\nn\n"
     )
     assert result.exit_code == 0, result.output
     assert "Approve this exact" not in result.output
@@ -70,10 +72,10 @@ def test_wizard_applies_approved_comic_and_work_only_epub_with_production_engine
         tmp_path, media_format, lifecycle="preserve", work_only=work_only
     )
     result = CliRunner().invoke(
-        app, ["wizard", "--config", str(_config(tmp_path, fixture))], input="y\ny\n"
+        app, ["wizard", "--config", str(_config(tmp_path, fixture))], input="r\ny\nq\n"
     )
     assert result.exit_code == 0, result.output
-    assert "Status: complete" in result.output
+    assert "Ingest complete" in result.output
     assert fixture.source.exists() and fixture.destination.exists()
 
 
@@ -88,10 +90,10 @@ def test_wizard_makes_recovery_prominent_and_uses_existing_engine(tmp_path: Path
     with pytest.raises(InjectedCrash):
         ApplyEngine(fixture.config, fault=crash).apply(fixture.plan_id)
     result = CliRunner().invoke(
-        app, ["wizard", "--config", str(_config(tmp_path, fixture))], input="y\ny\n"
+        app, ["wizard", "--config", str(_config(tmp_path, fixture))], input="r\ny\nq\n"
     )
     assert result.exit_code == 0, result.output
-    assert "incomplete apply" in result.output and "Status: complete" in result.output
+    assert "interrupted ingest" in result.output and "Ingest complete" in result.output
     assert fixture.destination.exists()
 
 
@@ -143,10 +145,173 @@ enabled = false
     )
 
     result = CliRunner().invoke(
-        app, ["wizard", "--config", str(config)], input="y\ny\nu\n"
+        app, ["wizard", "--config", str(config)], input="\nu\n"
     )
 
     assert result.exit_code == 0, result.output
-    assert "Provider availability affected" in result.output
+    assert "Provider problems" in result.output
     assert "No plan was created" in result.output
     assert "Review remains saved" in result.output
+
+
+def test_reviewed_decision_without_plan_resumes_directly_to_offline_planning(
+    tmp_path: Path,
+) -> None:
+    incoming = tmp_path / "incoming"
+    books = tmp_path / "books"
+    comics = tmp_path / "comics"
+    for directory in (incoming, books, comics):
+        directory.mkdir()
+    with zipfile.ZipFile(incoming / "Watchmen 001.cbz", "w") as archive:
+        archive.writestr("001.jpg", b"page")
+    config = tmp_path / "reviewed.toml"
+    config.write_text(
+        f'''[paths]
+database = "{tmp_path / 'state.sqlite3'}"
+incoming = ["{incoming}"]
+books = "{books}"
+comics = "{comics}"
+
+[source]
+lifecycle = "preserve"
+
+[providers]
+offline = true
+[providers.open_library]
+enabled = false
+[providers.google_books]
+enabled = false
+[providers.comic_vine]
+enabled = false
+''',
+        encoding="utf-8",
+    )
+    reviewed = CliRunner().invoke(
+        app,
+        ["review", str(incoming), "--config", str(config)],
+        input="i\nWatchmen\nAt Midnight\nissue\n1\n1986\n",
+    )
+    assert reviewed.exit_code == 0, reviewed.output
+    state = detect_resume_state(load_config(config))
+    assert state is not None and state.kind == "reviewed" and state.item_count == 1
+
+    resumed = CliRunner().invoke(
+        app, ["wizard", "--config", str(config)], input="r\nq\n"
+    )
+    assert resumed.exit_code == 0, resumed.output
+    assert "providers will not be queried again" in resumed.output
+    assert "Draft plan saved" in resumed.output
+    with connect(tmp_path / "state.sqlite3") as connection:
+        assert connection.execute("SELECT count(*) FROM plans").fetchone()[0] == 1
+
+
+def test_fresh_wizard_has_one_start_action_and_full_human_review_flow(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fixture = make_apply_fixture(tmp_path, "cbz", lifecycle="preserve", approve=False)
+    config = _config(tmp_path, fixture)
+    with connect(fixture.config.database_path) as connection:  # type: ignore[arg-type]
+        stored = PlanStore(connection).get(fixture.plan_id)
+    audit = SimpleNamespace(
+        items=(object(),),
+        summary={
+            "sources": 1,
+            "eligible_high_confidence": 1,
+            "review_required": 0,
+            "unresolved": 0,
+            "provider_unavailable": 0,
+            "partial_provider_unavailable": 0,
+        },
+    )
+    build = SimpleNamespace(
+        accepted_included=1,
+        unapproved_excluded=0,
+        unresolved_blocked=0,
+        skipped=0,
+        exclusions=(),
+    )
+    monkeypatch.setattr("kavita_ingest.wizard.detect_resume_state", lambda _: None)
+    monkeypatch.setattr("kavita_ingest.wizard._preflight", lambda *args: None)
+    monkeypatch.setattr("kavita_ingest.wizard.run_audit", lambda *args, **kwargs: audit)
+    monkeypatch.setattr("kavita_ingest.wizard.interactive_review", lambda *args, **kwargs: audit)
+    monkeypatch.setattr("kavita_ingest.wizard._create_plan", lambda *args: (stored, build))
+
+    result = CliRunner().invoke(
+        app,
+        ["wizard", "--config", str(config)],
+        input="\nv\nt\na\ny\nq\n",
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Start a new guided ingest?" not in result.output
+    assert "Use configured incoming root" not in result.output
+    assert "Ready to confirm     1" in result.output
+    assert "Metadata and output" in result.output
+    assert "Full SHA-256" in result.output
+    assert "exact displayed plan digest is now locked" in result.output
+    assert "Ingest complete" in result.output
+    assert fixture.source.exists() and fixture.destination.exists()
+
+
+def test_human_status_summarizes_last_ingest_and_next_action(tmp_path: Path) -> None:
+    fixture = make_apply_fixture(tmp_path, "cbz", lifecycle="preserve")
+    ApplyEngine(fixture.config).apply(fixture.plan_id)
+
+    result = CliRunner().invoke(
+        app, ["status", "--config", str(_config(tmp_path, fixture))]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Last ingest" in result.output
+    assert "1 item completed" in result.output
+    assert "No recovery required" in result.output
+    assert "Draft plans          0" in result.output
+    assert "Approved plans       0" in result.output
+    assert "Start a new guided ingest" in result.output
+
+
+def test_disposable_fresh_wizard_smoke_publishes_with_safe_mode(tmp_path: Path) -> None:
+    incoming = tmp_path / "incoming"
+    books = tmp_path / "books"
+    comics = tmp_path / "comics"
+    for directory in (incoming, books, comics):
+        directory.mkdir()
+    source = incoming / "Watchmen 001.cbz"
+    with zipfile.ZipFile(source, "w") as archive:
+        archive.writestr("001.jpg", b"page-one")
+        archive.writestr("002.jpg", b"page-two")
+    config = tmp_path / "smoke.toml"
+    config.write_text(
+        f'''[paths]
+database = "{tmp_path / 'state.sqlite3'}"
+incoming = ["{incoming}"]
+books = "{books}"
+comics = "{comics}"
+
+[source]
+lifecycle = "preserve"
+
+[providers]
+offline = true
+[providers.open_library]
+enabled = false
+[providers.google_books]
+enabled = false
+[providers.comic_vine]
+enabled = false
+''',
+        encoding="utf-8",
+    )
+
+    result = CliRunner().invoke(
+        app,
+        ["wizard", "--config", str(config)],
+        input="\ni\nWatchmen\nAt Midnight\nissue\n1\n1986\nv\na\ny\nq\n",
+    )
+
+    destination = comics / "Watchmen (1986)" / "Watchmen (1986) - 001 - At Midnight.cbz"
+    assert result.exit_code == 0, result.output
+    assert "[1/7] Preflight" in result.output and "[7/7] Finish" in result.output
+    assert "Metadata and output" in result.output and "Ingest complete" in result.output
+    assert source.exists() and destination.exists()
+    assert destination.stat().st_mode & 0o777 == 0o644

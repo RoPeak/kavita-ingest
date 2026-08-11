@@ -22,12 +22,17 @@ both originals with the `preserve` lifecycle.
 The guided path is recommended for normal use:
 
 ```bash
-kavita-ingest wizard
+kavita-ingest
 ```
 
-It still requires an explicit identity decision, exact-plan approval, and a
-separate apply confirmation. Quit after plan creation for a plan-only review,
-then rerun the wizard to resume the saved draft or approved plan.
+Press Enter on the home screen to use the single configured incoming root. The
+wizard still requires an explicit identity decision, offers human metadata and
+technical plan inspection, binds approval to the exact persisted plan, and asks
+separately before apply. Quit after plan creation for a plan-only review, then
+rerun it to resume the saved draft or approved plan. Accepted decisions saved
+before plan creation also resume without repeating provider searches.
+
+`kavita-ingest wizard` launches the same guided experience explicitly.
 
 The equivalent granular path remains available:
 
@@ -42,6 +47,10 @@ kavita-ingest apply-status PLAN_ID
 Use `apply-status PLAN_ID --details` when diagnosing an interrupted item. If the
 wizard reports recovery-required state, review its durable status before
 confirming recovery; do not start a new plan to bypass that state.
+
+Historical plans that report planning-policy version 1 must be regenerated
+before approval or application. They remain inspectable history, but lack the
+immutable publication-permission policy required by current apply safety.
 
 - [ ] Confirm both original incoming files still exist unchanged.
 - [ ] Open the resulting EPUB and CBZ independently.

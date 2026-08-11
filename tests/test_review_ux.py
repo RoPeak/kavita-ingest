@@ -169,6 +169,46 @@ def test_batch_items_and_prompt_use_same_eligible_subset(tmp_path: Path) -> None
     assert "[B]atch" in _action_prompt(audit.items[0], audit)
 
 
+def test_wizard_review_uses_compact_primary_actions_and_more_reveals_advanced(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database = tmp_path / "state.sqlite3"
+    migrate(database)
+    audit = _audit(tmp_path, eligible=True)
+    compact = _action_prompt(audit.items[0], audit, wizard_mode=True)
+    assert "[A] Accept" in compact and "[V] View why" in compact
+    assert "[M] More actions" in compact
+    assert "[E]dit" not in compact and "[G]roup-run" not in compact
+
+    answers = iter(["M", "Q"])
+    monkeypatch.setattr("kavita_ingest.review.typer.prompt", lambda *args, **kwargs: next(answers))
+    output = io.StringIO()
+    interactive_review(
+        tmp_path,
+        AppConfig(database_path=database, providers=ProviderSettings(offline=True)),
+        Console(file=output, force_terminal=False),
+        audit_result=audit,
+        wizard_mode=True,
+    )
+    text = output.getvalue()
+    assert "Advanced review actions are now available" in text
+    advanced = _action_prompt(audit.items[0], audit)
+    assert "[E]dit" in advanced and "[G]roup-run" in advanced
+
+
+def test_wizard_review_labels_local_run_evidence_without_confusing_provider_data(
+    tmp_path: Path,
+) -> None:
+    audit = _audit(tmp_path)
+    output = io.StringIO()
+    from kavita_ingest.review import _show_item
+
+    _show_item(Console(file=output, force_terminal=False), audit.items[0], 1)
+    text = output.getvalue()
+    assert "Local run-start evidence: none" in text
+    assert "start 1986" in text
+
+
 def test_search_with_only_unusable_candidates_stays_operable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

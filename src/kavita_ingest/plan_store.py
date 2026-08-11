@@ -8,7 +8,14 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from .planning import PlanDocument, destination_from_item, validate_plan_payload
+from .planning import (
+    LEGACY_POLICY_MESSAGE,
+    PlanDocument,
+    destination_from_item,
+    planning_policy_version,
+    require_current_planning_policy,
+    validate_plan_payload,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -82,6 +89,11 @@ class PlanStore:
         if superseded:
             raise ValueError(f"superseded plan cannot be approved; use plan {superseded[0]}")
         document = validate_plan_payload(plan.canonical_json)
+        try:
+            require_current_planning_policy(document)
+        except ValueError as exc:
+            self._mark_incompatible(plan_id, LEGACY_POLICY_MESSAGE)
+            raise ValueError(LEGACY_POLICY_MESSAGE) from exc
         if document.get("conflicts") or any(item.get("blocked") for item in document["items"]):
             raise ValueError("plans with unresolved conflicts cannot be approved")
         approved_at = datetime.now(UTC).isoformat()
@@ -95,6 +107,18 @@ class PlanStore:
         self.connection.commit()
         LOGGER.info("approved immutable plan=%s digest=%s", plan_id, digest[:12])
         return self.get(plan_id)
+
+    def policy_version(self, plan_id: int) -> int | None:
+        plan = self.get(plan_id)
+        return planning_policy_version(validate_plan_payload(plan.canonical_json))
+
+    def _mark_incompatible(self, plan_id: int, reason: str) -> None:
+        self.connection.execute(
+            "INSERT OR IGNORE INTO plan_invalidations(plan_id, reason, invalidated_at) "
+            "VALUES (?, ?, ?)",
+            (plan_id, reason, datetime.now(UTC).isoformat()),
+        )
+        self.connection.commit()
 
     def export(self, plan_id: int, destination: Path) -> None:
         plan = self.get(plan_id)

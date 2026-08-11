@@ -41,6 +41,7 @@ def interactive_review(
     console: Console | None = None,
     *,
     audit_result: AuditResult | None = None,
+    wizard_mode: bool = False,
 ) -> AuditResult:
     output = console or Console()
     audit = audit_result or run_audit(root, config, mode="review")
@@ -56,16 +57,23 @@ def interactive_review(
     try:
         for item in audit.items:
             current = item
+            advanced = not wizard_mode
             selected_rank = (
                 _displayed_scores(current)[0].rank if _displayed_scores(current) else None
             )
             decided = False
             while True:
-                _show_item(output, current, selected_rank)
-                prompt = _action_prompt(current, audit)
+                _show_item(output, current, selected_rank, compact=wizard_mode and not advanced)
+                prompt = _action_prompt(current, audit, wizard_mode=wizard_mode and not advanced)
                 action = typer.prompt(prompt, default="N").strip().upper()
                 displayed = _displayed_scores(current)
                 selected = next((score for score in displayed if score.rank == selected_rank), None)
+                if action == "M" and wizard_mode:
+                    advanced = True
+                    output.print("Advanced review actions are now available for this item.")
+                    continue
+                if action == "V":
+                    action = "X"
                 if action.isdigit() and any(score.rank == int(action) for score in displayed):
                     selected_rank = int(action)
                     continue
@@ -377,7 +385,9 @@ def _show_hydrated_metadata(output: Console, result: HydrationResult) -> None:
         output.print(f"  {role}: {', '.join(dict.fromkeys(names))}")
 
 
-def _show_item(console: Console, item: ReviewItem, selected_rank: int | None) -> None:
+def _show_item(
+    console: Console, item: ReviewItem, selected_rank: int | None, *, compact: bool = False
+) -> None:
     console.rule(item.scan.source.path.name)
     console.print(
         f"Path: {item.scan.source.path}\n"
@@ -385,12 +395,16 @@ def _show_item(console: Console, item: ReviewItem, selected_rank: int | None) ->
         f"({item.local.classification_confidence:.2f})"
     )
     if item.local.kind.value == "comic":
-        console.print(
+        local_evidence = (
             f"Series: {item.local.series_title or item.local.title}\n"
-            f"Issue: {item.local.sequence.normalized if item.local.sequence else 'unresolved'}\n"
-            f"Publication year evidence: {item.local.year or 'unresolved'}\n"
-            f"Run start: {item.local.run_start_year or 'unresolved'}"
+            f"Issue: {item.local.sequence.normalized if item.local.sequence else 'unresolved'}"
         )
+        if not compact:
+            local_evidence += (
+                f"\nLocal publication-year evidence: {item.local.year or 'none'}\n"
+                f"Local run-start evidence: {item.local.run_start_year or 'none'}"
+            )
+        console.print(local_evidence)
         table = Table(
             "",
             "Rank",
@@ -445,8 +459,27 @@ def _displayed_scores(item: ReviewItem) -> list[CandidateScore]:
     return usable_identity_scores(item.scores)[:9]
 
 
-def _action_prompt(item: ReviewItem, audit: AuditResult) -> str:
+def _action_prompt(
+    item: ReviewItem, audit: AuditResult, *, wizard_mode: bool = False
+) -> str:
     displayed = _displayed_scores(item)
+    if wizard_mode:
+        if displayed:
+            actions = ["[A] Accept", "[V] View why"]
+            if len(displayed) > 1 or not displayed[0].eligible:
+                actions.append("[C] Choose candidate")
+            actions.extend(["[N] Next", "[M] More actions", "[Q] Save and quit"])
+            return "  ".join(actions)
+        return "  ".join(
+            [
+                "[S] Search",
+                "[I] Enter identity",
+                "[U] Unresolved",
+                "[N] Next",
+                "[M] More actions",
+                "[Q] Save and quit",
+            ]
+        )
     actions = ["[N]ext source"]
     if len(_batch_items(audit)) > 0:
         actions.append("[B]atch")

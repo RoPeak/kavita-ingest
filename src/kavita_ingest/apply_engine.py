@@ -29,7 +29,12 @@ from .db import connect, migrate
 from .filesystem import DestinationExists, LinuxFilesystem, NoClobberFilesystem, sha256_file
 from .locking import ProcessLock, lock_path
 from .plan_store import PlanStore, StoredPlan
-from .planning import SUPPORTED_PLAN_SCHEMA_VERSIONS, validate_plan_payload
+from .planning import (
+    LEGACY_POLICY_MESSAGE,
+    SUPPORTED_PLAN_SCHEMA_VERSIONS,
+    require_current_planning_policy,
+    validate_plan_payload,
+)
 from .writers.comic import verify_cbz, write_cbz_metadata
 from .writers.common import VerificationResult
 from .writers.epub import CALIBRE_FIELDS, verify_epub, write_epub
@@ -381,6 +386,16 @@ class ApplyEngine:
                 f"plan run-group precondition is stale for item {stale_run[0]}; create a new plan"
             )
         document = validate_plan_payload(plan.canonical_json)
+        try:
+            require_current_planning_policy(document)
+        except ValueError as exc:
+            connection.execute(
+                "INSERT OR IGNORE INTO plan_invalidations(plan_id, reason, invalidated_at) "
+                "VALUES (?, ?, datetime('now'))",
+                (plan_id, LEGACY_POLICY_MESSAGE),
+            )
+            connection.commit()
+            raise ApplyRefused(LEGACY_POLICY_MESSAGE) from exc
         if document.get("conflicts"):
             raise ApplyRefused("plan has unresolved plan-level conflicts")
         if any(item.get("blocked") or item.get("conflicts") for item in document["items"]):
@@ -1117,8 +1132,8 @@ def _publication_modes(item: dict[str, Any]) -> tuple[int, int]:
     policy = item.get("planning_policy", {})
     version = policy.get("version", 1) if isinstance(policy, dict) else 1
     permissions = policy.get("permissions", {}) if isinstance(policy, dict) else {}
-    if version == 1:
-        return 0o644, 0o755
+    if version != 2:
+        raise ApplyRefused(LEGACY_POLICY_MESSAGE)
     if not isinstance(permissions, dict):
         raise ApplyRefused("immutable planning policy lacks publication permissions")
     try:

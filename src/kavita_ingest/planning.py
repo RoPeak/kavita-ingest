@@ -15,6 +15,12 @@ from .projection import KavitaProjection
 
 PLAN_SCHEMA_VERSION = 2
 SUPPORTED_PLAN_SCHEMA_VERSIONS = {1, PLAN_SCHEMA_VERSION}
+CURRENT_PLANNING_POLICY_VERSION = 2
+LEGACY_POLICY_MESSAGE = (
+    "This plan was created with an older planning-policy version and does not contain "
+    "publication-permission policy. Regenerate the plan with the current version before "
+    "applying."
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -26,7 +32,7 @@ class PlanningPolicySnapshot:
     archive_limits: ArchiveLimits
     published_file_mode: int = 0o644
     created_directory_mode: int = 0o755
-    version: int = 2
+    version: int = CURRENT_PLANNING_POLICY_VERSION
     projection_policy_version: int = 1
 
     def to_dict(self) -> dict[str, Any]:
@@ -334,6 +340,18 @@ def validate_plan_payload(payload: bytes) -> dict[str, Any]:
 def destination_from_item(item: dict[str, Any]) -> PurePosixPath | None:
     projection = item.get("kavita_projection")
     return PurePosixPath(projection["destination"]) if isinstance(projection, dict) else None
+
+
+def planning_policy_version(document: dict[str, Any]) -> int | None:
+    policy = document.get("planning_policy")
+    if not isinstance(policy, dict) or not isinstance(policy.get("version"), int):
+        return None
+    return int(policy["version"])
+
+
+def require_current_planning_policy(document: dict[str, Any]) -> None:
+    if planning_policy_version(document) != CURRENT_PLANNING_POLICY_VERSION:
+        raise ValueError(LEGACY_POLICY_MESSAGE)
 
 
 def _validate_permission_value(value: object, *, directory: bool) -> None:
