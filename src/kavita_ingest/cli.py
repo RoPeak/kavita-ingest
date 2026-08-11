@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import sys
 from dataclasses import asdict
 from pathlib import Path
 from typing import Annotated
 
 import typer
+from rich.console import Console
 
 from . import __version__
 from .apply_engine import ApplyEngine, ApplyPreview, ApplyRefused, ApplySummary
@@ -20,11 +22,13 @@ from .matching import CandidateScore, usable_identity_scores
 from .paths import AppPaths
 from .plan_store import PlanStore
 from .planning_service import PlanBuilder
+from .presentation import render_plan_summary
 from .providers.models import NormalizedCandidate, ProviderName, RecordType
 from .review import interactive_review
 from .rollback import preview_rollback
 from .run_groups import RunGroupRepository
 from .scanner import scan as run_scan
+from .wizard import detect_resume_state, run_wizard
 
 app = typer.Typer(
     help="Inspect, plan, and safely execute explicitly approved reading-media ingestion."
@@ -66,7 +70,32 @@ def main(
     del version
     set_console_verbosity(verbose=verbose, debug=debug)
     if context.invoked_subcommand is None:
-        _workflow_menu()
+        if not sys.stdin.isatty() or not sys.stdout.isatty():
+            typer.echo(context.get_help())
+            return
+        settings = load_config()
+        configure_logging(
+            settings.log_level,
+            _log_file(settings),
+            secrets=provider_secrets(settings),
+        )
+        run_wizard(settings)
+
+
+@app.command()
+def wizard(
+    config: Annotated[
+        Path | None, typer.Option("--config", help="TOML configuration path.")
+    ] = None,
+) -> None:
+    """Run the resumable guided ingest workflow."""
+    settings = load_config(config)
+    configure_logging(
+        settings.log_level,
+        _log_file(settings),
+        secrets=provider_secrets(settings),
+    )
+    run_wizard(settings, config_path=config)
 
 
 @app.command("init")
@@ -235,6 +264,9 @@ def status(
         Path | None, typer.Option("--config", help="TOML configuration path.")
     ] = None,
     as_json: Annotated[bool, typer.Option("--json", help="Emit versioned JSON.")] = False,
+    metrics: Annotated[
+        bool, typer.Option("--metrics", help="Show raw persisted table counts.")
+    ] = False,
 ) -> None:
     """Show persisted matching and decision counts without network access."""
     settings = load_config(config)
@@ -266,9 +298,15 @@ def status(
             counts[table] = int(count)
         if as_json:
             _emit_json("status", {"database_exists": True, "counts": counts})
-        else:
+        elif metrics:
             for table, count in counts.items():
                 typer.echo(f"{table:20} {count}")
+        else:
+            state = detect_resume_state(settings)
+            typer.echo("Kavita Ingest state")
+            typer.echo(f"Reviewed decisions: {counts['decisions']}")
+            typer.echo(f"Plans: {counts['plans']}  Apply runs: {counts['apply_runs']}")
+            typer.echo(f"Next: {state.detail if state else 'start a new guided ingest'}")
     finally:
         connection.close()
 
@@ -372,6 +410,9 @@ def apply_status_command(
     plan_id: int,
     config: Annotated[Path | None, typer.Option("--config")] = None,
     as_json: Annotated[bool, typer.Option("--json", help="Emit versioned JSON.")] = False,
+    details: Annotated[
+        bool, typer.Option("--details", help="Show per-item recovery evidence.")
+    ] = False,
 ) -> None:
     """Show durable apply/recovery state without touching media or providers."""
     try:
@@ -401,6 +442,9 @@ def apply_status_command(
         typer.echo(f"Plan: {summary.plan_id}\nApply run: {summary.run_id}\n")
         for label, count in _friendly_counts(summary.counts).items():
             typer.echo(f"{label:22} {count}")
+        if not details:
+            typer.echo("Use --details for per-item hashes and recovery evidence.")
+            return
         for item in inspections:
             staging_exists = bool(item.staging and Path(item.staging).exists())
             typer.echo(f"\n{item.item_id}: last durable state={item.state.value}")
@@ -522,9 +566,7 @@ def plan_show(
                 payload["document"] = json.loads(plan.canonical_json)
             _emit_json("plan-show", payload)
             return
-        typer.echo(
-            f"plan={plan.id} status={plan.status} sha256={plan.sha256} bytes={plan.byte_length}"
-        )
+        render_plan_summary(plan, Console())
         if invalidated:
             typer.echo(f"invalidated={invalidated['reason']} at {invalidated['invalidated_at']}")
         if superseded:
@@ -532,6 +574,7 @@ def plan_show(
                 f"superseded_by={superseded['new_plan_id']} at {superseded['superseded_at']}"
             )
         if not summary_only:
+            typer.echo(f"Full sha256: {plan.sha256}")
             typer.echo(plan.canonical_json.decode("utf-8"))
     except (KeyError, ValueError, RuntimeError) as exc:
         _expected_error(exc, hint="Use `kavita-ingest plan list` to see available plans.")
@@ -765,58 +808,6 @@ def _evidence_label(exists: bool, matches: bool | None) -> str:
     if matches is False:
         return "present, HASH MISMATCH"
     return "present, no durable hash available"
-
-
-def _workflow_menu() -> None:
-    typer.echo("Kavita Ingest\n")
-    typer.echo("[1] Scan incoming media")
-    typer.echo("[2] Audit / match metadata")
-    typer.echo("[3] Review identities")
-    typer.echo("[4] Create / inspect ingestion plan")
-    typer.echo("[5] Approve plan")
-    typer.echo("[6] Apply approved plan")
-    typer.echo("[7] Status / recovery")
-    typer.echo("[8] Doctor")
-    typer.echo("[Q] Quit")
-    choice = typer.prompt("Select", default="Q").strip().casefold()
-    if choice == "q":
-        return
-    if choice in {"1", "2", "3"}:
-        root = Path(typer.prompt("Incoming directory")).expanduser().resolve()
-        if choice == "1":
-            scan(root, config=None, no_persist=False, as_json=False)
-        elif choice == "2":
-            audit_command(root, config=None, details=False, metrics=False, as_json=False)
-        else:
-            review_command(root, config=None)
-        return
-    if choice == "4":
-        root = Path(typer.prompt("Reviewed incoming directory")).expanduser().resolve()
-        plan_create(root, config=None, name=None, as_json=False)
-        return
-    if choice == "5":
-        plan_id = typer.prompt("Plan ID", type=int)
-        digest = typer.prompt("Exact displayed SHA-256 digest")
-        plan_approve(plan_id, digest=digest, config=None)
-        return
-    if choice == "6":
-        plan_id = typer.prompt("Approved plan ID", type=int)
-        engine = _apply_engine(None)
-        _echo_apply_preview(engine.preview(plan_id))
-        if typer.confirm("Execute this approved immutable plan?", default=False):
-            _echo_apply_summary(engine.apply(plan_id))
-        return
-    if choice == "7":
-        plan_id = typer.prompt("Plan ID", type=int)
-        apply_status_command(plan_id, config=None, as_json=False)
-        if typer.confirm("Attempt safe recovery for this plan?", default=False):
-            recover_command(plan_id, config=None, as_json=False)
-        return
-    if choice == "8":
-        doctor(config=None, as_json=False)
-        return
-    typer.echo("Unknown selection.", err=True)
-    raise typer.Exit(2)
 
 
 if __name__ == "__main__":

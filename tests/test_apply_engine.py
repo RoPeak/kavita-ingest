@@ -464,3 +464,50 @@ def test_journal_uses_full_synchronous_durability(tmp_path: Path) -> None:
     with connect(fixture.config.database_path) as connection:  # type: ignore[arg-type]
         JournalRepository(connection)
         assert connection.execute("PRAGMA synchronous").fetchone()[0] == 2
+
+
+def test_publication_uses_immutable_file_and_new_directory_modes(tmp_path: Path) -> None:
+    fixture = make_apply_fixture(
+        tmp_path, "cbz", lifecycle="preserve", file_mode=0o664, directory_mode=0o775
+    )
+
+    summary = ApplyEngine(fixture.config).apply(fixture.plan_id)
+
+    assert summary.status is RunState.COMPLETE
+    assert fixture.destination.stat().st_mode & 0o777 == 0o664
+    assert fixture.destination.parent.stat().st_mode & 0o777 == 0o775
+
+
+def test_existing_directory_and_source_modes_are_not_changed(tmp_path: Path) -> None:
+    fixture = make_apply_fixture(
+        tmp_path, "cbz", lifecycle="preserve", file_mode=0o644, directory_mode=0o775
+    )
+    fixture.destination.parent.mkdir(parents=True)
+    os.chmod(fixture.destination.parent, 0o700)
+    os.chmod(fixture.source, 0o600)
+
+    ApplyEngine(fixture.config).apply(fixture.plan_id)
+
+    assert fixture.destination.parent.stat().st_mode & 0o777 == 0o700
+    assert fixture.source.stat().st_mode & 0o777 == 0o600
+
+
+class ModeFailureFilesystem(LinuxFilesystem):
+    def set_file_mode(self, path: Path, mode: int) -> None:
+        del path, mode
+        raise PermissionError("synthetic chmod failure")
+
+
+def test_mode_failure_never_completes_or_removes_source_and_can_recover(
+    tmp_path: Path,
+) -> None:
+    fixture = make_apply_fixture(tmp_path, "cbz")
+    failed = ApplyEngine(fixture.config, filesystem=ModeFailureFilesystem()).apply(
+        fixture.plan_id
+    )
+    assert failed.status is RunState.RECOVERY_REQUIRED
+    assert fixture.source.exists() and not fixture.destination.exists()
+
+    recovered = ApplyEngine(fixture.config).recover(fixture.plan_id)
+    assert recovered.status is RunState.COMPLETE
+    assert fixture.destination.stat().st_mode & 0o777 == 0o644

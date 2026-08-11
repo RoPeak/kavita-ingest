@@ -189,6 +189,14 @@ def _planning_checks(config: AppConfig) -> list[Check]:
             f"total_bytes={config.archive_total_size_limit}; "
             f"depth={config.archive_path_depth_limit}; ratio={config.archive_ratio_limit:g}",
         ),
+        Check(
+            "publication",
+            "permissions",
+            "OK" if os.name == "posix" else "WARN",
+            f"new files={config.published_file_mode:04o}; "
+            f"new directories={config.created_directory_mode:04o}; "
+            "existing directories and source modes remain unchanged",
+        ),
     ]
 
 

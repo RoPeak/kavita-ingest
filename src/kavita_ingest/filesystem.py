@@ -26,7 +26,9 @@ class PublicationProbe:
 
 
 class NoClobberFilesystem(Protocol):
-    def ensure_directory(self, root: Path, directory: Path) -> None: ...
+    def ensure_directory(self, root: Path, directory: Path, mode: int = 0o755) -> None: ...
+
+    def set_file_mode(self, path: Path, mode: int) -> None: ...
 
     def make_file_durable(self, path: Path) -> None: ...
 
@@ -34,7 +36,9 @@ class NoClobberFilesystem(Protocol):
 
     def durable_unlink(self, path: Path) -> None: ...
 
-    def copy_for_archive(self, source: Path, archive: Path, expected_hash: str) -> None: ...
+    def copy_for_archive(
+        self, source: Path, archive: Path, expected_hash: str, directory_mode: int = 0o755
+    ) -> None: ...
 
     def probe_no_clobber(self, root: Path) -> PublicationProbe: ...
 
@@ -43,7 +47,7 @@ class NoClobberFilesystem(Protocol):
 class LinuxFilesystem:
     """Publish files with atomic hard-link creation and explicit durability barriers."""
 
-    def ensure_directory(self, root: Path, directory: Path) -> None:
+    def ensure_directory(self, root: Path, directory: Path, mode: int = 0o755) -> None:
         resolved_root = root.resolve(strict=True)
         try:
             relative = directory.resolve(strict=False).relative_to(resolved_root)
@@ -60,9 +64,19 @@ class LinuxFilesystem:
                         f"path component is not a directory: {child}"
                     ) from error
             else:
+                try:
+                    os.chmod(child, mode, follow_symlinks=False)
+                except OSError:
+                    child.rmdir()
+                    _fsync_directory(current)
+                    raise
                 _fsync_directory(child)
                 _fsync_directory(current)
             current = child
+
+    def set_file_mode(self, path: Path, mode: int) -> None:
+        if os.name == "posix":
+            os.chmod(path, mode, follow_symlinks=False)
 
     def make_file_durable(self, path: Path) -> None:
         _fsync_file(path)
@@ -94,8 +108,10 @@ class LinuxFilesystem:
         os.unlink(path)
         _fsync_directory(path.parent)
 
-    def copy_for_archive(self, source: Path, archive: Path, expected_hash: str) -> None:
-        _ensure_from_existing_ancestor(archive.parent)
+    def copy_for_archive(
+        self, source: Path, archive: Path, expected_hash: str, directory_mode: int = 0o755
+    ) -> None:
+        _ensure_from_existing_ancestor(archive.parent, directory_mode)
         descriptor, name = tempfile.mkstemp(
             prefix=f".{archive.name}.", suffix=".archive-stage", dir=archive.parent
         )
@@ -165,7 +181,7 @@ def _fsync_directory(path: Path) -> None:
         os.close(descriptor)
 
 
-def _ensure_from_existing_ancestor(directory: Path) -> None:
+def _ensure_from_existing_ancestor(directory: Path, mode: int) -> None:
     missing: list[Path] = []
     current = directory
     while not current.exists():
@@ -175,5 +191,11 @@ def _ensure_from_existing_ancestor(directory: Path) -> None:
         raise NotADirectoryError(f"path component is not a directory: {current}")
     for child in reversed(missing):
         child.mkdir()
+        try:
+            os.chmod(child, mode, follow_symlinks=False)
+        except OSError:
+            child.rmdir()
+            _fsync_directory(child.parent)
+            raise
         _fsync_directory(child)
         _fsync_directory(child.parent)

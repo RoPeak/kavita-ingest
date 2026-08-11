@@ -36,10 +36,14 @@ from .run_groups import RunGroupRepository, run_group_key
 
 
 def interactive_review(
-    root: Path, config: AppConfig, console: Console | None = None
+    root: Path,
+    config: AppConfig,
+    console: Console | None = None,
+    *,
+    audit_result: AuditResult | None = None,
 ) -> AuditResult:
     output = console or Console()
-    audit = run_audit(root, config, mode="review")
+    audit = audit_result or run_audit(root, config, mode="review")
     if config.database_path is None:
         raise ValueError("review requires a state database")
     connection = connect(config.database_path)
@@ -364,8 +368,13 @@ def _show_hydrated_metadata(output: Console, result: HydrationResult) -> None:
         "translator": "Translator",
         "author": "Author",
     }
+    grouped: dict[str, list[str]] = {}
     for contributor in candidate.creators:
-        output.print(f"  {labels.get(contributor.role, contributor.role)}: {contributor.name}")
+        grouped.setdefault(labels.get(contributor.role, contributor.role), []).append(
+            contributor.name
+        )
+    for role, names in grouped.items():
+        output.print(f"  {role}: {', '.join(dict.fromkeys(names))}")
 
 
 def _show_item(console: Console, item: ReviewItem, selected_rank: int | None) -> None:

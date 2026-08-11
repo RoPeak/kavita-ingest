@@ -7,13 +7,20 @@ from pathlib import Path
 
 from compatibility.helpers.epub_factory import create_epub
 from compatibility.helpers.pdf_factory import create_pdf
+from kavita_ingest.archive_safety import ArchiveLimits
 from kavita_ingest.canonical import CanonicalIdentity, ResolutionLevel, work_only_identity
 from kavita_ingest.config import AppConfig
 from kavita_ingest.db import connect, migrate
 from kavita_ingest.domain import MediaKind, SequenceNumber
 from kavita_ingest.filesystem import sha256_file
+from kavita_ingest.naming import NamingPolicy
 from kavita_ingest.plan_store import PlanStore
-from kavita_ingest.planning import SourcePrecondition, build_snapshot, new_plan
+from kavita_ingest.planning import (
+    PlanningPolicySnapshot,
+    SourcePrecondition,
+    build_snapshot,
+    new_plan,
+)
 from kavita_ingest.projection import project_book, project_comic
 
 
@@ -37,6 +44,8 @@ def make_apply_fixture(
     pdf_state: str = "ordinary",
     cbr_fixture: str = "rar5-subdirs.rar",
     writer_versions: dict[str, str] | None = None,
+    file_mode: int = 0o644,
+    directory_mode: int = 0o755,
 ) -> ApplyFixture:
     name = plan_name or f"{media_format}-{lifecycle}"
     incoming = tmp_path / name / "incoming"
@@ -79,6 +88,15 @@ def make_apply_fixture(
         )
         projection = project_comic(identity, ".cbz")
     archive = archive_root / source.name if lifecycle == "archive_after_verify" else None
+    policy = PlanningPolicySnapshot(
+        NamingPolicy(),
+        lifecycle,
+        str(archive_root) if lifecycle == "archive_after_verify" else None,
+        True,
+        ArchiveLimits(),
+        file_mode,
+        directory_mode,
+    )
     snapshot = build_snapshot(
         item_id="item-1",
         source=SourcePrecondition(
@@ -102,6 +120,7 @@ def make_apply_fixture(
         lifecycle_policy=lifecycle,
         archive_path=str(archive) if archive else None,
         destination_root=str(root),
+        planning_policy=policy,
     )
     database = tmp_path / name / "state.sqlite3"
     config = AppConfig(
@@ -109,11 +128,13 @@ def make_apply_fixture(
         books_root=books,
         comics_root=comics,
         staging_root=tmp_path / name / "unused-staging",
+        published_file_mode=file_mode,
+        created_directory_mode=directory_mode,
     )
     migrate(database)
     with connect(database) as connection:
         store = PlanStore(connection)
-        plan = store.add(new_plan(name, (snapshot,)))
+        plan = store.add(new_plan(name, (snapshot,), policy))
         if approve:
             store.approve(plan.id, plan.sha256)
     destination = root / projection.destination

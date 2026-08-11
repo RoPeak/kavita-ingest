@@ -260,6 +260,8 @@ class PlanBuilder:
             archive_root,
             self.config.cbr_conversion_enabled,
             self.config.archive_limits(),
+            self.config.published_file_mode,
+            self.config.created_directory_mode,
         )
 
     def _project(

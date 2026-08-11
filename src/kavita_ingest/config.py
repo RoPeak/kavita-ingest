@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
@@ -61,6 +62,8 @@ class AppConfig:
     comic_filename_template: str = "{series} - {number} - {title}"
     integer_sequence_padding: int = 3
     comic_specials_subfolder: bool = True
+    published_file_mode: int = 0o644
+    created_directory_mode: int = 0o755
     providers: ProviderSettings = ProviderSettings()
     matching: MatchingSettings = MatchingSettings()
 
@@ -106,6 +109,7 @@ def load_config(path: Path | None = None, app_paths: AppPaths | None = None) -> 
     cbr = _table(raw, "cbr")
     naming = _table(raw, "naming")
     sequence = _table(raw, "sequence")
+    permissions = _table(raw, "permissions")
     logging = _table(raw, "logging")
     providers = _table(raw, "providers")
     open_library = _nested_table(providers, "open_library")
@@ -166,6 +170,14 @@ def load_config(path: Path | None = None, app_paths: AppPaths | None = None) -> 
         comic_specials_subfolder=_boolean(
             naming.get("comic_specials_subfolder", True),
             "naming.comic_specials_subfolder",
+        ),
+        published_file_mode=_permission_mode(
+            permissions.get("file_mode", "0644"), "permissions.file_mode", directory=False
+        ),
+        created_directory_mode=_permission_mode(
+            permissions.get("directory_mode", "0755"),
+            "permissions.directory_mode",
+            directory=True,
         ),
         providers=provider_settings,
         matching=MatchingSettings(
@@ -315,6 +327,20 @@ def _boolean(value: object, name: str) -> bool:
     return value
 
 
+def _permission_mode(value: object, name: str, *, directory: bool) -> int:
+    if not isinstance(value, str) or not re.fullmatch(r"0[0-7]{3}", value):
+        raise ValueError(f"{name} must be a quoted four-digit octal string such as '0644'")
+    mode = int(value, 8)
+    if mode & 0o002:
+        raise ValueError(f"{name} must not be world-writable")
+    if directory:
+        if mode & 0o700 != 0o700:
+            raise ValueError(f"{name} must grant the owner read, write and search permissions")
+    elif mode & 0o111:
+        raise ValueError(f"{name} must not make published media executable")
+    return mode
+
+
 def _validate_provider_settings(settings: ProviderSettings) -> None:
     if not 1 <= settings.comic_vine_max_requests <= 180:
         raise ValueError("Comic Vine max_requests must be between 1 and 180")
@@ -368,6 +394,11 @@ comic_specials_subfolder = true
 
 [sequence]
 integer_padding = 3
+
+[permissions]
+# Applied to newly published files and directories. Existing directories are unchanged.
+file_mode = "0644"
+directory_mode = "0755"
 
 [archive]
 max_entries = 5000

@@ -108,16 +108,16 @@ def test_configuration_errors_are_actionable(
         load_config(config)
 
 
-def test_version_help_default_menu_and_versioned_json(tmp_path: Path) -> None:
+def test_version_help_bare_non_tty_help_and_versioned_json(tmp_path: Path) -> None:
     runner = CliRunner()
     version = runner.invoke(app, ["--version"])
     assert version.exit_code == 0 and __version__ in version.output
     help_result = runner.invoke(app, ["--help"])
     assert help_result.exit_code == 0
     assert "apply" in help_result.output and "recover" in help_result.output
-    menu = runner.invoke(app, [], input="q\n")
-    assert menu.exit_code == 0
-    assert "[1] Scan incoming media" in menu.output and "[Q] Quit" in menu.output
+    bare = runner.invoke(app, [])
+    assert bare.exit_code == 0
+    assert "Usage:" in bare.output and "wizard" in bare.output
 
     config = tmp_path / "empty.toml"
     config.write_text(f'[paths]\ndatabase="{tmp_path / "state.sqlite3"}"\n', encoding="utf-8")

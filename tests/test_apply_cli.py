@@ -35,7 +35,9 @@ def test_apply_status_and_rollback_preview_cli_use_approved_synthetic_plan(
     applied = runner.invoke(app, ["apply", str(fixture.plan_id), "--config", str(config)])
     assert applied.exit_code == 0, applied.output
     assert "Status: complete" in applied.output
-    status = runner.invoke(app, ["apply-status", str(fixture.plan_id), "--config", str(config)])
+    status = runner.invoke(
+        app, ["apply-status", str(fixture.plan_id), "--details", "--config", str(config)]
+    )
     assert status.exit_code == 0
     assert "state=complete" in status.output and "proposed: none" in status.output
     rollback = runner.invoke(app, ["rollback", str(fixture.plan_id), "--config", str(config)])
@@ -57,7 +59,9 @@ def test_recovery_cli_explains_and_recovers_crash_after_commit(tmp_path: Path) -
     with pytest.raises(InjectedCrash):
         ApplyEngine(fixture.config, fault=crash).apply(fixture.plan_id)
     runner = CliRunner()
-    status = runner.invoke(app, ["apply-status", str(fixture.plan_id), "--config", str(config)])
+    status = runner.invoke(
+        app, ["apply-status", str(fixture.plan_id), "--details", "--config", str(config)]
+    )
     assert status.exit_code == 0
     assert "state=committing" in status.output
     assert "recognize verified destination commit" in status.output

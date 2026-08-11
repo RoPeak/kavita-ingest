@@ -19,6 +19,18 @@ both originals with the `preserve` lifecycle.
 
 ## Apply and inspect
 
+The guided path is recommended for normal use:
+
+```bash
+kavita-ingest wizard
+```
+
+It still requires an explicit identity decision, exact-plan approval, and a
+separate apply confirmation. Quit after plan creation for a plan-only review,
+then rerun the wizard to resume the saved draft or approved plan.
+
+The equivalent granular path remains available:
+
 ```bash
 kavita-ingest plan create /path/to/trial-incoming
 kavita-ingest plan show PLAN_ID
@@ -27,10 +39,16 @@ kavita-ingest apply PLAN_ID
 kavita-ingest apply-status PLAN_ID
 ```
 
+Use `apply-status PLAN_ID --details` when diagnosing an interrupted item. If the
+wizard reports recovery-required state, review its durable status before
+confirming recovery; do not start a new plan to bypass that state.
+
 - [ ] Confirm both original incoming files still exist unchanged.
 - [ ] Open the resulting EPUB and CBZ independently.
 - [ ] Inspect EPUB metadata and CBZ `ComicInfo.xml`.
 - [ ] Confirm filenames and folders are personally acceptable.
+- [ ] Confirm output files are `0644` (or the configured safe mode) and newly
+      created library directories are `0755` (or the configured safe mode).
 - [ ] Add or rescan only these outputs in Kavita.
 - [ ] Confirm title, author, series, issue number, format and grouping in Kavita.
 - [ ] Record any projection or naming changes before processing more media.

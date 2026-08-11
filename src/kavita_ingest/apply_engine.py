@@ -85,6 +85,8 @@ class PreparedItem:
     lifecycle_policy: str
     archive_path: Path | None
     staging_directory: Path
+    published_file_mode: int
+    created_directory_mode: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -393,6 +395,7 @@ class ApplyEngine:
             canonical = item["canonical"]
             root, destination = self._immutable_destination(item, str(canonical["media_kind"]))
             policy, archive = _lifecycle(item)
+            file_mode, directory_mode = _publication_modes(item)
             staging_directory = (
                 root / ".kavita-ingest-staging" / run_id / _safe_item_id(item["item_id"])
             )
@@ -409,6 +412,8 @@ class ApplyEngine:
                     policy,
                     archive,
                     staging_directory,
+                    file_mode,
+                    directory_mode,
                 )
             )
         return tuple(output)
@@ -572,7 +577,9 @@ class ApplyEngine:
     def _execute_item(self, journal: JournalRepository, run_id: str, item: PreparedItem) -> None:
         self.fault("before_staging", item.item_id)
         self._revalidate_source(item)
-        self.filesystem.ensure_directory(self._root_for(item), item.staging_directory)
+        self.filesystem.ensure_directory(
+            self._root_for(item), item.staging_directory, item.created_directory_mode
+        )
         staging = item.staging_directory / f"output-{os.urandom(6).hex()}{item.destination.suffix}"
         journal.transition(
             run_id, item.item_id, ItemState.STAGING, fields={"staging_path": str(staging)}
@@ -591,6 +598,7 @@ class ApplyEngine:
         verified = self.writers.verify(item, staging)
         verified.require_valid()
         self.fault("after_staging_verification", item.item_id)
+        self.filesystem.set_file_mode(staging, item.published_file_mode)
         self.filesystem.make_file_durable(staging)
         evidence = _output_evidence(staging, verified)
         journal.transition(
@@ -619,7 +627,9 @@ class ApplyEngine:
         self._revalidate_source(item)
         if item.destination.exists():
             raise DestinationExists(f"destination appeared before commit: {item.destination}")
-        self.filesystem.ensure_directory(self._root_for(item), item.destination.parent)
+        self.filesystem.ensure_directory(
+            self._root_for(item), item.destination.parent, item.created_directory_mode
+        )
         journal.transition(run_id, item.item_id, ItemState.COMMITTING)
         self.fault("during_destination_commit", item.item_id)
         self.filesystem.commit(staging, item.destination)
@@ -641,6 +651,11 @@ class ApplyEngine:
             raise OSError("committed destination size differs from verified staging output")
         if sha256_file(item.destination) != evidence["sha256"]:
             raise OSError("committed destination hash differs from verified staging output")
+        if (
+            os.name == "posix"
+            and (item.destination.stat().st_mode & 0o777) != item.published_file_mode
+        ):
+            raise OSError("committed destination permissions differ from immutable plan")
         result = self.writers.verify(item, item.destination)
         result.require_valid()
 
@@ -659,7 +674,12 @@ class ApplyEngine:
         if item.lifecycle_policy == "archive_after_verify":
             if item.archive_path is None:
                 raise ApplyRefused("archive lifecycle has no immutable archive path")
-            self.filesystem.copy_for_archive(item.source, item.archive_path, item.source_hash)
+            self.filesystem.copy_for_archive(
+                item.source,
+                item.archive_path,
+                item.source_hash,
+                item.created_directory_mode,
+            )
             if sha256_file(item.archive_path) != item.source_hash:
                 raise OSError("committed archive does not match planned source")
             cleanup_path = str(item.archive_path)
@@ -722,7 +742,9 @@ class ApplyEngine:
         current = journal.get_item(run_id, item.item_id)
         if current.state not in {ItemState.FAILED, ItemState.PREFLIGHT_OK}:
             raise ApplyRefused(f"cannot retry item from {current.state.value}")
-        self.filesystem.ensure_directory(self._root_for(item), item.staging_directory)
+        self.filesystem.ensure_directory(
+            self._root_for(item), item.staging_directory, item.created_directory_mode
+        )
         staging = (
             item.staging_directory / f"recovery-{os.urandom(6).hex()}{item.destination.suffix}"
         )
@@ -850,7 +872,9 @@ class ApplyEngine:
         if item.source.exists():
             self._revalidate_source(item)
             if not archive_valid:
-                self.filesystem.copy_for_archive(item.source, archive, item.source_hash)
+                self.filesystem.copy_for_archive(
+                    item.source, archive, item.source_hash, item.created_directory_mode
+                )
             self.filesystem.durable_unlink(item.source)
         elif not archive_valid:
             self._manual_recovery(
@@ -1087,6 +1111,22 @@ def _archive_limits(item: PreparedItem) -> ArchiveLimits:
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise ApplyRefused("plan contains invalid immutable archive safety limits") from exc
+
+
+def _publication_modes(item: dict[str, Any]) -> tuple[int, int]:
+    policy = item.get("planning_policy", {})
+    version = policy.get("version", 1) if isinstance(policy, dict) else 1
+    permissions = policy.get("permissions", {}) if isinstance(policy, dict) else {}
+    if version == 1:
+        return 0o644, 0o755
+    if not isinstance(permissions, dict):
+        raise ApplyRefused("immutable planning policy lacks publication permissions")
+    try:
+        return int(str(permissions["file_mode"]), 8), int(
+            str(permissions["directory_mode"]), 8
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ApplyRefused("invalid immutable publication permissions") from exc
 
 
 def _epub_roles(item: dict[str, Any]) -> dict[str, Sequence[str]]:

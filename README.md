@@ -110,6 +110,10 @@ comic_specials_subfolder = true
 [sequence]
 integer_padding = 3
 
+[permissions]
+file_mode = "0644"
+directory_mode = "0755"
+
 [providers.comic_vine]
 enabled = false
 ```
@@ -138,12 +142,19 @@ never prints values. Provider cache and durable rate-limit state live in SQLite.
 
 ## Workflow
 
-Running `kavita-ingest` without arguments opens a small numbered workflow menu.
-Every operation also remains available as a scriptable subcommand:
+Run the guided workflow with `kavita-ingest wizard` (or bare `kavita-ingest` in
+an interactive terminal). It summarizes configuration and preflight, discovers
+and audits sources, guides explicit review, creates and displays the immutable
+plan, binds approval to its full digest, and asks separately before apply. Draft,
+approved, and interrupted apply state is detected from SQLite on restart. Bare
+invocation in a pipe or other non-interactive session prints deterministic help.
+
+Every operation remains available as a scriptable subcommand:
 
 ```bash
 kavita-ingest init
 kavita-ingest doctor
+kavita-ingest wizard
 kavita-ingest scan /path/to/incoming
 kavita-ingest audit /path/to/incoming
 kavita-ingest review /path/to/incoming
@@ -197,7 +208,9 @@ It performs no provider lookup. Unapproved, rejected, unresolved, skipped,
 stale, unsupported, or conflicting items are reported rather than inferred into
 the plan.
 
-`plan show` displays the digest and authoritative contents. `plan approve
+`plan show --summary` displays a human-readable source, identity, destination,
+lifecycle, conflict, and policy summary; omit `--summary` for the authoritative
+contents and full digest. `plan approve
 --digest` explicitly binds approval to those exact bytes. A later identity or
 comic run-group decision invalidates affected plans; a newer unapplied plan for
 the same source supersedes the older one. Apply has no flag that manufactures
@@ -246,9 +259,17 @@ Source policies:
 
 Whole-plan atomicity is not promised. Safety and recoverability are per item.
 
+New output files default to mode `0644` and newly created library directories to
+`0755`. These are quoted octal strings under `[permissions]`; group-writable
+`0664`/`0775` are supported, while executable media and world-writable modes are
+rejected. The modes are frozen into the immutable plan and applied to staging
+before publication, so the published inode has the planned mode. Existing
+directories and source modes are not changed.
+
 ## Recovery and rollback preview
 
-Use `kavita-ingest apply-status PLAN_ID` to inspect an interrupted run and
+Use `kavita-ingest apply-status PLAN_ID` for a human summary, add `--details` to
+inspect per-item recovery evidence, and use
 `kavita-ingest recover PLAN_ID` to resume only transitions proven safe by the
 immutable plan, journal, source, stage, destination, and recorded hashes. It
 never rematches metadata, queries providers, invents a destination, or repairs a

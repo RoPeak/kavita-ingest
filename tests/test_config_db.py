@@ -46,6 +46,9 @@ comic = "{number} - {title}"
 comic_specials_subfolder = false
 [sequence]
 integer_padding = 5
+[permissions]
+file_mode = "0664"
+directory_mode = "0775"
 [logging]
 level = "debug"
 """,
@@ -61,6 +64,8 @@ level = "debug"
     assert config.naming_policy().integer_padding == 5
     assert config.naming_policy().comic_specials_subfolder is False
     assert config.log_level == "DEBUG"
+    assert config.published_file_mode == 0o664
+    assert config.created_directory_mode == 0o775
     assert config.incoming_roots[0] == Path("~/Incoming").expanduser()
     assert {
         Path("/srv/books"),
@@ -68,6 +73,24 @@ level = "debug"
         Path("/srv/staging"),
         Path("/srv/ignore"),
     } == set(config.excluded_roots())
+
+
+@pytest.mark.parametrize(
+    ("table", "message"),
+    [
+        ('[permissions]\nfile_mode = "0666"\n', "must not be world-writable"),
+        ('[permissions]\ndirectory_mode = "0777"\n', "must not be world-writable"),
+        ('[permissions]\nfile_mode = "0755"\n', "must not make published media executable"),
+        ('[permissions]\nfile_mode = 644\n', "quoted four-digit octal"),
+    ],
+)
+def test_publication_permission_policy_rejects_unsafe_or_ambiguous_modes(
+    table: str, message: str, tmp_path: Path
+) -> None:
+    path = tmp_path / "permissions.toml"
+    path.write_text(table, encoding="utf-8")
+    with pytest.raises(ValueError, match=message):
+        load_config(path, _paths(tmp_path))
 
 
 def test_missing_toml_still_loads_provider_environment(

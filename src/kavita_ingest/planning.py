@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
@@ -23,7 +24,9 @@ class PlanningPolicySnapshot:
     source_archive_root: str | None
     cbr_conversion_enabled: bool
     archive_limits: ArchiveLimits
-    version: int = 1
+    published_file_mode: int = 0o644
+    created_directory_mode: int = 0o755
+    version: int = 2
     projection_policy_version: int = 1
 
     def to_dict(self) -> dict[str, Any]:
@@ -40,6 +43,10 @@ class PlanningPolicySnapshot:
                 "max_total_bytes": self.archive_limits.max_total_bytes,
                 "max_path_depth": self.archive_limits.max_path_depth,
                 "max_ratio": self.archive_limits.max_ratio,
+            },
+            "permissions": {
+                "file_mode": f"{self.published_file_mode:04o}",
+                "directory_mode": f"{self.created_directory_mode:04o}",
             },
         }
 
@@ -295,8 +302,14 @@ def validate_plan_payload(payload: bytes) -> dict[str, Any]:
         raise ValueError("plan items must be a list")
     if document["schema_version"] == PLAN_SCHEMA_VERSION:
         policy = document.get("planning_policy")
-        if not isinstance(policy, dict) or policy.get("version") != 1:
-            raise ValueError("schema 2 plans require planning_policy version 1")
+        if not isinstance(policy, dict) or policy.get("version") not in {1, 2}:
+            raise ValueError("schema 2 plans require supported planning_policy version 1 or 2")
+        if policy.get("version") == 2:
+            permissions = policy.get("permissions")
+            if not isinstance(permissions, dict):
+                raise ValueError("planning_policy version 2 requires permissions")
+            _validate_permission_value(permissions.get("file_mode"), directory=False)
+            _validate_permission_value(permissions.get("directory_mode"), directory=True)
     else:
         policy = None
     for item in items:
@@ -321,3 +334,11 @@ def validate_plan_payload(payload: bytes) -> dict[str, Any]:
 def destination_from_item(item: dict[str, Any]) -> PurePosixPath | None:
     projection = item.get("kavita_projection")
     return PurePosixPath(projection["destination"]) if isinstance(projection, dict) else None
+
+
+def _validate_permission_value(value: object, *, directory: bool) -> None:
+    if not isinstance(value, str) or not re.fullmatch(r"0[0-7]{3}", value):
+        raise ValueError("planned permission modes must be four-digit octal strings")
+    mode = int(value, 8)
+    if mode & 0o002 or (directory and mode & 0o700 != 0o700) or (not directory and mode & 0o111):
+        raise ValueError("planned permission mode violates publication safety policy")
