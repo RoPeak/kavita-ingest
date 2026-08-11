@@ -187,7 +187,8 @@ class IsolatedLaterIssueClient:
         number = public_params["filter"].rsplit(":", 1)[-1]
         if volume == 360294:
             return normalize({"results": []})
-        date = "2026-01-15" if volume == 160294 else "2027-04-01"
+        date = "2026-01-01" if volume == 160294 else "2027-04-01"
+        store_date = "2025-11-26" if volume == 160294 else "2027-03-01"
         return normalize(
             {
                 "results": [
@@ -195,6 +196,7 @@ class IsolatedLaterIssueClient:
                         **_comic_vine_record("issue", volume + 1, "The Zoo"),
                         "issue_number": number,
                         "cover_date": date,
+                        "store_date": store_date,
                         "volume": {
                             "id": volume,
                             "name": "Absolute Batman",
@@ -375,7 +377,8 @@ def test_issue_one_publication_year_cannot_filter_same_title_runs() -> None:
     assert len(result.candidates) == 1
     assert result.candidates[0].run_id == "4050-2025"
     assert result.candidates[0].run_start_year == 2025
-    assert result.candidates[0].publication_date == "2026-02-01"
+    assert result.candidates[0].cover_date == "2026-02"
+    assert result.candidates[0].cover_date_precision == "month"
 
 
 def test_explicit_run_start_evidence_remains_a_run_constraint() -> None:
@@ -423,7 +426,8 @@ def test_isolated_later_issue_uses_publication_year_as_issue_evidence() -> None:
     assert result.candidates[0].run_id == "4050-160294"
     assert result.candidates[0].run_start_year == 2024
     assert result.candidates[0].sequence == SequenceNumber.parse("14")
-    assert result.candidates[0].publication_date == "2026-01-15"
+    assert result.candidates[0].cover_date == "2026-01"
+    assert result.candidates[0].release_date == "2025-11-26"
     assert scores[0].score == 100
     assert session.resolved_runs["absolute batman"].provider_id == "4050-160294"  # type: ignore[union-attr]
 

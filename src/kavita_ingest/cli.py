@@ -193,6 +193,7 @@ def audit_command(
                 f"provider_activity:{provider:22} "
                 f"cache_hits={activity['cache_hits']} "
                 f"cache_misses={activity['cache_misses']} "
+                f"cache_schema_migrations={activity['cache_schema_migrations']} "
                 f"network_requests={activity['network_requests']} "
                 f"errors={activity['errors']} "
                 f"rate_limits={activity['rate_limit_events']}"
@@ -714,8 +715,13 @@ def _candidate_detail(score: CandidateScore) -> str:
     sequence = candidate.sequence
     issue = f" #{sequence.normalized}" if sequence else ""
     run = f"; run {candidate.run_start_year}" if candidate.run_start_year else ""
-    date = f"; {candidate.publication_date}" if candidate.publication_date else ""
-    return f"{candidate.series_title or candidate.title}{issue}{run}{date} ({score.score:.1f})"
+    cover = f"; cover {candidate.cover_date}" if candidate.cover_date else ""
+    release = f"; release {candidate.release_date}" if candidate.release_date else ""
+    publication = f"; published {candidate.publication_date}" if candidate.publication_date else ""
+    return (
+        f"{candidate.series_title or candidate.title}{issue}{run}{cover}{release}{publication} "
+        f"({score.score:.1f})"
+    )
 
 
 def _log_file(settings: object) -> Path:

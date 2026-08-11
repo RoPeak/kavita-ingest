@@ -17,6 +17,7 @@ from .models import (
 
 class OpenLibraryProvider:
     name = ProviderName.OPEN_LIBRARY
+    normalization_schema_version = 1
     endpoint = "https://openlibrary.org/search.json"
 
     def __init__(self, client: CachedProviderClient, contact: str | None) -> None:

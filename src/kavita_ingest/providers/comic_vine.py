@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import replace
+from datetime import date
 
 from ..domain import MediaKind, SequenceNumber
 from .base import ProviderStatus
@@ -18,6 +19,7 @@ from .models import (
 
 class ComicVineProvider:
     name = ProviderName.COMIC_VINE
+    normalization_schema_version = 2
     endpoint = "https://comicvine.gamespot.com/api"
 
     def __init__(self, client: CachedProviderClient, api_key: str | None) -> None:
@@ -183,6 +185,21 @@ def _normalize(raw: object) -> list[NormalizedCandidate]:
         collection = item_type in _COLLECTION_TYPES
         provider_id = _api_id(api_url) or (f"{'4000' if is_issue else '4050'}-{item['id']}")
         start_year = _year(item.get("start_year")) or _year(volume.get("start_year"))
+        release_date = _exact_date(item.get("store_date")) if is_issue else None
+        cover_date, cover_precision = (
+            _cover_date(item.get("cover_date"))
+            if is_issue
+            else (
+                None,
+                None,
+            )
+        )
+        date_provenance = {}
+        if release_date:
+            date_provenance["release_date_source"] = "store_date"
+        if cover_date:
+            date_provenance["cover_date_source"] = "cover_date"
+            date_provenance["cover_date_precision"] = cover_precision or ""
         output.append(
             NormalizedCandidate(
                 ProviderName.COMIC_VINE,
@@ -195,13 +212,20 @@ def _normalize(raw: object) -> list[NormalizedCandidate]:
                 creators=_credits(item.get("person_credits")),
                 identifiers=(Identifier("comic_vine", provider_id),),
                 publisher=_publisher(item, volume),
-                publication_date=_date(item),
+                release_date=release_date,
+                release_date_precision="day" if release_date else None,
+                cover_date=cover_date,
+                cover_date_precision=cover_precision,
                 series_title=series_title,
                 run_start_year=start_year,
                 sequence=SequenceNumber.parse(number) if number else None,
                 item_type=item_type,
                 run_id=_volume_id(volume) if is_issue else provider_id,
-                provider_metadata={"raw_format": format_value} if format_value else {},
+                provider_metadata={
+                    **({"raw_format": format_value} if format_value else {}),
+                    **date_provenance,
+                },
+                provider_schema_version=2,
             )
         )
     return output
@@ -225,11 +249,31 @@ def _year(value: object) -> int | None:
     return int(text[:4]) if re.fullmatch(r"\d{4}.*", text) else None
 
 
-def _date(item: dict[str, object]) -> str | None:
-    for key in ("cover_date", "store_date", "date_added"):
-        if item.get(key):
-            return str(item[key])
-    return None
+def _exact_date(value: object) -> str | None:
+    text = str(value or "").strip()
+    try:
+        return date.fromisoformat(text).isoformat()
+    except ValueError:
+        return None
+
+
+def _cover_date(value: object) -> tuple[str | None, str | None]:
+    text = str(value or "").strip()
+    if re.fullmatch(r"\d{4}", text):
+        return (text, "year") if int(text) > 0 else (None, None)
+    match = re.fullmatch(r"(\d{4})-(\d{2})(?:-(\d{2}))?", text)
+    if not match:
+        return None, None
+    year, month = (int(part) for part in match.groups()[:2])
+    if year <= 0 or not 1 <= month <= 12:
+        return None, None
+    day = match.group(3)
+    if day:
+        try:
+            date(year, month, int(day))
+        except ValueError:
+            return None, None
+    return f"{year:04d}-{month:02d}", "month"
 
 
 def _publisher(item: dict[str, object], volume: dict[str, object]) -> str | None:

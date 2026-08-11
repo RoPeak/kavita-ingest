@@ -15,6 +15,7 @@ from .models import (
 
 class GoogleBooksProvider:
     name = ProviderName.GOOGLE_BOOKS
+    normalization_schema_version = 1
     endpoint = "https://www.googleapis.com/books/v1/volumes"
 
     def __init__(self, client: CachedProviderClient, api_key: str | None = None) -> None:

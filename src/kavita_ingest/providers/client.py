@@ -18,6 +18,7 @@ Normalizer = Callable[[object], list[NormalizedCandidate]]
 class ClientActivity:
     cache_hits: int = 0
     cache_misses: int = 0
+    cache_schema_migrations: int = 0
     network_requests: dict[str, int] = field(default_factory=dict)
     errors: int = 0
     rate_limit_events: int = 0
@@ -26,6 +27,7 @@ class ClientActivity:
         return {
             "cache_hits": self.cache_hits,
             "cache_misses": self.cache_misses,
+            "cache_schema_migrations": self.cache_schema_migrations,
             "network_requests": dict(sorted(self.network_requests.items())),
             "errors": self.errors,
             "rate_limit_events": self.rate_limit_events,
@@ -44,6 +46,7 @@ class CachedProviderClient:
         user_agent: str,
         timeout: float,
         ttl_seconds: float,
+        normalization_schema_version: int,
         offline: bool = False,
         network_enabled: bool = True,
         unavailable_reason: str | None = None,
@@ -57,6 +60,7 @@ class CachedProviderClient:
         self.user_agent = user_agent
         self.timeout = timeout
         self.ttl_seconds = ttl_seconds
+        self.normalization_schema_version = normalization_schema_version
         self.offline = offline
         self.network_enabled = network_enabled
         self.unavailable_reason = unavailable_reason
@@ -75,11 +79,35 @@ class CachedProviderClient:
         request_identity: dict[str, object] = {"url": url, "params": public_params}
         cache_key = canonical_request_key(self.provider, operation, request_identity)
         cached = self.store.get_cache(cache_key)
-        if cached is not None and not cached.stale:
+        cached_schema_matches = cached is not None and all(
+            candidate.provider_schema_version == self.normalization_schema_version
+            for candidate in cached.candidates
+        )
+        if cached is not None and (
+            cached.schema_version != self.normalization_schema_version
+            or not cached_schema_matches
+        ):
+            if not cached.stale or self.offline:
+                try:
+                    candidates = self._normalize(normalize, cached.raw, source="cached response")
+                    self.store.rewrite_cache_normalization(
+                        cache_key, candidates, self.normalization_schema_version
+                    )
+                except (MalformedProviderResponse, KeyError) as exc:
+                    if self.offline:
+                        raise ProviderUnavailable(
+                            f"{self.provider.value} cached response is incompatible with "
+                            f"normalization schema {self.normalization_schema_version}: {exc}"
+                        ) from exc
+                else:
+                    self.activity.cache_hits += 1
+                    self.activity.cache_schema_migrations += 1
+                    return candidates
+        elif cached is not None and not cached.stale:
             self.activity.cache_hits += 1
             return list(cached.candidates)
         if self.offline:
-            if cached is not None:
+            if cached is not None and cached.schema_version == self.normalization_schema_version:
                 self.activity.cache_hits += 1
                 return list(cached.candidates)
             raise ProviderUnavailable(f"{self.provider.value} has no cached result for offline use")
@@ -123,12 +151,7 @@ class CachedProviderClient:
                 self.activity.errors += 1
                 raise ProviderError(f"provider HTTP {response.status}")
             raw = response.json()
-            try:
-                candidates = normalize(raw)
-            except (KeyError, TypeError, ValueError) as exc:
-                raise MalformedProviderResponse(
-                    f"{self.provider.value} response failed validation: {exc}"
-                ) from exc
+            candidates = self._normalize(normalize, raw, source="response")
             self.store.put_cache(
                 cache_key,
                 self.provider,
@@ -136,11 +159,32 @@ class CachedProviderClient:
                 request_identity,
                 candidates,
                 raw,
-                1,
+                self.normalization_schema_version,
                 self.ttl_seconds,
             )
             return candidates
         raise last_error or ProviderError("provider request failed")
+
+    def _normalize(
+        self, normalize: Normalizer, raw: object, *, source: str
+    ) -> list[NormalizedCandidate]:
+        try:
+            candidates = normalize(raw)
+        except (KeyError, TypeError, ValueError) as exc:
+            raise MalformedProviderResponse(
+                f"{self.provider.value} {source} failed validation: {exc}"
+            ) from exc
+        incompatible = [
+            candidate.provider_schema_version
+            for candidate in candidates
+            if candidate.provider_schema_version != self.normalization_schema_version
+        ]
+        if incompatible:
+            raise MalformedProviderResponse(
+                f"{self.provider.value} {source} produced candidate schema "
+                f"{incompatible[0]}, expected {self.normalization_schema_version}"
+            )
+        return candidates
 
 
 def _retry_after(value: str | None) -> float:

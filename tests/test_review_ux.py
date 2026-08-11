@@ -31,7 +31,8 @@ def _candidate(identifier: str, year: int, date: str) -> NormalizedCandidate:
         series_title="Watchmen",
         sequence=SequenceNumber.parse("1"),
         run_start_year=year,
-        publication_date=date,
+        cover_date=date[:7],
+        cover_date_precision="month",
         run_id=f"4050-{year}",
     )
 

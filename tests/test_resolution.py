@@ -129,7 +129,10 @@ def test_comic_candidate_roles_survive_canonical_identity_and_projection(tmp_pat
             Contributor("Mystery Person", "unknown:designer"),
         ),
         publisher="DC Comics",
-        publication_date="2026-01-15",
+        release_date="2025-11-26",
+        release_date_precision="day",
+        cover_date="2026-01",
+        cover_date_precision="month",
         series_title="Absolute Batman",
         sequence=SequenceNumber.parse("14"),
         run_start_year=2024,
@@ -151,7 +154,16 @@ def test_comic_candidate_roles_survive_canonical_identity_and_projection(tmp_pat
     projection = project_comic(resolved.identity)
     assert projection.metadata["Writer"] == "Scott Snyder"
     assert projection.metadata["Publisher"] == "DC Comics"
-    assert projection.metadata["Year"] == 2026
+    assert (
+        projection.metadata["Year"],
+        projection.metadata["Month"],
+        projection.metadata["Day"],
+    ) == (
+        2025,
+        11,
+        26,
+    )
+    assert resolved.identity.cover_date == "2026-01"
 
 
 def test_historical_complete_book_work_decision_still_resolves_work_only(tmp_path: Path) -> None:

@@ -310,7 +310,9 @@ def _show_item(console: Console, item: ReviewItem, selected_rank: int | None) ->
                 f"#{score.candidate.sequence.normalized if score.candidate.sequence else '-'}\n"
                 f"{score.candidate.title}",
                 f"start {score.candidate.run_start_year or '-'}\n{score.candidate.run_id or '-'}",
-                f"{score.candidate.publication_date or '-'}\n{score.candidate.publisher or '-'}",
+                f"cover {score.candidate.cover_date or '-'}\n"
+                f"release {score.candidate.release_date or '-'}\n"
+                f"{score.candidate.publisher or '-'}",
                 f"{score.score:.1f}",
                 "yes" if score.eligible else "no",
             )

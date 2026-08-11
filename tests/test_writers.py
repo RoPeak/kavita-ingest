@@ -10,7 +10,10 @@ import pytest
 
 from compatibility.helpers.epub_factory import create_epub, publication_hashes
 from compatibility.helpers.pdf_factory import create_pdf
+from kavita_ingest.canonical import CanonicalIdentity
 from kavita_ingest.comicinfo import ComicInfoError, patch_comicinfo, read_comicinfo
+from kavita_ingest.domain import MediaKind, SequenceNumber
+from kavita_ingest.projection import project_comic
 from kavita_ingest.writers.comic import write_cbz_metadata
 from kavita_ingest.writers.epub import write_epub
 from kavita_ingest.writers.pdf import write_pdf_metadata
@@ -36,9 +39,7 @@ def test_comicinfo_translator_is_owned_schema_ordered_and_read_back() -> None:
     )
     document = read_comicinfo(output, require_schema=True)
     assert document.metadata["Translator"] == "T. Translator"
-    assert output.index(b"<Writer>") < output.index(b"<Translator>") < output.index(
-        b"<Publisher>"
-    )
+    assert output.index(b"<Writer>") < output.index(b"<Translator>") < output.index(b"<Publisher>")
 
 
 def test_comicinfo_rejects_duplicate_owned_fields() -> None:
@@ -68,6 +69,60 @@ def test_cbz_writer_preserves_page_bytes_and_reads_back_metadata(tmp_path: Path)
             read_comicinfo(archive.read("ComicInfo.xml"), require_schema=True).metadata["Number"]
             == "1"
         )
+
+
+@pytest.mark.parametrize(
+    ("release_date", "release_precision", "cover_date", "cover_precision"),
+    [
+        (None, None, None, None),
+        ("2026", "year", None, None),
+        ("2026-01", "month", None, None),
+        ("2026-02-30", "day", None, None),
+        (None, None, "2026-01", "month"),
+    ],
+)
+def test_cbz_writer_preserves_existing_release_date_when_projection_is_not_exact(
+    tmp_path: Path,
+    release_date: str | None,
+    release_precision: str | None,
+    cover_date: str | None,
+    cover_precision: str | None,
+) -> None:
+    source = tmp_path / "source.cbz"
+    destination = tmp_path / "out.cbz"
+    with zipfile.ZipFile(source, "w") as archive:
+        archive.writestr("001.jpg", b"page-one")
+        archive.writestr(
+            "ComicInfo.xml",
+            b"<ComicInfo><Year>2020</Year><Month>5</Month><Day>7</Day></ComicInfo>",
+        )
+
+    projection = project_comic(
+        CanonicalIdentity(
+            MediaKind.COMIC,
+            "Issue",
+            (),
+            series_title="Series",
+            sequence=SequenceNumber.parse("1"),
+            run_start_year=2024,
+            item_type="issue",
+            release_date=release_date,
+            release_date_precision=release_precision,
+            cover_date=cover_date,
+            cover_date_precision=cover_precision,
+        )
+    )
+    result = write_cbz_metadata(
+        source,
+        destination,
+        set_fields=projection.ownership.set_fields,
+        clear_fields=projection.ownership.clear_fields,
+    )
+
+    assert result.valid
+    with zipfile.ZipFile(destination) as archive:
+        metadata = read_comicinfo(archive.read("ComicInfo.xml"), require_schema=True).metadata
+    assert (metadata["Year"], metadata["Month"], metadata["Day"]) == ("2020", "5", "7")
 
 
 def test_native_epub_patch_preserves_resources_and_exact_roles(tmp_path: Path) -> None:

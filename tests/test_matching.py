@@ -143,7 +143,10 @@ def test_comic_series_sequence_and_run_year_score_independently() -> None:
         series_title="Absolute Batman",
         sequence=SequenceNumber.parse("14"),
         run_start_year=2024,
-        publication_date="2026-01-15",
+        cover_date="2026-01",
+        cover_date_precision="month",
+        release_date="2025-11-26",
+        release_date_precision="day",
     )
     score = score_candidates(local, [issue], SETTINGS)[0]
     assert score.eligible is True
@@ -186,7 +189,7 @@ def test_missing_publication_date_never_falls_back_to_comic_run_year() -> None:
     assert all(not any(item.field == "year" for item in score.comparisons) for score in scores)
 
 
-def test_real_issue_publication_date_and_explicit_run_year_score_separately() -> None:
+def test_real_cover_date_and_explicit_run_year_score_separately() -> None:
     local = LocalIdentity(
         MediaKind.COMIC,
         "issue",
@@ -206,7 +209,10 @@ def test_real_issue_publication_date_and_explicit_run_year_score_separately() ->
         series_title="Absolute Batman",
         sequence=SequenceNumber.parse("14"),
         run_start_year=2024,
-        publication_date="2026-01-15",
+        cover_date="2026-01",
+        cover_date_precision="month",
+        release_date="2025-11-26",
+        release_date_precision="day",
     )
 
     score = score_candidates(local, [issue], SETTINGS)[0]

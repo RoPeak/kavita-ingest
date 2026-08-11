@@ -87,6 +87,10 @@ def _candidate_identity(decision: DecisionRecord) -> CanonicalIdentity:
         item_type=candidate.item_type,
         publisher=None if work_only else candidate.publisher,
         publication_date=None if work_only else candidate.publication_date,
+        release_date=None if work_only else candidate.release_date,
+        release_date_precision=None if work_only else candidate.release_date_precision,
+        cover_date=None if work_only else candidate.cover_date,
+        cover_date_precision=None if work_only else candidate.cover_date_precision,
         language=None if work_only else candidate.language,
         identifiers=identifiers,
         contributors=contributors,
@@ -105,6 +109,11 @@ def _candidate_identity(decision: DecisionRecord) -> CanonicalIdentity:
                 if candidate.provider_metadata.get("raw_format")
                 else {}
             ),
+            **{
+                key: value
+                for key, value in candidate.provider_metadata.items()
+                if key in {"release_date_source", "cover_date_source", "cover_date_precision"}
+            },
         },
     )
 
@@ -126,6 +135,10 @@ def _manual_identity(decision: DecisionRecord, kind: MediaKind) -> CanonicalIden
         collection_volume=_optional_int(fields.get("collection_volume")),
         publisher=_optional_string(fields.get("publisher")),
         publication_date=_optional_string(fields.get("publication_date")),
+        release_date=_optional_string(fields.get("release_date")),
+        release_date_precision=_optional_string(fields.get("release_date_precision")),
+        cover_date=_optional_string(fields.get("cover_date")),
+        cover_date_precision=_optional_string(fields.get("cover_date_precision")),
         language=_optional_string(fields.get("language")),
         identifiers={key: str(value) for key, value in fields.items() if key.startswith("isbn")},
         resolution=ResolutionLevel.MANUAL,
@@ -147,6 +160,10 @@ def _apply_overrides(identity: CanonicalIdentity, values: dict[str, Any]) -> Can
         "series_title",
         "publisher",
         "publication_date",
+        "release_date",
+        "release_date_precision",
+        "cover_date",
+        "cover_date_precision",
         "language",
         "item_type",
         "run_start_year",

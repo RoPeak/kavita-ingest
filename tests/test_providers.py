@@ -91,7 +91,11 @@ def test_comic_vine_normalizes_run_issue_without_kavita_volume_conflation() -> N
     assert candidate.creators[0].name == "Scott Snyder"
     assert candidate.creators[0].role == "writer"
     assert candidate.publisher == "DC Comics"
-    assert candidate.publication_date == "2026-01-15"
+    assert candidate.publication_date is None
+    assert candidate.cover_date == "2026-01"
+    assert candidate.cover_date_precision == "month"
+    assert candidate.release_date == "2025-11-26"
+    assert candidate.release_date_precision == "day"
     assert not hasattr(candidate, "volume")
     assert client.calls[0][2]["api_key"] == "secret"
 
@@ -142,7 +146,12 @@ def test_comic_vine_normalizes_formats_at_provider_boundary(
     candidate = provider.search(SearchQuery(MediaKind.COMIC, "Absolute Batman"))[0]
     assert candidate.item_type == item_type
     assert candidate.record_type is record_type
-    assert candidate.provider_metadata == ({"raw_format": raw_format} if raw_format else {})
+    if raw_format:
+        assert candidate.provider_metadata["raw_format"] == raw_format
+    else:
+        assert "raw_format" not in candidate.provider_metadata
+    assert candidate.provider_metadata["cover_date_source"] == "cover_date"
+    assert candidate.provider_metadata["release_date_source"] == "store_date"
 
 
 def test_comic_vine_unknown_format_is_preserved_and_not_masqueraded_as_issue() -> None:
@@ -152,7 +161,40 @@ def test_comic_vine_unknown_format_is_preserved_and_not_masqueraded_as_issue() -
     provider = ComicVineProvider(FixtureClient(payload), "secret")  # type: ignore[arg-type]
     candidate = provider.search(SearchQuery(MediaKind.COMIC, "Absolute Batman"))[0]
     assert candidate.item_type == "unsupported"
-    assert candidate.provider_metadata == {"raw_format": "Prestige Mystery"}
+    assert candidate.provider_metadata["raw_format"] == "Prestige Mystery"
+
+
+@pytest.mark.parametrize(
+    ("store_date", "cover_date", "expected_release", "expected_cover", "cover_precision"),
+    [
+        ("2025-11-26", "2026-01-01", "2025-11-26", "2026-01", "month"),
+        (None, "2026-01-01", None, "2026-01", "month"),
+        (None, "2026", None, "2026", "year"),
+        (None, None, None, None, None),
+        ("not-a-date", "2026-99-99", None, None, None),
+    ],
+)
+def test_comic_vine_preserves_date_meaning_and_precision(
+    store_date: str | None,
+    cover_date: str | None,
+    expected_release: str | None,
+    expected_cover: str | None,
+    cover_precision: str | None,
+) -> None:
+    payload = _fixture("comic_vine.json")
+    assert isinstance(payload, dict)
+    issue = payload["results"][0]  # type: ignore[index]
+    issue["store_date"] = store_date
+    issue["cover_date"] = cover_date
+    provider = ComicVineProvider(FixtureClient(payload), "secret")  # type: ignore[arg-type]
+
+    candidate = provider.search(SearchQuery(MediaKind.COMIC, "Absolute Batman"))[0]
+
+    assert candidate.release_date == expected_release
+    assert candidate.release_date_precision == ("day" if expected_release else None)
+    assert candidate.cover_date == expected_cover
+    assert candidate.cover_date_precision == cover_precision
+    assert NormalizedCandidate.from_dict(candidate.to_dict()) == candidate
 
 
 def test_comic_vine_collected_search_uses_collection_oriented_query_bucket() -> None:

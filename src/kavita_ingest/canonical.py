@@ -26,6 +26,10 @@ class CanonicalIdentity:
     collection_volume: int | None = None
     publisher: str | None = None
     publication_date: str | None = None
+    release_date: str | None = None
+    release_date_precision: str | None = None
+    cover_date: str | None = None
+    cover_date_precision: str | None = None
     language: str | None = None
     identifiers: dict[str, str] = field(default_factory=dict)
     contributors: dict[str, tuple[str, ...]] = field(default_factory=dict)
@@ -87,6 +91,10 @@ class CanonicalIdentity:
             "collection_volume": self.collection_volume,
             "publisher": self.publisher,
             "publication_date": self.publication_date,
+            "release_date": self.release_date,
+            "release_date_precision": self.release_date_precision,
+            "cover_date": self.cover_date,
+            "cover_date_precision": self.cover_date_precision,
             "language": self.language,
             "identifiers": dict(sorted(self.identifiers.items())),
             "contributors": {key: list(value) for key, value in sorted(self.contributors.items())},

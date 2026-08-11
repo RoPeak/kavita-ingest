@@ -188,6 +188,10 @@ def reconcile(local: LocalIdentity, score: CandidateScore | None) -> Reconciliat
         "title": candidate.title,
         "publisher": candidate.publisher,
         "publication_date": candidate.publication_date,
+        "release_date": candidate.release_date,
+        "release_date_precision": candidate.release_date_precision,
+        "cover_date": candidate.cover_date,
+        "cover_date_precision": candidate.cover_date_precision,
         "language": candidate.language,
         "series_title": candidate.series_title,
         "sequence": candidate.sequence.normalized if candidate.sequence else None,
@@ -581,7 +585,12 @@ def _normalize(value: str) -> str:
 
 
 def _candidate_year(candidate: NormalizedCandidate) -> int | None:
-    match = re.match(r"(\d{4})", candidate.publication_date or "")
+    value = (
+        candidate.cover_date
+        if candidate.media_kind is MediaKind.COMIC
+        else candidate.publication_date
+    )
+    match = re.match(r"(\d{4})", value or "")
     return int(match.group(1)) if match else None
 
 

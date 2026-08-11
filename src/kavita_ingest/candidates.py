@@ -143,7 +143,7 @@ class CandidateSession:
             return next(run for run, _ in found), [issue for _, issue in found]
 
         publication_matches = [
-            pair for pair in found if local.year and _publication_year(pair[1]) == local.year
+            pair for pair in found if local.year and _comic_cover_year(pair[1]) == local.year
         ]
         matching_run_ids = {run.provider_id for run, _ in publication_matches}
         if len(matching_run_ids) == 1:
@@ -286,8 +286,8 @@ def _identity_candidates(
     return [item for item in candidates if item.record_type.value == "comic_issue"]
 
 
-def _publication_year(candidate: NormalizedCandidate) -> int | None:
-    match = re.match(r"(\d{4})", candidate.publication_date or "")
+def _comic_cover_year(candidate: NormalizedCandidate) -> int | None:
+    match = re.match(r"(\d{4})", candidate.cover_date or "")
     return int(match.group(1)) if match else None
 
 

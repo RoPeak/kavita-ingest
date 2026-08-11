@@ -46,10 +46,29 @@ def test_provider_cache_hit_miss_expiry_and_raw_provenance(tmp_path: Path) -> No
     fresh = store.get_cache("key", now=109)
     stale = store.get_cache("key", now=110)
     assert fresh is not None and fresh.stale is False
+    assert fresh.schema_version == 1
     assert fresh.candidates[0].provider_id == "volume-1"
     assert fresh.raw == {"raw": True}
     assert stale is not None and stale.stale is True
     assert store.cache_counts(now=110) == (1, 1)
+    connection.close()
+
+
+def test_provider_cache_rejects_candidate_and_row_schema_mismatch(tmp_path: Path) -> None:
+    _, connection = _database(tmp_path)
+    store = ProviderStore(connection)
+    with pytest.raises(ValueError, match="candidate schema 1 does not match cache schema 2"):
+        store.put_cache(
+            "key",
+            ProviderName.GOOGLE_BOOKS,
+            "search",
+            {"q": "fixture"},
+            [_candidate()],
+            {"raw": True},
+            2,
+            10,
+        )
+    assert store.get_cache("key") is None
     connection.close()
 
 

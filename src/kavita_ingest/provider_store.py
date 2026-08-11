@@ -12,6 +12,7 @@ from .providers.models import NormalizedCandidate, ProviderName
 class CacheEntry:
     candidates: tuple[NormalizedCandidate, ...]
     raw: object
+    schema_version: int
     fetched_at: float
     expires_at: float
     stale: bool
@@ -23,7 +24,7 @@ class ProviderStore:
 
     def get_cache(self, cache_key: str, *, now: float | None = None) -> CacheEntry | None:
         row = self.connection.execute(
-            "SELECT normalized_json, raw_json, fetched_at, expires_at "
+            "SELECT normalized_json, raw_json, schema_version, fetched_at, expires_at "
             "FROM provider_cache WHERE cache_key = ?",
             (cache_key,),
         ).fetchone()
@@ -34,10 +35,32 @@ class ProviderStore:
         return CacheEntry(
             tuple(NormalizedCandidate.from_dict(item) for item in normalized),
             json.loads(row[1]),
-            float(row[2]),
+            int(row[2]),
             float(row[3]),
-            current >= float(row[3]),
+            float(row[4]),
+            current >= float(row[4]),
         )
+
+    def rewrite_cache_normalization(
+        self,
+        cache_key: str,
+        candidates: list[NormalizedCandidate],
+        schema_version: int,
+    ) -> None:
+        normalized_json = _normalized_json(candidates, schema_version)
+        cursor = self.connection.execute(
+            "UPDATE provider_cache SET normalized_json = ?, schema_version = ? "
+            "WHERE cache_key = ?",
+            (
+                normalized_json,
+                schema_version,
+                cache_key,
+            ),
+        )
+        if cursor.rowcount != 1:
+            self.connection.rollback()
+            raise KeyError(f"provider cache entry disappeared during schema migration: {cache_key}")
+        self.connection.commit()
 
     def put_cache(
         self,
@@ -53,6 +76,7 @@ class ProviderStore:
         now: float | None = None,
     ) -> None:
         current = time.time() if now is None else now
+        normalized_json = _normalized_json(candidates, schema_version)
         self.connection.execute(
             """
             INSERT INTO provider_cache(cache_key, provider, operation, request_json,
@@ -68,7 +92,7 @@ class ProviderStore:
                 provider.value,
                 operation,
                 json.dumps(request, sort_keys=True),
-                json.dumps([item.to_dict() for item in candidates], sort_keys=True, default=str),
+                normalized_json,
                 json.dumps(raw, sort_keys=True),
                 schema_version,
                 current,
@@ -84,3 +108,16 @@ class ProviderStore:
             (current,),
         ).fetchone()
         return int(row[0]), int(row[1] or 0)
+
+
+def _normalized_json(candidates: list[NormalizedCandidate], schema_version: int) -> str:
+    incompatible = [
+        item.provider_schema_version
+        for item in candidates
+        if item.provider_schema_version != schema_version
+    ]
+    if incompatible:
+        raise ValueError(
+            f"candidate schema {incompatible[0]} does not match cache schema {schema_version}"
+        )
+    return json.dumps([item.to_dict() for item in candidates], sort_keys=True, default=str)

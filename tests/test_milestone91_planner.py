@@ -320,7 +320,7 @@ def test_comic_vine_candidate_survives_real_review_plan_apply_and_readback(
 ) -> None:
     incoming = tmp_path / "incoming"
     incoming.mkdir()
-    source = _cbz(incoming / "Absolute Batman 14 (2024).cbz")
+    source = _cbz(incoming / "Absolute Batman 14 (2026).cbz")
     config = _config(tmp_path, incoming, lifecycle="preserve")
     provider = (ComicVineProvider(_ComicVineFixtureClient(), "fixture-key"),)  # type: ignore[arg-type]
     monkeypatch.setattr("kavita_ingest.audit.build_providers", lambda *_: provider)
@@ -344,7 +344,13 @@ def test_comic_vine_candidate_survives_real_review_plan_apply_and_readback(
     assert metadata["Title"] == "The Zoo"
     assert metadata["Writer"] == "Scott Snyder"
     assert metadata["Publisher"] == "DC Comics"
-    assert (metadata["Year"], metadata["Month"], metadata["Day"]) == (2026, 1, 15)
+    assert canonical["cover_date"] == "2026-01"
+    assert canonical["cover_date_precision"] == "month"
+    assert canonical["release_date"] == "2025-11-26"
+    assert canonical["release_date_precision"] == "day"
+    assert canonical["provenance"]["cover_date_source"] == "cover_date"
+    assert canonical["provenance"]["release_date_source"] == "store_date"
+    assert (metadata["Year"], metadata["Month"], metadata["Day"]) == (2025, 11, 26)
     assert applied["summary"]["status"] == "complete"
     assert source.is_file() and destination.is_file()
     with zipfile.ZipFile(destination) as archive:
@@ -352,9 +358,9 @@ def test_comic_vine_candidate_survives_real_review_plan_apply_and_readback(
     assert comicinfo["Writer"] == "Scott Snyder"
     assert comicinfo["Publisher"] == "DC Comics"
     assert (comicinfo["Year"], comicinfo["Month"], comicinfo["Day"]) == (
-        "2026",
-        "1",
-        "15",
+        "2025",
+        "11",
+        "26",
     )
 
 
@@ -376,7 +382,7 @@ def test_incremental_absolute_batman_14_cli_journey_creates_plan_without_issue_o
     assert scanned.exit_code == 0, scanned.output
     audited = runner.invoke(app, ["audit", str(incoming), "--details", "--config", str(config)])
     assert audited.exit_code == 0, audited.output
-    assert "Absolute Batman #14; run 2024; 2026-01-15" in audited.output
+    assert "Absolute Batman #14; run 2024; cover 2026-01; release 2025-11-26" in audited.output
     assert "INFO kavita_ingest" not in audited.output
 
     reviewed = runner.invoke(app, ["review", str(incoming), "--config", str(config)], input="A\n")
@@ -400,6 +406,15 @@ def test_incremental_absolute_batman_14_cli_journey_creates_plan_without_issue_o
     assert item["canonical"]["provider_identity"]["run_id"] == "4050-160294"
     assert item["canonical"]["run_start_year"] == 2024
     assert item["canonical"]["sequence"]["normalized"] == "14"
+    assert item["canonical"]["cover_date"] == "2026-01"
+    assert item["canonical"]["cover_date_precision"] == "month"
+    assert item["canonical"]["release_date"] == "2025-11-26"
+    assert item["canonical"]["release_date_precision"] == "day"
+    assert (
+        item["kavita_projection"]["metadata"]["Year"],
+        item["kavita_projection"]["metadata"]["Month"],
+        item["kavita_projection"]["metadata"]["Day"],
+    ) == (2025, 11, 26)
     assert item["lifecycle_actions"][-1]["action"] == "preserve"
     assert source.is_file()
 

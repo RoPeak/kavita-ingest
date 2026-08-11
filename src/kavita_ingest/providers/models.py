@@ -47,6 +47,10 @@ class NormalizedCandidate:
     subtitle: str | None = None
     publisher: str | None = None
     publication_date: str | None = None
+    release_date: str | None = None
+    release_date_precision: str | None = None
+    cover_date: str | None = None
+    cover_date_precision: str | None = None
     language: str | None = None
     series_title: str | None = None
     run_start_year: int | None = None
@@ -82,6 +86,10 @@ class NormalizedCandidate:
             subtitle=value.get("subtitle"),
             publisher=value.get("publisher"),
             publication_date=value.get("publication_date"),
+            release_date=value.get("release_date"),
+            release_date_precision=value.get("release_date_precision"),
+            cover_date=value.get("cover_date"),
+            cover_date_precision=value.get("cover_date_precision"),
             language=value.get("language"),
             series_title=value.get("series_title"),
             run_start_year=value.get("run_start_year"),

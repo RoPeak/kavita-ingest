@@ -105,7 +105,10 @@ def test_comic_projection_emits_only_resolved_rich_comicinfo_metadata() -> None:
         run_start_year=2024,
         item_type="issue",
         publisher="DC Comics",
-        publication_date="2026-01-15",
+        release_date="2025-11-26",
+        release_date_precision="day",
+        cover_date="2026-01",
+        cover_date_precision="month",
         language="en-US",
         identifiers={"comic_vine": "4000-140001"},
         contributors={
@@ -135,27 +138,27 @@ def test_comic_projection_emits_only_resolved_rich_comicinfo_metadata() -> None:
         "Editor": "Editor Person",
         "Translator": "Translator Person",
         "Publisher": "DC Comics",
-        "Year": 2026,
-        "Month": 1,
-        "Day": 15,
+        "Year": 2025,
+        "Month": 11,
+        "Day": 26,
         "LanguageISO": "en-US",
     }
     assert "GTIN" not in metadata
 
 
 @pytest.mark.parametrize(
-    ("value", "expected"),
+    ("value", "precision", "expected"),
     [
-        ("2026", {"Year": 2026}),
-        ("2026-02", {"Year": 2026, "Month": 2}),
-        ("2024-02-29", {"Year": 2024, "Month": 2, "Day": 29}),
-        ("2026-13", {}),
-        ("2025-02-29", {}),
-        ("unknown", {}),
+        ("2024-02-29", "day", {"Year": 2024, "Month": 2, "Day": 29}),
+        ("2026", "year", {}),
+        ("2026-02", "month", {}),
+        ("2026-13", "day", {}),
+        ("2025-02-29", "day", {}),
+        ("unknown", "day", {}),
     ],
 )
-def test_comic_projection_parses_partial_dates_conservatively(
-    value: str, expected: dict[str, int]
+def test_comic_projection_uses_only_an_exact_release_date(
+    value: str, precision: str, expected: dict[str, int]
 ) -> None:
     identity = CanonicalIdentity(
         MediaKind.COMIC,
@@ -165,10 +168,41 @@ def test_comic_projection_parses_partial_dates_conservatively(
         sequence=SequenceNumber.parse("1"),
         run_start_year=2024,
         item_type="issue",
-        publication_date=value,
+        release_date=value,
+        release_date_precision=precision,
     )
-    metadata = project_comic(identity).metadata
+    projection = project_comic(identity)
+    metadata = projection.metadata
     assert {key: metadata[key] for key in ("Year", "Month", "Day") if key in metadata} == expected
+    preserved = set(projection.ownership.preserve_fields)
+    if expected:
+        assert not {"Year", "Month", "Day"} & preserved
+    else:
+        assert {"Year", "Month", "Day"} <= preserved
+
+
+@pytest.mark.parametrize(
+    ("cover_date", "precision"), [("2026-01", "month"), ("2026", "year"), (None, None)]
+)
+def test_cover_date_never_manufactures_comicinfo_release_fields(
+    cover_date: str | None, precision: str | None
+) -> None:
+    identity = CanonicalIdentity(
+        MediaKind.COMIC,
+        "Issue",
+        (),
+        series_title="Series",
+        sequence=SequenceNumber.parse("1"),
+        run_start_year=2024,
+        item_type="issue",
+        cover_date=cover_date,
+        cover_date_precision=precision,
+    )
+
+    projection = project_comic(identity)
+
+    assert not {"Year", "Month", "Day"} & projection.metadata.keys()
+    assert {"Year", "Month", "Day"} <= set(projection.ownership.preserve_fields)
 
 
 def test_work_only_book_preserves_all_unresolved_edition_metadata() -> None:
@@ -232,9 +266,7 @@ def test_naming_policy_controls_padding_templates_and_optional_cosmetic_title() 
     assert project_comic(numbered, naming=policy).filename == "00001.cbz"
     projected = project_comic(symbolic, naming=policy)
     assert projected.filename == "TPB1.cbz"
-    assert projected.destination_folder == PurePosixPath(
-        "Watchmen (1986) (Trade Paperback)"
-    )
+    assert projected.destination_folder == PurePosixPath("Watchmen (1986) (Trade Paperback)")
 
 
 def test_unresolved_comic_blocks_with_precise_reasons() -> None:

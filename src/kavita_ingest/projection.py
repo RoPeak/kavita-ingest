@@ -116,7 +116,12 @@ def project_comic(
             metadata[field_name] = ", ".join(names)
     if identity.publisher:
         metadata["Publisher"] = identity.publisher
-    metadata.update(_comic_date_fields(identity.publication_date))
+    release_fields = (
+        _comic_date_fields(identity.release_date)
+        if identity.release_date_precision == "day"
+        else {}
+    )
+    metadata.update(release_fields)
     if identity.language:
         metadata["LanguageISO"] = identity.language
     policy = naming or NamingPolicy()
@@ -134,10 +139,13 @@ def project_comic(
     if comic_format and policy.comic_specials_subfolder:
         folder /= "Specials"
     filename = render_component(policy.comic_file, naming_values) + _extension(extension)
+    preserve_fields = ["Notes", "Web", "PageCount", "Pages"]
+    if not release_fields:
+        preserve_fields.extend(["Year", "Month", "Day"])
     owned = OwnershipManifest(
         set_fields={key: value for key, value in metadata.items() if value != ""},
         clear_fields=tuple(key for key in ("Volume", "Format") if metadata[key] == ""),
-        preserve_fields=("Notes", "Web", "PageCount", "Pages"),
+        preserve_fields=tuple(preserve_fields),
     )
     return KavitaProjection(MediaKind.COMIC, metadata, filename, folder, owned)
 
