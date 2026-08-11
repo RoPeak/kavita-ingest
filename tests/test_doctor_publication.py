@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import errno
 import json
+import shutil
 from pathlib import Path
 
 import pytest
@@ -9,6 +10,7 @@ from typer.testing import CliRunner
 
 from kavita_ingest.apply_engine import ApplyEngine, StalePlan
 from kavita_ingest.cli import app
+from kavita_ingest.doctor import _path_check
 from kavita_ingest.filesystem import LinuxFilesystem
 from tests.apply_helpers import make_apply_fixture
 
@@ -22,7 +24,7 @@ def _config(tmp_path: Path) -> Path:
     config = tmp_path / "config.toml"
     config.write_text(
         f'''[paths]
-database = "{tmp_path / 'state.sqlite3'}"
+database = "{tmp_path / "state.sqlite3"}"
 incoming = ["{incoming}"]
 books = "{books}"
 comics = "{comics}"
@@ -43,9 +45,7 @@ def test_doctor_empirically_probes_no_clobber_without_leaving_files(tmp_path: Pa
     result = CliRunner().invoke(app, ["doctor", "--json", "--config", str(config)])
     assert result.exit_code == 0, result.output
     payload = json.loads(result.stdout)
-    publication = [
-        check for check in payload["checks"] if check["category"] == "publication"
-    ]
+    publication = [check for check in payload["checks"] if check["category"] == "publication"]
     assert publication and all(check["status"] == "OK" for check in publication)
     assert not list(tmp_path.rglob(".kavita-ingest-doctor-*"))
     serialized = json.dumps(payload)
@@ -67,6 +67,18 @@ def test_doctor_reports_effective_planning_policy_and_anonymous_provider_constra
     google = next(item for item in checks if item["name"] == "google-books")
     assert google["status"] == "INFO"
     assert google["detail"] == "anonymous access"
+
+
+def test_doctor_warns_when_space_is_low_for_archive_repacking(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    usage = shutil._ntuple_diskusage(10 * 1024**3, 9 * 1024**3, 1024**3)
+    monkeypatch.setattr("kavita_ingest.doctor.shutil.disk_usage", lambda _: usage)
+
+    result = _path_check("paths", "comics", tmp_path, 4 * 1024**3)
+
+    assert result.status == "WARN"
+    assert "large CBR repacks may be blocked by apply preflight" in result.detail
 
 
 def test_publication_probe_blocks_filesystems_without_hard_links(

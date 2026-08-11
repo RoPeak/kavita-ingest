@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections.abc import Iterable
 from dataclasses import asdict, dataclass
 from difflib import SequenceMatcher
 from enum import StrEnum
@@ -162,6 +163,17 @@ def score_candidates(
     return output
 
 
+def usable_identity_scores(scores: Iterable[CandidateScore]) -> list[CandidateScore]:
+    """Return candidates suitable for normal identity-selection displays."""
+    return [
+        score
+        for score in scores
+        if score.score > 0
+        and not score.hard_contradiction
+        and score.candidate.record_type is not RecordType.COMIC_RUN
+    ]
+
+
 def reconcile(local: LocalIdentity, score: CandidateScore | None) -> Reconciliation:
     if score is None:
         return Reconciliation(
@@ -238,6 +250,19 @@ def _score(local: LocalIdentity, candidate: NormalizedCandidate) -> CandidateSco
             )
         )
     collected = local.subtype == "collected-edition"
+    if local.kind is MediaKind.COMIC and candidate.record_type is RecordType.COMIC_RUN:
+        contradictions.append("comic run records provide context and cannot identify a media item")
+        comparisons.append(
+            _comparison(
+                "item_type",
+                local.subtype,
+                candidate.record_type,
+                ComparisonKind.HARD_CONTRADICTION,
+                -100,
+                1,
+                contradictions[-1],
+            )
+        )
     if collected and candidate.record_type is RecordType.COMIC_ISSUE:
         contradictions.append("collected edition cannot resolve to a regular issue")
         comparisons.append(
@@ -557,7 +582,7 @@ def _normalize(value: str) -> str:
 
 def _candidate_year(candidate: NormalizedCandidate) -> int | None:
     match = re.match(r"(\d{4})", candidate.publication_date or "")
-    return int(match.group(1)) if match else candidate.run_start_year
+    return int(match.group(1)) if match else None
 
 
 def _string(value: object) -> str | None:

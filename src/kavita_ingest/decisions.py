@@ -191,6 +191,11 @@ def accept_candidate(
     work_only: bool = False,
     batch_id: str | None = None,
 ) -> DecisionRecord:
+    if score.candidate.record_type is RecordType.COMIC_RUN:
+        raise ValueError(
+            "comic run records are run-group context, not media identities; "
+            "select the run group and then accept an issue candidate"
+        )
     work_only = work_only or score.candidate.record_type is RecordType.BOOK_WORK
     decision_type = DecisionType.WORK_ACCEPTED if work_only else DecisionType.ACCEPTED
     return repository.add(
@@ -266,11 +271,7 @@ def batch_accept(
     *,
     confirmed_count: int,
 ) -> list[DecisionRecord]:
-    eligible = [
-        item
-        for item in items
-        if item[1].eligible and not item[1].suppressed and item[2].edition_state != "unresolved"
-    ]
+    eligible = batch_eligible_items(items)
     if confirmed_count != len(eligible):
         raise ValueError(f"batch confirmation must acknowledge exactly {len(eligible)} items")
     batch_id = str(uuid.uuid4())
@@ -279,6 +280,20 @@ def batch_accept(
             repository, source, score, reconciliation, evidence_hash, batch_id=batch_id
         )
         for source, score, reconciliation, evidence_hash in eligible
+    ]
+
+
+def batch_eligible_items(
+    items: list[tuple[SourceRecord, CandidateScore, Reconciliation, str]],
+) -> list[tuple[SourceRecord, CandidateScore, Reconciliation, str]]:
+    """Return the single authoritative set eligible for explicit batch acceptance."""
+    return [
+        item
+        for item in items
+        if item[1].eligible
+        and not item[1].suppressed
+        and item[1].candidate.record_type is not RecordType.COMIC_RUN
+        and item[2].edition_state != "unresolved"
     ]
 
 

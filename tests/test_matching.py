@@ -155,6 +155,68 @@ def test_comic_series_sequence_and_run_year_score_independently() -> None:
     assert issue.run_start_year == 2024
 
 
+def test_missing_publication_date_never_falls_back_to_comic_run_year() -> None:
+    local = LocalIdentity(
+        MediaKind.COMIC,
+        "issue",
+        0.98,
+        "Absolute Batman",
+        series_title="Absolute Batman",
+        sequence=SequenceNumber.parse("14"),
+        year=2026,
+    )
+    candidates = [
+        NormalizedCandidate(
+            ProviderName.COMIC_VINE,
+            provider_id,
+            RecordType.COMIC_ISSUE,
+            MediaKind.COMIC,
+            "Absolute Batman",
+            series_title="Absolute Batman",
+            sequence=SequenceNumber.parse("14"),
+            run_start_year=run_year,
+        )
+        for provider_id, run_year in (("correct-run", 2024), ("matching-year-run", 2026))
+    ]
+
+    scores = score_candidates(local, candidates, SETTINGS)
+
+    assert scores[0].score == scores[1].score
+    assert not scores[0].eligible
+    assert all(not any(item.field == "year" for item in score.comparisons) for score in scores)
+
+
+def test_real_issue_publication_date_and_explicit_run_year_score_separately() -> None:
+    local = LocalIdentity(
+        MediaKind.COMIC,
+        "issue",
+        0.98,
+        "Absolute Batman",
+        series_title="Absolute Batman",
+        sequence=SequenceNumber.parse("14"),
+        year=2026,
+        run_start_year=2024,
+    )
+    issue = NormalizedCandidate(
+        ProviderName.COMIC_VINE,
+        "correct-run",
+        RecordType.COMIC_ISSUE,
+        MediaKind.COMIC,
+        "Absolute Batman",
+        series_title="Absolute Batman",
+        sequence=SequenceNumber.parse("14"),
+        run_start_year=2024,
+        publication_date="2026-01-15",
+    )
+
+    score = score_candidates(local, [issue], SETTINGS)[0]
+
+    year = next(item for item in score.comparisons if item.field == "year")
+    run_year = next(item for item in score.comparisons if item.field == "run_start_year")
+    assert year.kind is ComparisonKind.EXACT
+    assert run_year.kind is ComparisonKind.EXACT
+
+
 def test_issue_title_conflict_is_explained_but_not_a_hard_identity_contradiction() -> None:
     local = LocalIdentity(
         MediaKind.COMIC,

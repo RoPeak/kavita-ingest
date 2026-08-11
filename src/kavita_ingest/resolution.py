@@ -51,7 +51,10 @@ def resolve_explicit_identity(
     if authorization.decision_type is DecisionType.MANUAL_IDENTITY:
         identity = _manual_identity(authorization, classified_kind)
     else:
-        identity = _candidate_identity(authorization)
+        try:
+            identity = _candidate_identity(authorization)
+        except ValueError as exc:
+            return IdentityResolution(None, authorization, (str(exc),))
     identity = _apply_overrides(identity, repository.manual_overrides(source))
     return IdentityResolution(identity, authorization, identity.planning_blocks())
 
@@ -61,6 +64,8 @@ def _candidate_identity(decision: DecisionRecord) -> CanonicalIdentity:
     if not isinstance(value, dict):
         raise ValueError("accepted decision has no resolved candidate snapshot")
     candidate = NormalizedCandidate.from_dict(value)
+    if candidate.record_type is RecordType.COMIC_RUN:
+        raise ValueError("accepted comic run record cannot resolve a source-media identity")
     work_only = (
         decision.decision_type is DecisionType.WORK_ACCEPTED
         or candidate.record_type is RecordType.BOOK_WORK

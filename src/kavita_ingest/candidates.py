@@ -35,16 +35,18 @@ class CandidateSession:
 
     @classmethod
     def from_local_identities(cls, values: list[LocalIdentity]) -> Self:
-        years: dict[str, list[int]] = {}
+        run_start_hints: dict[str, list[int]] = {}
         sequences: dict[str, list[SequenceNumber]] = {}
         for local in values:
             if (
                 local.kind.value == "comic"
                 and local.subtype != "collected-edition"
                 and local.series_title
-                and local.year
+                and local.run_start_year
             ):
-                years.setdefault(_run_key(local.series_title), []).append(local.year)
+                run_start_hints.setdefault(_run_key(local.series_title), []).append(
+                    local.run_start_year
+                )
             if (
                 local.kind.value == "comic"
                 and local.subtype != "collected-edition"
@@ -53,7 +55,7 @@ class CandidateSession:
             ):
                 sequences.setdefault(_run_key(local.series_title), []).append(local.sequence)
         return cls(
-            {key: min(candidates) for key, candidates in years.items()},
+            {key: min(candidates) for key, candidates in run_start_hints.items()},
             {
                 key: max(candidates, key=lambda item: item.sort_key)
                 for key, candidates in sequences.items()
@@ -87,13 +89,19 @@ class CandidateSession:
             queries.append("comic_vine:run-resolved")
             matching_runs = _matching_runs(local.series_title, hint, runs)
             selected = matching_runs[0] if len(matching_runs) == 1 else None
+            issue_candidates: list[NormalizedCandidate] = []
             if selected is None and matching_runs:
-                selected = self._disambiguate_run(key, local, provider, matching_runs)
+                selected, issue_candidates = self._disambiguate_run(
+                    key, local, provider, matching_runs
+                )
             self.resolved_runs[key] = selected
+            if issue_candidates:
+                queries.append("comic_vine:issue-evidence")
+                return issue_candidates, queries
         run = self.resolved_runs[key]
         if run is None:
             queries.append("comic_vine:structured-fallback")
-            return provider.search(_structured_query(local)), queries
+            return _identity_candidates(local, provider.search(_structured_query(local))), queries
         self.run_issue_queries += 1
         queries.append(f"comic_vine:issue-in-run:{run.provider_id}")
         return provider.search_issue_in_run(run, local.sequence), queries
@@ -120,38 +128,40 @@ class CandidateSession:
         local: LocalIdentity,
         provider: ComicVineProvider,
         runs: list[NormalizedCandidate],
-    ) -> NormalizedCandidate | None:
+    ) -> tuple[NormalizedCandidate | None, list[NormalizedCandidate]]:
         runs = runs[: self.max_ambiguous_runs]
-        max_sequence = self.run_max_sequences.get(key)
-        surviving: list[tuple[NormalizedCandidate, list[NormalizedCandidate]]] = []
-        if max_sequence is not None:
-            for run in runs:
-                issues = self._probe_issue(provider, run, max_sequence)
-                if issues is None:
-                    return None
-                if issues:
-                    surviving.append((run, issues))
-            if len(surviving) == 1:
-                return surviving[0][0]
-            if surviving:
-                runs = [run for run, _ in surviving]
-        if not local.title or not local.sequence:
-            return None
-        ranked: list[tuple[float, NormalizedCandidate]] = []
+        if not local.sequence:
+            return None, []
+        found: list[tuple[NormalizedCandidate, NormalizedCandidate]] = []
         for run in runs:
             issues = self._probe_issue(provider, run, local.sequence)
             if issues is None:
-                return None
-            similarity = max(
-                (_title_similarity(local.title, issue.title) for issue in issues),
-                default=0.0,
+                return None, []
+            found.extend((run, issue) for issue in issues)
+        run_ids = {run.provider_id for run, _ in found}
+        if len(run_ids) == 1:
+            return next(run for run, _ in found), [issue for _, issue in found]
+
+        publication_matches = [
+            pair for pair in found if local.year and _publication_year(pair[1]) == local.year
+        ]
+        matching_run_ids = {run.provider_id for run, _ in publication_matches}
+        if len(matching_run_ids) == 1:
+            selected_id = next(iter(matching_run_ids))
+            return (
+                next(run for run, _ in publication_matches if run.provider_id == selected_id),
+                [issue for _, issue in publication_matches],
             )
-            ranked.append((similarity, run))
-        ranked.sort(key=lambda item: (-item[0], item[1].provider_id))
-        runner = ranked[1][0] if len(ranked) > 1 else 0.0
-        if ranked and ranked[0][0] >= 0.75 and ranked[0][0] - runner >= 0.15:
-            return ranked[0][1]
-        return None
+
+        if local.title and _run_key(local.title) != _run_key(local.series_title or ""):
+            ranked = sorted(
+                ((_title_similarity(local.title, issue.title), run, issue) for run, issue in found),
+                key=lambda item: (-item[0], item[1].provider_id, item[2].provider_id),
+            )
+            runner = ranked[1][0] if len(ranked) > 1 else 0.0
+            if ranked and ranked[0][0] >= 0.75 and ranked[0][0] - runner >= 0.15:
+                return ranked[0][1], [ranked[0][2]]
+        return None, [issue for _, issue in found]
 
     def _probe_issue(
         self,
@@ -219,7 +229,10 @@ def generate_candidates(
         except ProviderError as exc:
             unavailable.append(f"{status.provider.value}: {exc}")
     return CandidateGeneration(
-        tuple(output.values()), tuple(queries), tuple(unavailable), tuple(available)
+        tuple(_identity_candidates(local, list(output.values()))),
+        tuple(queries),
+        tuple(unavailable),
+        tuple(available),
     )
 
 
@@ -255,10 +268,27 @@ def _matching_runs(
         and _run_key(candidate.series_title) == title
     ]
     if run_start_year is not None:
-        matching = [
+        year_matches = [
             candidate for candidate in matching if candidate.run_start_year == run_start_year
         ]
+        if year_matches:
+            return year_matches
     return matching
+
+
+def _identity_candidates(
+    local: LocalIdentity, candidates: list[NormalizedCandidate]
+) -> list[NormalizedCandidate]:
+    if local.kind.value != "comic":
+        return candidates
+    if local.subtype == "collected-edition":
+        return [item for item in candidates if item.record_type.value == "comic_collection"]
+    return [item for item in candidates if item.record_type.value == "comic_issue"]
+
+
+def _publication_year(candidate: NormalizedCandidate) -> int | None:
+    match = re.match(r"(\d{4})", candidate.publication_date or "")
+    return int(match.group(1)) if match else None
 
 
 def _run_key(value: str) -> str:

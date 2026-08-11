@@ -92,6 +92,55 @@ class _ComicVineFixtureClient:
         return normalize(payload)
 
 
+class _IncrementalComicVineFixtureClient:
+    def get(
+        self,
+        operation: str,
+        url: str,
+        public_params: dict[str, str],
+        secret_params: dict[str, str],
+        bucket: str,
+        normalize: Callable[[object], list[NormalizedCandidate]],
+    ) -> list[NormalizedCandidate]:
+        del url, secret_params, bucket
+        if operation == "search-runs":
+            return normalize(
+                {
+                    "results": [
+                        {
+                            "id": identifier,
+                            "resource_type": "volume",
+                            "api_detail_url": (
+                                f"https://comicvine.gamespot.com/api/volume/4050-{identifier}/"
+                            ),
+                            "name": "Absolute Batman",
+                            "start_year": str(year),
+                            "publisher": {"name": "DC Comics"},
+                        }
+                        for identifier, year in ((160294, 2024), (260294, 2026), (360294, 1989))
+                    ]
+                }
+            )
+        volume = int(public_params["filter"].split(",", 1)[0].split(":", 1)[1])
+        if volume == 360294:
+            return normalize({"results": []})
+        payload = json.loads(
+            Path("tests/fixtures/providers/comic_vine.json").read_text(encoding="utf-8")
+        )
+        if volume == 260294:
+            payload["results"][0]["id"] = 240001
+            payload["results"][0]["api_detail_url"] = (
+                "https://comicvine.gamespot.com/api/issue/4000-240001/"
+            )
+            payload["results"][0]["cover_date"] = "2027-04-01"
+            payload["results"][0]["volume"]["id"] = 260294
+            payload["results"][0]["volume"]["start_year"] = "2026"
+            payload["results"][0]["volume"]["api_detail_url"] = (
+                "https://comicvine.gamespot.com/api/volume/4050-260294/"
+            )
+        return normalize(payload)
+
+
 def _config(
     tmp_path: Path,
     incoming: Path,
@@ -108,7 +157,7 @@ def _config(
     config = tmp_path / "config.toml"
     config.write_text(
         f'''[paths]
-database = "{tmp_path / 'state.sqlite3'}"
+database = "{tmp_path / "state.sqlite3"}"
 incoming = ["{incoming}"]
 books = "{books}"
 comics = "{comics}"
@@ -223,9 +272,7 @@ def test_book_work_normal_accept_is_confirmed_and_persisted_work_only(
     monkeypatch.setattr("kavita_ingest.audit.build_providers", lambda *_: provider)
     monkeypatch.setattr("kavita_ingest.review.build_providers", lambda *_: provider)
 
-    document, applied = _create_approve_apply(
-        CliRunner(), config, incoming, "A\ny\ny\n"
-    )
+    document, applied = _create_approve_apply(CliRunner(), config, incoming, "A\ny\ny\n")
 
     item = document["items"][0]
     ownership = item["ownership_manifest"]
@@ -279,9 +326,7 @@ def test_comic_vine_candidate_survives_real_review_plan_apply_and_readback(
     monkeypatch.setattr("kavita_ingest.audit.build_providers", lambda *_: provider)
     monkeypatch.setattr("kavita_ingest.review.build_providers", lambda *_: provider)
 
-    document, applied = _create_approve_apply(
-        CliRunner(), config, incoming, "A\ny\n"
-    )
+    document, applied = _create_approve_apply(CliRunner(), config, incoming, "A\ny\n")
 
     item = document["items"][0]
     canonical = item["canonical"]
@@ -311,6 +356,52 @@ def test_comic_vine_candidate_survives_real_review_plan_apply_and_readback(
         "1",
         "15",
     )
+
+
+def test_incremental_absolute_batman_14_cli_journey_creates_plan_without_issue_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    incoming = tmp_path / "incoming"
+    incoming.mkdir()
+    source = _cbz(incoming / "Absolute Batman 014 (2026) (Digital) (Shan-Empire).cbz")
+    config = _config(tmp_path, incoming, lifecycle="preserve")
+    provider = (
+        ComicVineProvider(_IncrementalComicVineFixtureClient(), "fixture-key"),  # type: ignore[arg-type]
+    )
+    monkeypatch.setattr("kavita_ingest.audit.build_providers", lambda *_: provider)
+    monkeypatch.setattr("kavita_ingest.review.build_providers", lambda *_: provider)
+    runner = CliRunner()
+
+    scanned = runner.invoke(app, ["scan", str(incoming), "--config", str(config)])
+    assert scanned.exit_code == 0, scanned.output
+    audited = runner.invoke(app, ["audit", str(incoming), "--details", "--config", str(config)])
+    assert audited.exit_code == 0, audited.output
+    assert "Absolute Batman #14; run 2024; 2026-01-15" in audited.output
+    assert "INFO kavita_ingest" not in audited.output
+
+    reviewed = runner.invoke(app, ["review", str(incoming), "--config", str(config)], input="A\n")
+    assert reviewed.exit_code == 0, reviewed.output
+    assert "4050-160294" in reviewed.output
+    assert "comic_run" not in reviewed.output
+    assert "Decision saved." in reviewed.output
+
+    created = runner.invoke(
+        app,
+        ["plan", "create", str(incoming), "--json", "--config", str(config)],
+    )
+    assert created.exit_code == 0, created.output
+    payload = json.loads(created.stdout)
+    shown = runner.invoke(
+        app,
+        ["plan", "show", str(payload["plan_id"]), "--json", "--config", str(config)],
+    )
+    document = json.loads(shown.stdout)["document"]
+    item = document["items"][0]
+    assert item["canonical"]["provider_identity"]["run_id"] == "4050-160294"
+    assert item["canonical"]["run_start_year"] == 2024
+    assert item["canonical"]["sequence"]["normalized"] == "14"
+    assert item["lifecycle_actions"][-1]["action"] == "preserve"
+    assert source.is_file()
 
 
 @pytest.mark.skipif(shutil.which("unrar") is None, reason="unrar is required for CBR workflow")

@@ -15,7 +15,8 @@ from .config import load_config, write_initial_config
 from .db import connect
 from .doctor import checks
 from .locking import LockUnavailable
-from .logging_config import configure_logging, provider_secrets
+from .logging_config import configure_logging, provider_secrets, set_console_verbosity
+from .matching import CandidateScore, usable_identity_scores
 from .paths import AppPaths
 from .plan_store import PlanStore
 from .planning_service import PlanBuilder
@@ -54,9 +55,16 @@ def main(
             help="Show the application version and exit.",
         ),
     ] = False,
+    verbose: Annotated[
+        bool, typer.Option("--verbose", help="Show informational operational logs on stderr.")
+    ] = False,
+    debug: Annotated[
+        bool, typer.Option("--debug", help="Show debug operational logs on stderr.")
+    ] = False,
 ) -> None:
     """Operate a reviewed, explicitly approved Kavita ingestion workflow."""
     del version
+    set_console_verbosity(verbose=verbose, debug=debug)
     if context.invoked_subcommand is None:
         _workflow_menu()
 
@@ -145,6 +153,9 @@ def audit_command(
     details: Annotated[
         bool, typer.Option("--details", help="Show each source's top candidate.")
     ] = False,
+    metrics: Annotated[
+        bool, typer.Option("--metrics", help="Show provider and matching diagnostic counters.")
+    ] = False,
     as_json: Annotated[bool, typer.Option("--json", help="Emit versioned JSON.")] = False,
 ) -> None:
     """Match sources without accepting identities or modifying media."""
@@ -166,23 +177,33 @@ def audit_command(
             },
         )
         return
-    for key, value in result.summary.items():
-        typer.echo(f"{key:40} {value}")
-    for provider, activity in result.provider_activity.items():
-        typer.echo(
-            f"provider_activity:{provider:22} "
-            f"cache_hits={activity['cache_hits']} "
-            f"cache_misses={activity['cache_misses']} "
-            f"network_requests={activity['network_requests']} "
-            f"errors={activity['errors']} "
-            f"rate_limits={activity['rate_limit_events']}"
-        )
-    for key, value in result.candidate_activity.items():
-        typer.echo(f"candidate_activity:{key:20} {value}")
+    provider_problems = (
+        result.summary["provider_unavailable"] + result.summary["partial_provider_unavailable"]
+    )
+    typer.echo(f"Scanned:            {result.summary['sources']}")
+    typer.echo(f"Strong matches:     {result.summary['eligible_high_confidence']}")
+    typer.echo(f"Needs review:       {result.summary['review_required']}")
+    typer.echo(f"Unresolved:         {result.summary['unresolved']}")
+    typer.echo(f"Provider problems:  {provider_problems}")
+    if metrics:
+        for key, value in result.summary.items():
+            typer.echo(f"summary:{key:29} {value}")
+        for provider, activity in result.provider_activity.items():
+            typer.echo(
+                f"provider_activity:{provider:22} "
+                f"cache_hits={activity['cache_hits']} "
+                f"cache_misses={activity['cache_misses']} "
+                f"network_requests={activity['network_requests']} "
+                f"errors={activity['errors']} "
+                f"rate_limits={activity['rate_limit_events']}"
+            )
+        for key, value in result.candidate_activity.items():
+            typer.echo(f"candidate_activity:{key:20} {value}")
     if details:
         for item in result.items:
-            top = item.scores[0] if item.scores else None
-            candidate = f"{top.candidate.title} ({top.score:.1f})" if top else "unresolved"
+            useful = usable_identity_scores(item.scores)
+            top = useful[0] if useful else None
+            candidate = _candidate_detail(top) if top else "unresolved"
             typer.echo(f"{item.scan.source.path.name}: {candidate}")
             if item.generation.unavailable:
                 typer.echo(f"  unavailable: {'; '.join(item.generation.unavailable)}")
@@ -351,8 +372,17 @@ def apply_status_command(
     as_json: Annotated[bool, typer.Option("--json", help="Emit versioned JSON.")] = False,
 ) -> None:
     """Show durable apply/recovery state without touching media or providers."""
-    summary = _apply_engine(config).status(plan_id)
-    inspections = _apply_engine(config).inspect_recovery(plan_id) if summary else ()
+    try:
+        summary = _apply_engine(config).status(plan_id)
+        inspections = _apply_engine(config).inspect_recovery(plan_id) if summary else ()
+        if summary is None:
+            connection, store = _plan_store(config)
+            try:
+                store.get(plan_id)
+            finally:
+                connection.close()
+    except (ApplyRefused, KeyError, ValueError, RuntimeError) as exc:
+        _expected_error(exc)
     if as_json:
         _emit_json(
             "apply-status",
@@ -372,13 +402,8 @@ def apply_status_command(
         for item in inspections:
             staging_exists = bool(item.staging and Path(item.staging).exists())
             typer.echo(f"\n{item.item_id}: last durable state={item.state.value}")
-            typer.echo(
-                f"  source: {_evidence_label(item.source_exists, item.source_matches)}"
-            )
-            typer.echo(
-                "  staging: "
-                f"{_evidence_label(staging_exists, item.staging_matches)}"
-            )
+            typer.echo(f"  source: {_evidence_label(item.source_exists, item.source_matches)}")
+            typer.echo(f"  staging: {_evidence_label(staging_exists, item.staging_matches)}")
             typer.echo(
                 "  destination: "
                 f"{_evidence_label(item.destination_exists, item.destination_matches)}"
@@ -436,17 +461,22 @@ def plan_create(
         if as_json:
             _emit_json("plan-create", payload)
             return
-        typer.echo(
-            f"Created draft plan {plan.id} sha256={plan.sha256} bytes={plan.byte_length}"
-        )
+        typer.echo(f"Created draft plan {plan.id} sha256={plan.sha256} bytes={plan.byte_length}")
         for key, value in payload.items():
             if key not in {"plan_id", "sha256", "byte_length", "exclusions"}:
                 typer.echo(f"{key:24} {value}")
         for exclusion in result.exclusions:
             typer.echo(f"excluded {exclusion.category:16} {exclusion.path}")
             typer.echo(f"  {exclusion.explanation}")
+        typer.echo("\nNext:")
+        typer.echo(f"  kavita-ingest plan show {plan.id} --summary")
+        typer.echo(f"  kavita-ingest plan approve {plan.id} --digest {plan.sha256}")
     except ValueError as exc:
         typer.echo(f"REFUSED: {exc}", err=True)
+        typer.echo("No plan was created.", err=True)
+        typer.echo(
+            "Review and explicitly accept an identity, then run plan create again.", err=True
+        )
         raise typer.Exit(2) from exc
     finally:
         connection.close()
@@ -497,11 +527,52 @@ def plan_show(
             typer.echo(f"invalidated={invalidated['reason']} at {invalidated['invalidated_at']}")
         if superseded:
             typer.echo(
-                f"superseded_by={superseded['new_plan_id']} "
-                f"at {superseded['superseded_at']}"
+                f"superseded_by={superseded['new_plan_id']} at {superseded['superseded_at']}"
             )
         if not summary_only:
             typer.echo(plan.canonical_json.decode("utf-8"))
+    except (KeyError, ValueError, RuntimeError) as exc:
+        _expected_error(exc, hint="Use `kavita-ingest plan list` to see available plans.")
+    finally:
+        connection.close()
+
+
+@plan_app.command("list")
+def plan_list(
+    config: Annotated[Path | None, typer.Option("--config")] = None,
+    as_json: Annotated[bool, typer.Option("--json", help="Emit versioned JSON.")] = False,
+) -> None:
+    """List immutable plans without requiring guessed identifiers."""
+    connection, _ = _plan_store(config)
+    try:
+        rows = connection.execute(
+            """
+            SELECT p.id, p.status, p.created_at, p.approved_at, p.sha256,
+                   count(i.item_id) AS item_count,
+                   max(CASE WHEN x.plan_id IS NOT NULL THEN 1 ELSE 0 END) AS invalidated,
+                   max(CASE WHEN s.old_plan_id IS NOT NULL THEN 1 ELSE 0 END) AS superseded
+            FROM plans p
+            LEFT JOIN plan_items_index i ON i.plan_id=p.id
+            LEFT JOIN plan_invalidations x ON x.plan_id=p.id
+            LEFT JOIN plan_supersessions s ON s.old_plan_id=p.id
+            GROUP BY p.id ORDER BY p.id
+            """
+        ).fetchall()
+        values = [dict(row) for row in rows]
+        if as_json:
+            _emit_json("plan-list", {"plans": values})
+            return
+        if not values:
+            typer.echo("No plans exist.")
+            return
+        typer.echo("ID  Status    Created                    Approved  Flags         Items  Digest")
+        for row in values:
+            flags = ",".join(name for name in ("invalidated", "superseded") if row[name]) or "-"
+            typer.echo(
+                f"{row['id']:<3} {row['status']:<9} {str(row['created_at'])[:25]:<26} "
+                f"{'yes' if row['approved_at'] else 'no':<9} {flags:<13} "
+                f"{row['item_count']:<6} {str(row['sha256'])[:12]}"
+            )
     finally:
         connection.close()
 
@@ -517,6 +588,8 @@ def plan_approve(
     try:
         plan = store.approve(plan_id, digest)
         typer.echo(f"Approved plan {plan.id} sha256={plan.sha256}")
+    except (KeyError, ValueError, RuntimeError) as exc:
+        _expected_error(exc, hint="Use `kavita-ingest plan list` to see available plans.")
     finally:
         connection.close()
 
@@ -532,6 +605,8 @@ def plan_export(
     try:
         store.export(plan_id, destination)
         typer.echo(f"Exported plan {plan_id} to {destination}")
+    except (KeyError, ValueError, RuntimeError) as exc:
+        _expected_error(exc, hint="Use `kavita-ingest plan list` to see available plans.")
     finally:
         connection.close()
 
@@ -546,6 +621,8 @@ def plan_import(
     try:
         plan = store.import_bytes(source.read_bytes())
         typer.echo(f"Imported draft plan {plan.id} sha256={plan.sha256}")
+    except (OSError, ValueError, RuntimeError) as exc:
+        _expected_error(exc)
     finally:
         connection.close()
 
@@ -625,6 +702,22 @@ def _emit_json(command: str, payload: dict[str, object]) -> None:
     )
 
 
+def _expected_error(exc: Exception, *, hint: str | None = None) -> None:
+    typer.echo(f"REFUSED: {exc}.", err=True)
+    if hint:
+        typer.echo(hint, err=True)
+    raise typer.Exit(2) from exc
+
+
+def _candidate_detail(score: CandidateScore) -> str:
+    candidate = score.candidate
+    sequence = candidate.sequence
+    issue = f" #{sequence.normalized}" if sequence else ""
+    run = f"; run {candidate.run_start_year}" if candidate.run_start_year else ""
+    date = f"; {candidate.publication_date}" if candidate.publication_date else ""
+    return f"{candidate.series_title or candidate.title}{issue}{run}{date} ({score.score:.1f})"
+
+
 def _log_file(settings: object) -> Path:
     database = getattr(settings, "database_path", None)
     return (
@@ -686,7 +779,7 @@ def _workflow_menu() -> None:
         if choice == "1":
             scan(root, config=None, no_persist=False, as_json=False)
         elif choice == "2":
-            audit_command(root, config=None, details=False, as_json=False)
+            audit_command(root, config=None, details=False, metrics=False, as_json=False)
         else:
             review_command(root, config=None)
         return

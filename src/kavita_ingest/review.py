@@ -18,9 +18,16 @@ from .decisions import (
     add_manual_identity,
     add_manual_override,
     batch_accept,
+    batch_eligible_items,
 )
 from .domain import SourceRecord
-from .matching import CandidateScore, Reconciliation, reconcile, score_candidates
+from .matching import (
+    CandidateScore,
+    Reconciliation,
+    reconcile,
+    score_candidates,
+    usable_identity_scores,
+)
 from .provider_runtime import build_providers
 from .providers.models import NormalizedCandidate, ProviderName, RecordType
 from .run_groups import RunGroupRepository, run_group_key
@@ -37,24 +44,34 @@ def interactive_review(
     repository = DecisionRepository(connection)
     run_groups = RunGroupRepository(connection)
     providers = build_providers(connection, config.providers)
+    counts = {
+        key: 0 for key in ("accepted", "work_only", "manual", "rejected", "unresolved", "skipped")
+    }
     try:
         for item in audit.items:
             current = item
+            selected_rank = (
+                _displayed_scores(current)[0].rank if _displayed_scores(current) else None
+            )
+            decided = False
             while True:
-                _show_item(output, current)
-                action = (
-                    typer.prompt(
-                        "[A]ccept [N]ext [B]atch [R]eject [S]earch [E]dit "
-                        "[I]dentity [G]roup-run [W]ork-only [U]nresolved [K]skip "
-                        "e[X]plain [Q]uit",
-                        default="N",
-                    )
-                    .strip()
-                    .upper()
-                )
-                top = current.scores[0] if current.scores else None
-                if action == "X" and top:
-                    output.print("\n".join(top.explanation()))
+                _show_item(output, current, selected_rank)
+                prompt = _action_prompt(current, audit)
+                action = typer.prompt(prompt, default="N").strip().upper()
+                displayed = _displayed_scores(current)
+                selected = next((score for score in displayed if score.rank == selected_rank), None)
+                if action.isdigit() and any(score.rank == int(action) for score in displayed):
+                    selected_rank = int(action)
+                    continue
+                if action == "C" and displayed:
+                    rank = typer.prompt("Candidate rank", type=int)
+                    if any(score.rank == rank for score in displayed):
+                        selected_rank = rank
+                    else:
+                        output.print(f"Candidate rank {rank} is not displayed.")
+                    continue
+                if action == "X" and selected:
+                    output.print("\n".join(selected.explanation()))
                     continue
                 if action == "S":
                     query = typer.prompt(
@@ -94,6 +111,8 @@ def interactive_review(
                         tuple(scores),
                         reconcile(local, scores[0] if scores else None),
                     )
+                    displayed = _displayed_scores(current)
+                    selected_rank = displayed[0].rank if displayed else None
                     continue
                 if action == "E":
                     field = typer.prompt("Canonical field")
@@ -116,9 +135,12 @@ def interactive_review(
                         fields,
                     )
                     output.print("Manual canonical identity explicitly approved.")
+                    output.print("Decision saved.")
+                    counts["manual"] += 1
+                    decided = True
                     break
-                if action == "G" and top:
-                    candidate = top.candidate
+                if action == "G" and selected:
+                    candidate = selected.candidate
                     if (
                         candidate.provider is not ProviderName.COMIC_VINE
                         or not candidate.run_id
@@ -152,12 +174,16 @@ def interactive_review(
                         )
                         break
                     continue
-                if action == "A" and top:
-                    if not top.eligible and not typer.confirm(
-                        "Candidate is not batch-eligible. Accept anyway?"
-                    ):
+                if action == "A" and selected:
+                    if selected.candidate.record_type is RecordType.COMIC_RUN:
+                        output.print("A run provides context only; select an issue candidate.")
                         continue
-                    work_only = top.candidate.record_type is RecordType.BOOK_WORK
+                    if not selected.eligible and not typer.confirm(
+                        _low_confidence_message(selected)
+                    ):
+                        output.print("Not accepted; no decision was saved.")
+                        continue
+                    work_only = selected.candidate.record_type is RecordType.BOOK_WORK
                     if work_only and not typer.confirm(
                         "This candidate identifies only the work, not this EPUB edition. "
                         "Accept it work-only?"
@@ -166,31 +192,40 @@ def interactive_review(
                     accept_candidate(
                         repository,
                         current.scan.source,
-                        top,
-                        current.reconciliation,
+                        selected,
+                        reconcile(current.local, selected),
                         current.local.evidence_hash(),
                         work_only=work_only,
                     )
+                    output.print("Decision saved.")
+                    counts["work_only" if work_only else "accepted"] += 1
+                    decided = True
                     break
-                if action == "W" and top:
+                if action == "W" and selected and current.local.kind.value == "book":
                     accept_candidate(
                         repository,
                         current.scan.source,
-                        top,
-                        current.reconciliation,
+                        selected,
+                        reconcile(current.local, selected),
                         current.local.evidence_hash(),
                         work_only=True,
                     )
+                    output.print("Decision saved.")
+                    counts["work_only"] += 1
+                    decided = True
                     break
-                if action == "R" and top:
+                if action == "R" and selected:
                     repository.add(
                         current.scan.source,
                         DecisionType.REJECTED,
                         current.local.evidence_hash(),
-                        candidate_key=top.candidate.key,
-                        candidate_data_hash=top.candidate.data_hash(),
+                        candidate_key=selected.candidate.key,
+                        candidate_data_hash=selected.candidate.data_hash(),
                         payload={"explicit": True},
                     )
+                    output.print("Decision saved.")
+                    counts["rejected"] += 1
+                    decided = True
                     break
                 if action in {"U", "K"}:
                     repository.add(
@@ -199,6 +234,9 @@ def interactive_review(
                         current.local.evidence_hash(),
                         payload={"explicit": True},
                     )
+                    output.print("Decision saved.")
+                    counts["unresolved" if action == "U" else "skipped"] += 1
+                    decided = True
                     break
                 if action == "B":
                     eligible = _batch_items(audit)
@@ -207,11 +245,18 @@ def interactive_review(
                     )
                     if typer.confirm(f"Explicitly accept all {len(eligible)} items?"):
                         batch_accept(repository, eligible, confirmed_count=len(eligible))
+                        counts["accepted"] += len(eligible)
+                        output.print(f"Decisions saved: {len(eligible)}.")
+                    _show_summary(output, counts, len(audit.items))
                     return audit
                 if action == "Q":
+                    _show_summary(output, counts, len(audit.items))
                     return audit
                 if action == "N":
                     break
+            if not decided:
+                continue
+        _show_summary(output, counts, len(audit.items))
         return audit
     finally:
         connection.close()
@@ -220,25 +265,58 @@ def interactive_review(
 def _batch_items(
     audit: AuditResult,
 ) -> list[tuple[SourceRecord, CandidateScore, Reconciliation, str]]:
-    return [
+    items = [
         (item.scan.source, item.scores[0], item.reconciliation, item.local.evidence_hash())
         for item in audit.items
         if item.scores
     ]
+    return batch_eligible_items(items)
 
 
-def _show_item(console: Console, item: ReviewItem) -> None:
+def _show_item(console: Console, item: ReviewItem, selected_rank: int | None) -> None:
     console.rule(item.scan.source.path.name)
     console.print(
         f"Path: {item.scan.source.path}\n"
-        f"Local: {item.local.series_title or item.local.title} "
-        f"{item.local.sequence.normalized if item.local.sequence else ''}\n"
         f"Classification: {item.local.kind.value}/{item.local.subtype} "
         f"({item.local.classification_confidence:.2f})"
     )
-    table = Table("Rank", "Candidate", "Type", "Score", "Margin", "Eligible")
-    for score in item.scores[:5]:
+    if item.local.kind.value == "comic":
+        console.print(
+            f"Series: {item.local.series_title or item.local.title}\n"
+            f"Issue: {item.local.sequence.normalized if item.local.sequence else 'unresolved'}\n"
+            f"Publication year evidence: {item.local.year or 'unresolved'}\n"
+            f"Run start: {item.local.run_start_year or 'unresolved'}"
+        )
+        table = Table(
+            "",
+            "Rank",
+            "Issue",
+            "Run context",
+            "Publication",
+            "Score",
+            "Eligible",
+        )
+    else:
+        console.print(f"Local title: {item.local.title}")
+        table = Table("", "Rank", "Candidate", "Type", "Score", "Margin", "Eligible")
+    displayed = _displayed_scores(item)
+    for score in displayed:
+        marker = ">" if score.rank == selected_rank else ""
+        if item.local.kind.value == "comic":
+            table.add_row(
+                marker,
+                str(score.rank),
+                f"{score.candidate.series_title or '-'} "
+                f"#{score.candidate.sequence.normalized if score.candidate.sequence else '-'}\n"
+                f"{score.candidate.title}",
+                f"start {score.candidate.run_start_year or '-'}\n{score.candidate.run_id or '-'}",
+                f"{score.candidate.publication_date or '-'}\n{score.candidate.publisher or '-'}",
+                f"{score.score:.1f}",
+                "yes" if score.eligible else "no",
+            )
+            continue
         table.add_row(
+            marker,
             str(score.rank),
             score.candidate.title,
             score.candidate.record_type.value,
@@ -247,12 +325,63 @@ def _show_item(console: Console, item: ReviewItem) -> None:
             "yes" if score.eligible else "no",
         )
     console.print(table)
+    if not displayed:
+        console.print("No useful identity candidates are available.")
     if item.reconciliation.work_state:
         console.print(
             f"Work: {item.reconciliation.work_state}; Edition: {item.reconciliation.edition_state}"
         )
     if item.generation.unavailable:
         console.print("Unavailable: " + "; ".join(item.generation.unavailable))
+
+
+def _displayed_scores(item: ReviewItem) -> list[CandidateScore]:
+    return usable_identity_scores(item.scores)[:9]
+
+
+def _action_prompt(item: ReviewItem, audit: AuditResult) -> str:
+    displayed = _displayed_scores(item)
+    actions = ["[N]ext source"]
+    if len(_batch_items(audit)) > 0:
+        actions.append("[B]atch")
+    if displayed:
+        actions.insert(0, "[A]ccept")
+        actions.extend(["[R]eject", "[C]hoose candidate"])
+    actions.extend(["[S]earch", "[E]dit", "[I]dentity"])
+    if displayed:
+        if any(score.candidate.run_id for score in displayed):
+            actions.append("[G]roup-run")
+        if item.local.kind.value == "book":
+            actions.append("[W]ork-only")
+        actions.append("e[X]plain")
+    actions.extend(["[U]nresolved", "[K]skip", "[Q]uit"])
+    return " ".join(actions)
+
+
+def _low_confidence_message(score: CandidateScore) -> str:
+    reason = (
+        "several candidates remain tied"
+        if score.runner_up_margin < 1
+        else "the evidence does not meet the safe high-confidence threshold"
+    )
+    return (
+        "This match is below the safe high-confidence threshold.\n\n"
+        f"Score: {score.score:.1f}\nRunner-up margin: {score.runner_up_margin:.1f}\n"
+        f"Reason: {reason}.\n\nAccept this specific candidate anyway?"
+    )
+
+
+def _show_summary(console: Console, counts: dict[str, int], total: int) -> None:
+    decided = sum(counts.values())
+    console.print("\nReview complete.\n")
+    console.print(f"Accepted:    {counts['accepted']}")
+    console.print(f"Work-only:   {counts['work_only']}")
+    console.print(f"Manual:      {counts['manual']}")
+    console.print(f"Rejected:    {counts['rejected']}")
+    console.print(f"Unresolved:  {counts['unresolved']}")
+    console.print(f"Skipped:     {counts['skipped']}")
+    console.print(f"No decision: {max(total - decided, 0)}")
+    console.print("\nNo media files were modified.")
 
 
 def _manual_identity_fields(item: ReviewItem) -> dict[str, str]:
@@ -272,9 +401,7 @@ def _manual_identity_fields(item: ReviewItem) -> dict[str, str]:
         _optional_prompt(fields, "isbn", "ISBN")
         return fields
     fields = {
-        "series_title": typer.prompt(
-            "Canonical series", default=local.series_title or local.title
-        ),
+        "series_title": typer.prompt("Canonical series", default=local.series_title or local.title),
         "title": typer.prompt("Issue/collection title", default=local.title),
     }
     item_type = typer.prompt(
@@ -300,7 +427,7 @@ def _manual_identity_fields(item: ReviewItem) -> dict[str, str]:
         )
     if item_type in {"issue", "annual", "special"}:
         fields["run_start_year"] = typer.prompt(
-            "Run start year", default=str(local.run_start_year or local.year or "")
+            "Run start year", default=str(local.run_start_year or "")
         )
     if item_type in {"trade", "collected-edition", "omnibus"}:
         _optional_prompt(fields, "collection_volume", "Integer collection volume")

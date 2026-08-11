@@ -37,6 +37,7 @@ from kavita_ingest.providers.models import (
     RecordType,
     SearchQuery,
 )
+from kavita_ingest.resolution import resolve_explicit_identity
 
 
 class FakeProvider:
@@ -157,6 +158,100 @@ class TitleDisambiguationClient:
         )
 
 
+class IsolatedLaterIssueClient:
+    def __init__(self) -> None:
+        self.operations: list[str] = []
+
+    def get(
+        self,
+        operation: str,
+        url: str,
+        public_params: dict[str, str],
+        secret_params: dict[str, str],
+        bucket: str,
+        normalize: Callable[[object], list[NormalizedCandidate]],
+    ) -> list[NormalizedCandidate]:
+        del url, secret_params, bucket
+        self.operations.append(operation)
+        if operation == "search-runs":
+            return normalize(
+                {
+                    "results": [
+                        _comic_vine_record("volume", 160294, "Absolute Batman", start_year=2024),
+                        _comic_vine_record("volume", 260294, "Absolute Batman", start_year=2026),
+                        _comic_vine_record("volume", 360294, "Absolute Batman", start_year=1989),
+                    ]
+                }
+            )
+        volume = int(public_params["filter"].split(",", 1)[0].split(":", 1)[1])
+        number = public_params["filter"].rsplit(":", 1)[-1]
+        if volume == 360294:
+            return normalize({"results": []})
+        date = "2026-01-15" if volume == 160294 else "2027-04-01"
+        return normalize(
+            {
+                "results": [
+                    {
+                        **_comic_vine_record("issue", volume + 1, "The Zoo"),
+                        "issue_number": number,
+                        "cover_date": date,
+                        "volume": {
+                            "id": volume,
+                            "name": "Absolute Batman",
+                            "start_year": 2024 if volume == 160294 else 2026,
+                            "api_detail_url": (
+                                f"https://comicvine.gamespot.com/api/volume/4050-{volume}/"
+                            ),
+                        },
+                    }
+                ]
+            }
+        )
+
+
+class IssueOneYearTrapClient:
+    def get(
+        self,
+        operation: str,
+        url: str,
+        public_params: dict[str, str],
+        secret_params: dict[str, str],
+        bucket: str,
+        normalize: Callable[[object], list[NormalizedCandidate]],
+    ) -> list[NormalizedCandidate]:
+        del url, secret_params, bucket
+        if operation == "search-runs":
+            return normalize(
+                {
+                    "results": [
+                        _comic_vine_record("volume", 2025, "Future Comic", start_year=2025),
+                        _comic_vine_record("volume", 2026, "Future Comic", start_year=2026),
+                    ]
+                }
+            )
+        volume = int(public_params["filter"].split(",", 1)[0].split(":", 1)[1])
+        date = "2026-02-01" if volume == 2025 else "2027-02-01"
+        return normalize(
+            {
+                "results": [
+                    {
+                        **_comic_vine_record("issue", volume * 10, "First Issue"),
+                        "issue_number": "1",
+                        "cover_date": date,
+                        "volume": {
+                            "id": volume,
+                            "name": "Future Comic",
+                            "start_year": volume,
+                            "api_detail_url": (
+                                f"https://comicvine.gamespot.com/api/volume/4050-{volume}/"
+                            ),
+                        },
+                    }
+                ]
+            }
+        )
+
+
 def _comic_vine_record(
     resource: str, identifier: int, name: str, *, start_year: int | None = None
 ) -> dict[str, object]:
@@ -164,13 +259,12 @@ def _comic_vine_record(
     return {
         "id": identifier,
         "resource_type": resource,
-        "api_detail_url": (
-            f"https://comicvine.gamespot.com/api/{resource}/{prefix}-{identifier}/"
-        ),
+        "api_detail_url": (f"https://comicvine.gamespot.com/api/{resource}/{prefix}-{identifier}/"),
         "name": name,
         "start_year": start_year,
         "publisher": {"name": "Marvel"},
     }
+
 
 def _edition() -> NormalizedCandidate:
     return NormalizedCandidate(
@@ -249,12 +343,179 @@ def test_comic_run_is_resolved_once_and_reused_without_implicit_approval() -> No
     first_result = generate_candidates(first, (provider,), session)
     later_result = generate_candidates(later, (provider,), session)
 
-    assert client.operations == ["search-runs", "issues-in-run", "issues-in-run"]
+    assert client.operations == [
+        "search-runs",
+        "issues-in-run",
+        "issues-in-run",
+        "issues-in-run",
+    ]
     assert first_result.candidates[0].run_id == "4050-160294"
     assert later_result.candidates[0].sequence == SequenceNumber.parse("14")
     assert "comic_vine:run-reused" in later_result.queries
     assert session.metrics()["repeated_run_queries_avoided"] == 1
-    assert session.metrics()["run_disambiguation_queries"] == 0
+    assert session.metrics()["run_disambiguation_queries"] == 2
+
+
+def test_issue_one_publication_year_cannot_filter_same_title_runs() -> None:
+    provider = ComicVineProvider(IssueOneYearTrapClient(), "secret")  # type: ignore[arg-type]
+    local = LocalIdentity(
+        MediaKind.COMIC,
+        "issue",
+        0.98,
+        "Future Comic",
+        series_title="Future Comic",
+        sequence=SequenceNumber.parse("1"),
+        year=2026,
+    )
+    session = CandidateSession.from_local_identities([local])
+
+    result = generate_candidates(local, (provider,), session)
+
+    assert session.run_start_hints == {}
+    assert len(result.candidates) == 1
+    assert result.candidates[0].run_id == "4050-2025"
+    assert result.candidates[0].run_start_year == 2025
+    assert result.candidates[0].publication_date == "2026-02-01"
+
+
+def test_explicit_run_start_evidence_remains_a_run_constraint() -> None:
+    local = LocalIdentity(
+        MediaKind.COMIC,
+        "issue",
+        0.98,
+        "Future Comic",
+        series_title="Future Comic",
+        sequence=SequenceNumber.parse("1"),
+        year=2026,
+        run_start_year=2025,
+    )
+
+    session = CandidateSession.from_local_identities([local])
+    provider = ComicVineProvider(IssueOneYearTrapClient(), "secret")  # type: ignore[arg-type]
+
+    result = generate_candidates(local, (provider,), session)
+
+    assert session.run_start_hints == {"future comic": 2025}
+    assert len(result.candidates) == 1
+    assert result.candidates[0].run_id == "4050-2025"
+
+
+def test_isolated_later_issue_uses_publication_year_as_issue_evidence() -> None:
+    client = IsolatedLaterIssueClient()
+    provider = ComicVineProvider(client, "secret")  # type: ignore[arg-type]
+    local = LocalIdentity(
+        MediaKind.COMIC,
+        "issue",
+        0.98,
+        "Absolute Batman",
+        series_title="Absolute Batman",
+        sequence=SequenceNumber.parse("14"),
+        year=2026,
+    )
+    session = CandidateSession.from_local_identities([local])
+
+    result = generate_candidates(local, (provider,), session)
+    scores = score_candidates(local, list(result.candidates), MatchingSettings())
+
+    assert session.run_start_hints == {}
+    assert len(result.candidates) == 1
+    assert result.candidates[0].record_type is RecordType.COMIC_ISSUE
+    assert result.candidates[0].run_id == "4050-160294"
+    assert result.candidates[0].run_start_year == 2024
+    assert result.candidates[0].sequence == SequenceNumber.parse("14")
+    assert result.candidates[0].publication_date == "2026-01-15"
+    assert scores[0].score == 100
+    assert session.resolved_runs["absolute batman"].provider_id == "4050-160294"  # type: ignore[union-attr]
+
+
+@pytest.mark.parametrize("numbers", [list(range(14, 23)), list(range(22, 13, -1))])
+def test_later_issues_only_group_resolves_independently_of_scan_order(
+    numbers: list[int],
+) -> None:
+    client = IsolatedLaterIssueClient()
+    provider = ComicVineProvider(client, "secret")  # type: ignore[arg-type]
+    locals_ = [
+        LocalIdentity(
+            MediaKind.COMIC,
+            "issue",
+            0.98,
+            "Absolute Batman",
+            series_title="Absolute Batman",
+            sequence=SequenceNumber.parse(str(number)),
+            year=2026,
+        )
+        for number in numbers
+    ]
+    session = CandidateSession.from_local_identities(locals_)
+
+    results = [generate_candidates(local, (provider,), session) for local in locals_]
+
+    assert all(result.candidates[0].record_type is RecordType.COMIC_ISSUE for result in results)
+    assert all(result.candidates[0].run_id == "4050-160294" for result in results)
+    assert session.metrics()["repeated_run_queries_avoided"] == len(numbers) - 1
+
+
+def test_comic_run_is_never_a_valid_issue_candidate_or_decision(tmp_path: Path) -> None:
+    local = LocalIdentity(
+        MediaKind.COMIC,
+        "issue",
+        0.98,
+        "Absolute Batman",
+        series_title="Absolute Batman",
+        sequence=SequenceNumber.parse("14"),
+    )
+    run = NormalizedCandidate(
+        ProviderName.COMIC_VINE,
+        "4050-160294",
+        RecordType.COMIC_RUN,
+        MediaKind.COMIC,
+        "Absolute Batman",
+        series_title="Absolute Batman",
+        run_start_year=2024,
+    )
+    score = score_candidates(local, [run], MatchingSettings())[0]
+    assert score.hard_contradiction
+    repository, connection = _repository(tmp_path)
+    try:
+        with pytest.raises(ValueError, match="run-group context"):
+            accept_candidate(
+                repository,
+                _source("/incoming/issue.cbz"),
+                score,
+                reconcile(local, score),
+                local.evidence_hash(),
+            )
+    finally:
+        connection.close()  # type: ignore[union-attr]
+
+
+def test_historical_accepted_comic_run_is_not_plan_eligible(tmp_path: Path) -> None:
+    repository, connection = _repository(tmp_path)
+    source = _source("/incoming/issue.cbz")
+    run = NormalizedCandidate(
+        ProviderName.COMIC_VINE,
+        "4050-160294",
+        RecordType.COMIC_RUN,
+        MediaKind.COMIC,
+        "Absolute Batman",
+        series_title="Absolute Batman",
+        run_start_year=2024,
+    )
+    try:
+        repository.add(
+            source,
+            DecisionType.ACCEPTED,
+            "evidence",
+            candidate_key=run.key,
+            candidate_data_hash=run.data_hash(),
+            payload={"candidate": run.to_dict(), "explicit": True},
+        )
+        resolved = resolve_explicit_identity(repository, source, MediaKind.COMIC)
+        assert not resolved.eligible
+        assert resolved.identity is None
+        assert "cannot resolve" in resolved.blocks[0]
+    finally:
+        connection.close()  # type: ignore[union-attr]
 
 
 def test_comic_run_uses_issue_title_only_when_it_disambiguates() -> None:

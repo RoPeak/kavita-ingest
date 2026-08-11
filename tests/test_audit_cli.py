@@ -83,8 +83,13 @@ offline = true
     )
     result = CliRunner().invoke(app, ["audit", str(incoming), "--config", str(config)])
     assert result.exit_code == 0, result.output
-    assert "no_candidate" in result.output
+    assert "Unresolved:         1" in result.output
     assert "No identity was accepted" in result.output
+
+    refused = CliRunner().invoke(app, ["plan", "create", str(incoming), "--config", str(config)])
+    assert refused.exit_code == 2
+    assert "No plan was created." in refused.output
+    assert "Traceback" not in refused.output
 
 
 def test_interactive_review_records_explicit_unresolved_decision(tmp_path: Path) -> None:
@@ -101,7 +106,8 @@ def test_interactive_review_records_explicit_unresolved_decision(tmp_path: Path)
         app, ["review", str(incoming), "--config", str(config)], input="U\n"
     )
     assert result.exit_code == 0, result.output
-    assert "[A]ccept" in result.output
+    assert "[S]earch" in result.output
+    assert "[A]ccept" not in result.output
     with sqlite3.connect(database) as connection:
         assert connection.execute("SELECT decision_type FROM decisions").fetchone() == (
             "unresolved",

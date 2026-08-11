@@ -74,9 +74,7 @@ def _database_status(path: Path | None) -> tuple[str, str]:
     try:
         with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as connection:
             result = connection.execute("PRAGMA integrity_check").fetchone()
-            migration = connection.execute(
-                "SELECT max(version) FROM schema_migrations"
-            ).fetchone()
+            migration = connection.execute("SELECT max(version) FROM schema_migrations").fetchone()
         if not result or result[0] != "ok":
             return "BLOCKED", "integrity check failed"
         return "OK", f"{path}; schema={migration[0] or 0}; integrity=ok"
@@ -111,12 +109,14 @@ def _lock_status(path: Path | None) -> tuple[str, str]:
 def _path_checks(config: AppConfig) -> list[Check]:
     output: list[Check] = []
     for index, incoming in enumerate(config.incoming_roots, 1):
-        output.append(_path_check("paths", f"incoming-{index}", incoming))
+        output.append(
+            _path_check("paths", f"incoming-{index}", incoming, config.archive_total_size_limit)
+        )
     for name, root in (("books", config.books_root), ("comics", config.comics_root)):
         if root is None:
             output.append(Check("paths", name, "BLOCKED", "not configured"))
             continue
-        output.append(_path_check("paths", name, root))
+        output.append(_path_check("paths", name, root, config.archive_total_size_limit))
         probe = LinuxFilesystem().probe_no_clobber(root)
         output.append(
             Check(
@@ -136,13 +136,16 @@ def _path_checks(config: AppConfig) -> list[Check]:
             )
         )
     else:
-        output.append(_path_check("paths", "staging", config.staging_root))
+        output.append(
+            _path_check("paths", "staging", config.staging_root, config.archive_total_size_limit)
+        )
         output.append(
             Check(
                 "paths",
                 "staging-semantics",
                 "OK",
-                "apply ignores cross-filesystem staging and stages beside each destination",
+                "configured path is for diagnostic/tooling work; safety-critical apply staging "
+                "is action-specific and created beside each destination for atomic publication",
             )
         )
     return output
@@ -189,19 +192,22 @@ def _planning_checks(config: AppConfig) -> list[Check]:
     ]
 
 
-def _path_check(category: str, name: str, path: Path) -> Check:
+def _path_check(category: str, name: str, path: Path, archive_limit: int) -> Check:
     if not path.exists():
         return Check(category, name, "BLOCKED", f"path does not exist: {path}")
     if not path.is_dir():
         return Check(category, name, "BLOCKED", f"not a directory: {path}")
     usage = shutil.disk_usage(path)
     writable = os.access(path, os.W_OK | os.X_OK)
+    low_space = usage.free < max(1024**3, archive_limit // 2)
+    status = "WARN" if writable and low_space else "OK" if writable else "BLOCKED"
+    warning = "; large CBR repacks may be blocked by apply preflight" if low_space else ""
     return Check(
         category,
         name,
-        "OK" if writable else "BLOCKED",
+        status,
         f"{path}; writable={str(writable).lower()}; free={_human_bytes(usage.free)}; "
-        f"device={path.stat().st_dev}",
+        f"device={path.stat().st_dev}{warning}",
     )
 
 
@@ -283,9 +289,7 @@ def _provider_checks(config: AppConfig) -> list[Check]:
             "disabled"
             if not config.providers.google_books_enabled
             else (
-                "API key present"
-                if config.providers.google_books_api_key
-                else "anonymous access"
+                "API key present" if config.providers.google_books_api_key else "anonymous access"
             ),
         ),
         Check(
@@ -377,9 +381,7 @@ def _apply_database_checks(path: Path | None) -> list[Check]:
                 for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")
             }
             if "apply_runs" not in tables:
-                return [
-                    Check("application", "apply-state", "INFO", "apply migration not applied")
-                ]
+                return [Check("application", "apply-state", "INFO", "apply migration not applied")]
             active = connection.execute(
                 "SELECT count(*) FROM apply_runs WHERE status IN "
                 "('preflighting', 'running', 'recovery_required')"

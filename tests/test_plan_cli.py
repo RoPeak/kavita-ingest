@@ -80,6 +80,42 @@ def test_plan_cli_import_show_approve_export_and_reimport_are_digest_bound(tmp_p
     assert imported.exit_code == 0 and "draft plan" in imported.output
 
 
+def test_plan_list_and_expected_errors_do_not_leak_tracebacks(tmp_path: Path) -> None:
+    runner = CliRunner()
+    config = _config(tmp_path)
+    missing = runner.invoke(app, ["plan", "show", "99", "--config", str(config)])
+    assert missing.exit_code == 2
+    assert "REFUSED: 'plan 99 does not exist'." in missing.output
+    assert "Traceback" not in missing.output
+    approve = runner.invoke(
+        app,
+        ["plan", "approve", "99", "--digest", "0" * 64, "--config", str(config)],
+    )
+    assert approve.exit_code == 2
+    assert "Traceback" not in approve.output
+    status = runner.invoke(app, ["apply-status", "99", "--config", str(config)])
+    assert status.exit_code == 2
+    assert "Traceback" not in status.output
+    empty = runner.invoke(app, ["plan", "list", "--config", str(config)])
+    assert empty.exit_code == 0 and "No plans exist." in empty.output
+
+    imported = runner.invoke(
+        app, ["plan", "import", str(_plan_file(tmp_path)), "--config", str(config)]
+    )
+    assert imported.exit_code == 0
+    listed = runner.invoke(app, ["plan", "list", "--config", str(config)])
+    assert listed.exit_code == 0
+    assert "draft" in listed.output and "Items" in listed.output
+
+    mismatch = runner.invoke(
+        app,
+        ["plan", "approve", "1", "--digest", "0" * 64, "--config", str(config)],
+    )
+    assert mismatch.exit_code == 2
+    assert "approval digest does not match" in mismatch.output
+    assert "Traceback" not in mismatch.output
+
+
 def test_run_group_cli_is_auditable_clearable_and_does_not_approve_items(tmp_path: Path) -> None:
     runner = CliRunner()
     config = _config(tmp_path)

@@ -4,7 +4,11 @@ from pathlib import Path
 
 import pytest
 
-from kavita_ingest.logging_config import RedactingFilter, configure_logging
+from kavita_ingest.logging_config import (
+    RedactingFilter,
+    configure_logging,
+    set_console_verbosity,
+)
 
 
 def test_file_logging_failure_falls_back_to_stderr(
@@ -45,3 +49,20 @@ def test_redacting_filter_never_changes_log_control_flow() -> None:
 
     record = logging.LogRecord("test", logging.INFO, __file__, 1, "ordinary", (), None)
     assert RedactingFilter().filter(record)
+
+
+def test_console_defaults_to_warnings_and_verbose_enables_info(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import logging
+
+    set_console_verbosity()
+    configure_logging("INFO")
+    logging.getLogger("fixture").info("quiet-info")
+    assert "quiet-info" not in capsys.readouterr().err
+
+    set_console_verbosity(verbose=True)
+    configure_logging("INFO")
+    logging.getLogger("fixture").info("visible-info")
+    assert "visible-info" in capsys.readouterr().err
+    set_console_verbosity()
