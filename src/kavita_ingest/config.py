@@ -60,10 +60,11 @@ class AppConfig:
 def load_config(path: Path | None = None, app_paths: AppPaths | None = None) -> AppConfig:
     locations = app_paths or AppPaths.default()
     config_path = path or locations.config_file
-    if not config_path.exists():
-        return AppConfig(database_path=locations.database_file)
-    with config_path.open("rb") as handle:
-        raw = tomllib.load(handle)
+    if config_path.exists():
+        with config_path.open("rb") as handle:
+            raw = tomllib.load(handle)
+    else:
+        raw = {}
     paths = _table(raw, "paths")
     archive = _table(raw, "archive")
     logging = _table(raw, "logging")

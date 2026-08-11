@@ -4,6 +4,8 @@ import importlib.resources
 import sqlite3
 from pathlib import Path
 
+import pytest
+
 from kavita_ingest.config import load_config
 from kavita_ingest.db import connect, migrate
 from kavita_ingest.paths import AppPaths
@@ -48,6 +50,21 @@ level = "debug"
         Path("/srv/staging"),
         Path("/srv/ignore"),
     } == set(config.excluded_roots())
+
+
+def test_missing_toml_still_loads_provider_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("COMIC_VINE_API_KEY", "comic-secret")
+    monkeypatch.setenv("GOOGLE_BOOKS_API_KEY", "google-secret")
+    monkeypatch.setenv("KAVITA_INGEST_OPEN_LIBRARY_CONTACT", "contact@example.test")
+
+    config = load_config(app_paths=_paths(tmp_path))
+
+    assert config.database_path == tmp_path / "state/state.sqlite3"
+    assert config.providers.comic_vine_api_key == "comic-secret"
+    assert config.providers.google_books_api_key == "google-secret"
+    assert config.providers.open_library_contact == "contact@example.test"
 
 
 def test_new_database_applies_numbered_migration_without_backup(tmp_path: Path) -> None:
