@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import sqlite3
 from dataclasses import dataclass
@@ -9,6 +10,8 @@ from enum import StrEnum
 from typing import Any
 
 from .matching import CandidateScore
+
+LOGGER = logging.getLogger(__name__)
 
 
 class RunGroupDecisionType(StrEnum):
@@ -105,6 +108,12 @@ class RunGroupRepository:
         self.connection.commit()
         if cursor.lastrowid is None:
             raise RuntimeError("run-group decision insert returned no id")
+        LOGGER.info(
+            "recorded run-group decision id=%s group=%s type=%s",
+            cursor.lastrowid,
+            group_key,
+            decision_type.value,
+        )
         return RunGroupDecision(
             int(cursor.lastrowid),
             group_key,

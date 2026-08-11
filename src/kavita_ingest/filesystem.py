@@ -19,6 +19,12 @@ class CommitUnsupported(OSError):
     pass
 
 
+@dataclass(frozen=True, slots=True)
+class PublicationProbe:
+    supported: bool
+    detail: str
+
+
 class NoClobberFilesystem(Protocol):
     def ensure_directory(self, root: Path, directory: Path) -> None: ...
 
@@ -29,6 +35,8 @@ class NoClobberFilesystem(Protocol):
     def durable_unlink(self, path: Path) -> None: ...
 
     def copy_for_archive(self, source: Path, archive: Path, expected_hash: str) -> None: ...
+
+    def probe_no_clobber(self, root: Path) -> PublicationProbe: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,6 +69,7 @@ class LinuxFilesystem:
         _fsync_directory(path.parent)
 
     def commit(self, staged: Path, destination: Path) -> None:
+        """Publish a sealed staged inode; callers must never write it after linking."""
         if not sys.platform.startswith("linux"):
             raise CommitUnsupported("atomic no-clobber publication is supported only on Linux")
         if not destination.parent.is_dir():
@@ -102,6 +111,34 @@ class LinuxFilesystem:
             self.commit(staged, archive)
         finally:
             staged.unlink(missing_ok=True)
+
+    def probe_no_clobber(self, root: Path) -> PublicationProbe:
+        if not sys.platform.startswith("linux"):
+            return PublicationProbe(False, "atomic no-clobber publication is Linux-only")
+        if not root.is_dir():
+            return PublicationProbe(False, f"configured root is unavailable: {root}")
+        try:
+            with tempfile.TemporaryDirectory(prefix=".kavita-ingest-doctor-", dir=root) as name:
+                directory = Path(name)
+                staged = directory / "staged"
+                destination = directory / "destination"
+                staged.write_bytes(b"kavita-ingest-publication-probe")
+                self.make_file_durable(staged)
+                os.link(staged, destination, follow_symlinks=False)
+                try:
+                    os.link(staged, destination, follow_symlinks=False)
+                except FileExistsError:
+                    pass
+                else:
+                    return PublicationProbe(False, "existing destination was not protected")
+                if staged.stat().st_ino != destination.stat().st_ino:
+                    return PublicationProbe(False, "publication did not preserve the staged inode")
+                _fsync_file(destination)
+                _fsync_directory(directory)
+            _fsync_directory(root)
+        except OSError as exc:
+            return PublicationProbe(False, f"hard-link publication probe failed: {exc}")
+        return PublicationProbe(True, "atomic hard-link no-clobber publication is supported")
 
 
 def sha256_file(path: Path) -> str:

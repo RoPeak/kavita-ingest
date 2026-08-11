@@ -1,120 +1,240 @@
 # Kavita Ingest
 
-Kavita Ingest provides read-only discovery, inspection, local classification,
-external metadata matching, explicit identity review, staged metadata writers,
-immutable offline plans, and recoverable plan execution for EPUB, PDF, CBZ,
-and ordinary single-file RAR3/RAR5 CBR sources.
+Kavita Ingest is a safety-focused Linux CLI for identifying, reviewing, planning,
+and organizing ebooks and digital comics into Kavita-friendly libraries. It
+supports explicit metadata matching, immutable offline plans, verified staged
+writes, atomic no-overwrite publication, and crash recovery.
 
-## Development
+It is designed for a deliberate workflow: the program may rank a match, but a
+person accepts the identity and separately approves the exact filesystem plan.
+
+## Scope
+
+Supported inputs and transformations:
+
+| Input | Inspection | Metadata output | Notes |
+| --- | --- | --- | --- |
+| EPUB | Yes | EPUB/OPF | Calibre plus narrow contributor-role OPF patching |
+| PDF | Yes | PDF metadata | Unsigned, unencrypted PDFs only |
+| CBZ | Yes | CBZ + ComicInfo 2.1 | Existing publication payloads preserved |
+| CBR/RAR3 | Yes | Repacked CBZ + ComicInfo | Single-volume ordinary archives |
+| CBR/RAR5 | Yes | Repacked CBZ + ComicInfo | Single-volume ordinary archives |
+
+Book output targets a Kavita **Books** library. Comics target Kavita **Comic
+(Flexible)**; projected ComicInfo `Series` includes a run-start year when needed
+to distinguish same-named runs.
+
+Kavita Ingest does not download media, manipulate Kavita's database, watch
+directories as a daemon, silently accept matches, provide a GUI, or reconstruct
+a deleted original through rollback.
+
+## Requirements
+
+- Linux and Python 3.12 or newer.
+- A destination filesystem supporting hard links.
+- Calibre's `ebook-meta` for EPUB metadata writes.
+- `unrar` for CBR/RAR inspection and repacking.
+
+Milestone 0 validated Calibre/`ebook-meta` 7.6.0 and `unrar` 7.0.7. These are
+known-good versions, not claimed universal minimum versions. `kavita-ingest
+doctor` reports the actual local capabilities before use. Docker is not
+required.
+
+## Installation
+
+For an isolated command-line installation, use `pipx` from a local clone:
+
+```bash
+sudo apt install calibre unrar pipx
+pipx install '/path/to/kavita-ingest[compatibility]'
+kavita-ingest --version
+```
+
+For development:
 
 ```bash
 python3 -m venv .venv
 .venv/bin/pip install -e '.[dev,compatibility]'
 .venv/bin/pytest -q
 .venv/bin/ruff check src tests
-.venv/bin/mypy src
+.venv/bin/mypy --strict src
 ```
 
-```bash
-.venv/bin/kavita-ingest doctor
-.venv/bin/kavita-ingest scan /path/to/incoming --no-persist
-.venv/bin/kavita-ingest audit /path/to/incoming
-.venv/bin/kavita-ingest review /path/to/incoming
-.venv/bin/kavita-ingest run-group history comic:watchmen
-.venv/bin/kavita-ingest plan create resolved-plan.json
-.venv/bin/kavita-ingest plan show 1
-.venv/bin/kavita-ingest plan approve 1 --digest DISPLAYED_SHA256
-.venv/bin/kavita-ingest apply 1
-.venv/bin/kavita-ingest apply-status 1
-.venv/bin/kavita-ingest recover 1
-.venv/bin/kavita-ingest rollback 1
-```
-
-Omit `--no-persist` to retain source fingerprints, inspection outcomes, and
-classification hypotheses in the state database. Scanning never modifies a
-source file.
+The package exposes the `kavita-ingest` console script and is currently version
+`0.1.0`, a pre-1.0 MVP.
 
 ## Configuration
 
-The default configuration is
-`~/.config/kavita-ingest/config.toml`; state defaults to
-`~/.local/state/kavita-ingest/` on Linux. All path values are optional.
+Create a commented configuration without embedding provider secrets:
+
+```bash
+kavita-ingest init
+kavita-ingest doctor
+```
+
+`init` refuses to overwrite an existing file unless `--force` is explicitly
+given. The default locations follow the operating system's XDG directories:
+
+- Config: `~/.config/kavita-ingest/config.toml`
+- State database and rotating log: `~/.local/state/kavita-ingest/`
+
+Core path configuration resembles:
 
 ```toml
 [paths]
 incoming = ["~/Incoming/Reading"]
-books = "/srv/kavita/books"
-comics = "/srv/kavita/comics"
-staging = "/srv/kavita/.staging"
-ignore = ["~/Incoming/Reading/ignore"]
-# database = "~/.local/state/kavita-ingest/state.sqlite3"
+books = "~/Libraries/Kavita/Books"
+comics = "~/Libraries/Kavita/Comics"
+staging = "~/Libraries/Kavita/.staging"
 
-[archive]
-max_entries = 5000
-max_entry_bytes = 536870912
-max_total_bytes = 4294967296
-max_path_depth = 20
-max_ratio = 1000.0
+[source]
+lifecycle = "preserve"
+# archive_root = "~/Archives/Reading-Originals"
 
-[logging]
-level = "INFO"
-
-[providers]
-offline = false
-cache_ttl_seconds = 604800
-timeout_seconds = 15
-
-[providers.open_library]
-# contact = "you@example.com"
-identified_interval = 0.4
-unidentified_interval = 1.25
-
-[providers.google_books]
-min_interval = 0.25
-# api_key = "..."
+[cbr]
+convert_to_cbz = true
 
 [providers.comic_vine]
-max_requests = 180
-window_seconds = 3600
-min_interval = 1.25
-# api_key = "..."
-
-[matching]
-eligible_score = 92
-eligible_margin = 12
-classification_confidence = 0.90
+enabled = false
 ```
 
-Destination, staging, and ignored roots are excluded during discovery. Before
-an existing SQLite database receives any pending schema migration, Kavita
-Ingest creates and integrity-checks a timestamped SQLite backup.
+Apply always creates its action-specific staging area on the destination
+filesystem, regardless of the convenience staging path. Dangerous nesting,
+identical Books/Comics roots, invalid thresholds and archive limits, and an
+archive lifecycle without an archive root are configuration errors rather than
+silently corrected assumptions.
 
-Multi-volume RAR sets are detected and left untouched. For this MVP, one
-logical comic archive must be represented by one physical CBR/RAR file.
+### Providers
 
-Provider responses and rate reservations are persisted in SQLite. Candidate
-scores never imply approval: acceptance, rejection, work-only acceptance,
-manual overrides, unresolved, and skipped outcomes are append-only explicit
-decisions bound to source content fingerprints.
+Open Library requires no account or API key. A contact identity is recommended
+so requests use its identified rate policy. Configure secrets in the process
+environment:
 
-Comic run-group choices are separate append-only decisions: selecting a run
-constrains later candidate generation but never accepts an individual issue.
-They can be inspected, superseded, or cleared through `run-group` commands.
+```bash
+export KAVITA_INGEST_OPEN_LIBRARY_CONTACT='you@example.com'
+export GOOGLE_BOOKS_API_KEY='...'
+export COMIC_VINE_API_KEY='...'
+```
 
-SQLite is the sole authority for immutable plan bytes. Plan exports are exact
-derivatives of those canonical JSON bytes, and approval must name their exact
-SHA-256 digest. Plans are self-contained and require no provider lookup to
-interpret. The staged writer library supports independently verified EPUB,
-CBZ/ComicInfo, ordinary single-volume CBR-to-CBZ, and unsigned, unencrypted PDF
-outputs. `apply` accepts only an explicitly approved exact plan digest and does
-not contact metadata providers. It performs whole-plan preflight, writes and
-verifies each item in a destination-filesystem staging area, and uses an
-atomic Linux no-clobber publication primitive before any planned source
-cleanup. Interrupted runs must be resumed with `recover`; `rollback` is a
-conservative preview only.
+Google Books supports anonymous access with lower practical quota. Comic Vine
+network access requires its key. Doctor reports only presence or absence and
+never prints values. Provider cache and durable rate-limit state live in SQLite.
 
-Apply, recovery, and rollback preview take a shared OS-backed state lock. The
-apply journal uses SQLite WAL with `synchronous=FULL`; critical staged and
-destination files and their parent directories are also flushed independently.
-Existing destinations are never replaced. Apply currently fails conservatively
-on platforms that cannot provide the required Linux atomic no-clobber commit.
+## Workflow
+
+Running `kavita-ingest` without arguments opens a small numbered workflow menu.
+Every operation also remains available as a scriptable subcommand:
+
+```bash
+kavita-ingest init
+kavita-ingest doctor
+kavita-ingest scan /path/to/incoming
+kavita-ingest audit /path/to/incoming
+kavita-ingest review /path/to/incoming
+kavita-ingest plan create resolved-plan.json
+kavita-ingest plan show 1
+kavita-ingest plan approve 1 --digest DISPLAYED_SHA256
+kavita-ingest apply 1
+kavita-ingest status
+```
+
+`scan` fingerprints and inspects sources without modifying them. `audit` queries
+enabled providers or their caches and ranks candidates, but accepts nothing.
+`review` records explicit append-only decisions. A high confidence score means
+only that a candidate is eligible for convenient review; it never authorizes a
+filesystem change.
+
+Comic run selection is separate from issue acceptance. Use `run-group choose`,
+`run-group history`, and `run-group clear` to resolve same-named provider runs
+without contaminating canonical issue identity.
+
+### Work-only books
+
+Sparse ebook provider records may identify the work reliably without proving a
+specific edition. A work-only acceptance owns work fields such as title and
+authors while leaving unresolved edition fields, including publisher, date,
+language, and identifiers, untouched.
+
+### Plans and approval
+
+SQLite stores the sole authoritative canonical JSON bytes for each immutable
+plan. Exports are exact derivatives. A plan snapshot contains the resolved
+metadata, Kavita projection, writer requirements, source SHA-256, destination,
+transformation, verification requirements, and source lifecycle.
+
+`plan create` imports a fully resolved canonical plan as a draft. `plan show`
+displays its digest and contents. `plan approve --digest` explicitly binds
+approval to those exact bytes. Apply has no flag that manufactures approval or
+reinterprets the plan using current provider data.
+
+## Apply guarantees
+
+Before media mutation, apply checks the entire plan: source fingerprints,
+destinations, capabilities, path permissions, format restrictions, lifecycle,
+atomic publication support, and aggregate temporary-space estimates.
+
+Each item follows:
+
+```text
+source -> destination-filesystem stage -> independent verification
+       -> durable VERIFIED journal -> atomic no-clobber publication
+       -> destination verification -> durable COMMITTED journal
+       -> planned source lifecycle
+```
+
+Linux publication uses `link(2)`. It atomically creates a destination name and
+fails if that name already exists. A verified stage is immutable: all writer
+handles are closed before `VERIFIED`, no writer is invoked again, and recovery
+only reads or unlinks a surviving staging hard link. Files, directories, and
+SQLite journal transitions have separate durability barriers.
+
+Source policies:
+
+- `move_after_verify`: remove the incoming source only after staged verification,
+  atomic destination commit, destination verification, and durable `COMMITTED`.
+- `preserve`: leave the original untouched.
+- `archive_after_verify`: publish an exact archive copy without overwrite, then
+  remove the incoming source.
+
+Whole-plan atomicity is not promised. Safety and recoverability are per item.
+
+## Recovery and rollback preview
+
+Use `kavita-ingest apply-status PLAN_ID` to inspect an interrupted run and
+`kavita-ingest recover PLAN_ID` to resume only transitions proven safe by the
+immutable plan, journal, source, stage, destination, and recorded hashes. It
+never rematches metadata, queries providers, invents a destination, or repairs a
+published file through a surviving hard link.
+
+`kavita-ingest rollback PLAN_ID` is preview-only. It may identify a reversible
+case when an unchanged destination and a proven preserved/archived original
+exist. It refuses changed destinations and explains when `move_after_verify`
+deleted the only original. Transformed EPUB/PDF/CBZ output cannot recreate an
+original CBR or original metadata bytes.
+
+## JSON and logging
+
+`doctor`, `scan`, `audit`, `status`, `plan show`, `apply`, `apply-status`, and
+`recover` provide `--json`. Their top-level object includes `output_version` and
+`command`. JSON never includes provider credentials or environment values.
+
+Normal operations write a rotating human-readable log beside the state database.
+Known provider values, authorization headers, and secret query parameters are
+redacted. Provider payload/evidence detail remains a debug concern.
+
+## Limitations
+
+- Apply/recovery/no-clobber guarantees currently target Linux hard-link filesystems.
+- Multi-volume and encrypted RAR/CBR inputs are unsupported.
+- Encrypted and signature-bearing PDFs cannot be metadata-written.
+- Symbolic/range ComicInfo numbering has parser/schema tests but incomplete live
+  Kavita coverage.
+- Comic Vine collected-edition coverage is incomplete and ebook edition metadata
+  can be sparse.
+- Live Kavita behavior can still reveal personal naming/presentation preferences.
+- Rollback is conservative preview only.
+
+See [CONTROLLED_USE.md](CONTROLLED_USE.md) before the first real ingestion. Begin
+with one CBZ and one EPUB using `preserve`; do not begin routine
+`move_after_verify` operation until their filesystem output and Kavita display
+have been reviewed.

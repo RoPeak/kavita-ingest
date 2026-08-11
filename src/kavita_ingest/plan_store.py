@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -8,6 +9,8 @@ from pathlib import Path
 from typing import Any
 
 from .planning import PlanDocument, destination_from_item, validate_plan_payload
+
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,6 +55,7 @@ class PlanStore:
             raise ValueError(
                 f"plan already exists or failed integrity constraints: {digest}"
             ) from exc
+        LOGGER.info("created immutable draft plan=%s digest=%s", plan_id, digest[:12])
         return self.get(plan_id)
 
     def get(self, plan_id: int) -> StoredPlan:
@@ -78,6 +82,7 @@ class PlanStore:
         if cursor.rowcount != 1:
             raise ValueError("only a draft plan can be approved")
         self.connection.commit()
+        LOGGER.info("approved immutable plan=%s digest=%s", plan_id, digest[:12])
         return self.get(plan_id)
 
     def export(self, plan_id: int, destination: Path) -> None:

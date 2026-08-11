@@ -8,13 +8,14 @@ from typing import Annotated
 
 import typer
 
-from .apply_engine import ApplyEngine, ApplyRefused, ApplySummary
+from . import __version__
+from .apply_engine import ApplyEngine, ApplyPreview, ApplyRefused, ApplySummary
 from .audit import run_audit
-from .config import load_config
+from .config import load_config, write_initial_config
 from .db import connect
 from .doctor import checks
 from .locking import LockUnavailable
-from .logging_config import configure_logging
+from .logging_config import configure_logging, provider_secrets
 from .paths import AppPaths
 from .plan_store import PlanStore
 from .planning import validate_plan_payload
@@ -32,19 +33,73 @@ run_group_app = typer.Typer(help="Inspect and manage explicit comic run-group ch
 app.add_typer(plan_app, name="plan")
 app.add_typer(run_group_app, name="run-group")
 
+OUTPUT_VERSION = "1"
+
+
+def _version_callback(value: bool) -> None:
+    if value:
+        typer.echo(f"kavita-ingest {__version__}")
+        raise typer.Exit()
+
+
+@app.callback(invoke_without_command=True)
+def main(
+    context: typer.Context,
+    version: Annotated[
+        bool,
+        typer.Option(
+            "--version",
+            callback=_version_callback,
+            is_eager=True,
+            help="Show the application version and exit.",
+        ),
+    ] = False,
+) -> None:
+    """Operate a reviewed, explicitly approved Kavita ingestion workflow."""
+    del version
+    if context.invoked_subcommand is None:
+        _workflow_menu()
+
+
+@app.command("init")
+def init_command(
+    config: Annotated[
+        Path | None, typer.Option("--config", help="Configuration path to create.")
+    ] = None,
+    force: Annotated[
+        bool, typer.Option("--force", help="Explicitly replace an existing configuration.")
+    ] = False,
+) -> None:
+    """Create a commented, secret-free initial TOML configuration."""
+    destination = config or AppPaths.default().config_file
+    try:
+        write_initial_config(destination, force=force)
+    except FileExistsError as exc:
+        typer.echo(f"REFUSED: {exc}", err=True)
+        raise typer.Exit(2) from exc
+    typer.echo(f"Created configuration: {destination}")
+    typer.echo("No API keys were written. Next: kavita-ingest doctor")
+
 
 @app.command()
 def doctor(
     config: Annotated[
         Path | None, typer.Option("--config", help="TOML configuration path.")
     ] = None,
+    as_json: Annotated[bool, typer.Option("--json", help="Emit versioned JSON.")] = False,
 ) -> None:
-    """Report current paths and external inspection capabilities."""
+    """Run the authoritative local environment and capability preflight."""
     paths = AppPaths.default()
     settings = load_config(config, paths)
-    configure_logging(settings.log_level)
-    for check in checks(settings, paths, config):
-        typer.echo(f"{check.status:7} {check.name:12} {check.detail}")
+    configure_logging(settings.log_level, secrets=provider_secrets(settings))
+    results = checks(settings, paths, config)
+    if as_json:
+        _emit_json("doctor", {"checks": [check.to_dict() for check in results]})
+        return
+    for category in dict.fromkeys(check.category for check in results):
+        typer.echo(f"\n{category.title()}")
+        for check in (item for item in results if item.category == category):
+            typer.echo(f"{check.status:7} {check.name:22} {check.detail}")
 
 
 @app.command()
@@ -62,11 +117,12 @@ def scan(
     settings = load_config(config)
     configure_logging(
         settings.log_level,
-        AppPaths.default().log_file if not no_persist else None,
+        _log_file(settings) if not no_persist else None,
+        secrets=provider_secrets(settings),
     )
     results = run_scan(root, settings, persist=not no_persist)
     if as_json:
-        typer.echo(json.dumps([asdict(item) for item in results], indent=2, default=str))
+        _emit_json("scan", {"count": len(results), "items": [asdict(item) for item in results]})
         return
     for item in results:
         classification = item.classification
@@ -89,10 +145,27 @@ def audit_command(
     details: Annotated[
         bool, typer.Option("--details", help="Show each source's top candidate.")
     ] = False,
+    as_json: Annotated[bool, typer.Option("--json", help="Emit versioned JSON.")] = False,
 ) -> None:
     """Match sources without accepting identities or modifying media."""
     settings = load_config(config)
+    configure_logging(
+        settings.log_level,
+        _log_file(settings),
+        secrets=provider_secrets(settings),
+    )
     result = run_audit(root, settings)
+    if as_json:
+        _emit_json(
+            "audit",
+            {
+                "run_id": result.run_id,
+                "summary": result.summary,
+                "provider_activity": result.provider_activity,
+                "candidate_activity": result.candidate_activity,
+            },
+        )
+        return
     for key, value in result.summary.items():
         typer.echo(f"{key:40} {value}")
     for provider, activity in result.provider_activity.items():
@@ -124,7 +197,13 @@ def review_command(
     ] = None,
 ) -> None:
     """Interactively review candidates and record explicit decisions."""
-    interactive_review(root, load_config(config))
+    settings = load_config(config)
+    configure_logging(
+        settings.log_level,
+        _log_file(settings),
+        secrets=provider_secrets(settings),
+    )
+    interactive_review(root, settings)
 
 
 @app.command()
@@ -132,14 +211,19 @@ def status(
     config: Annotated[
         Path | None, typer.Option("--config", help="TOML configuration path.")
     ] = None,
+    as_json: Annotated[bool, typer.Option("--json", help="Emit versioned JSON.")] = False,
 ) -> None:
     """Show persisted matching and decision counts without network access."""
     settings = load_config(config)
     if settings.database_path is None or not settings.database_path.exists():
+        if as_json:
+            _emit_json("status", {"database_exists": False, "counts": {}})
+            return
         typer.echo("State database has not been created.")
         return
     connection = connect(settings.database_path)
     try:
+        counts: dict[str, int] = {}
         for table in (
             "match_runs",
             "match_candidates",
@@ -156,7 +240,12 @@ def status(
             count = (
                 connection.execute(f"SELECT count(*) FROM {table}").fetchone()[0] if exists else 0
             )
-            typer.echo(f"{table:20} {count}")
+            counts[table] = int(count)
+        if as_json:
+            _emit_json("status", {"database_exists": True, "counts": counts})
+        else:
+            for table, count in counts.items():
+                typer.echo(f"{table:20} {count}")
     finally:
         connection.close()
 
@@ -167,6 +256,11 @@ def _state_connection(config: Path | None) -> sqlite3.Connection:
         raise typer.BadParameter("database path is required")
     from .db import migrate
 
+    configure_logging(
+        settings.log_level,
+        _log_file(settings),
+        secrets=provider_secrets(settings),
+    )
     migrate(settings.database_path)
     return connect(settings.database_path)
 
@@ -177,7 +271,13 @@ def _plan_store(config: Path | None) -> tuple[sqlite3.Connection, PlanStore]:
 
 
 def _apply_engine(config: Path | None) -> ApplyEngine:
-    return ApplyEngine(load_config(config))
+    settings = load_config(config)
+    configure_logging(
+        settings.log_level,
+        _log_file(settings),
+        secrets=provider_secrets(settings),
+    )
+    return ApplyEngine(settings)
 
 
 def _echo_apply_summary(summary: ApplySummary) -> None:
@@ -188,14 +288,39 @@ def _echo_apply_summary(summary: ApplySummary) -> None:
         typer.echo(f"{state:20} {count}")
 
 
+def _echo_apply_preview(preview: ApplyPreview) -> None:
+    typer.echo(f"Plan: {preview.plan_id}  Digest: {preview.digest[:12]}...")
+    typer.echo(f"Items: {preview.item_count}  Metadata writes: {preview.metadata_write_count}")
+    typer.echo(f"CBR -> CBZ: {preview.cbr_to_cbz_count}")
+    typer.echo(f"Destination libraries: {', '.join(preview.destination_libraries)}")
+    typer.echo(f"Estimated temporary space: {_human_bytes(preview.estimated_temporary_bytes)}")
+    for policy, count in sorted(preview.lifecycle_counts.items()):
+        warning = (
+            " (incoming originals removed after verified commit)"
+            if policy == "move_after_verify"
+            else ""
+        )
+        typer.echo(f"{policy}: {count}{warning}")
+    typer.echo(f"Blocking conflicts: {preview.conflict_count}")
+
+
 @app.command("apply")
 def apply_command(
     plan_id: int,
     config: Annotated[Path | None, typer.Option("--config")] = None,
+    as_json: Annotated[bool, typer.Option("--json", help="Emit versioned JSON.")] = False,
 ) -> None:
     """Execute an already approved immutable plan; no approval shortcut exists."""
     try:
-        _echo_apply_summary(_apply_engine(config).apply(plan_id))
+        engine = _apply_engine(config)
+        preview = engine.preview(plan_id)
+        if not as_json:
+            _echo_apply_preview(preview)
+        summary = engine.apply(plan_id)
+        if as_json:
+            _emit_json("apply", {"preview": asdict(preview), "summary": asdict(summary)})
+        else:
+            _echo_apply_summary(summary)
     except (ApplyRefused, LockUnavailable) as exc:
         typer.echo(f"REFUSED: {exc}", err=True)
         raise typer.Exit(2) from exc
@@ -205,10 +330,15 @@ def apply_command(
 def recover_command(
     plan_id: int,
     config: Annotated[Path | None, typer.Option("--config")] = None,
+    as_json: Annotated[bool, typer.Option("--json", help="Emit versioned JSON.")] = False,
 ) -> None:
     """Recover a prior apply run using only its immutable plan and durable journal."""
     try:
-        _echo_apply_summary(_apply_engine(config).recover(plan_id))
+        summary = _apply_engine(config).recover(plan_id)
+        if as_json:
+            _emit_json("recover", {"summary": asdict(summary)})
+        else:
+            _echo_apply_summary(summary)
     except (ApplyRefused, LockUnavailable) as exc:
         typer.echo(f"RECOVERY REFUSED: {exc}", err=True)
         raise typer.Exit(2) from exc
@@ -218,22 +348,46 @@ def recover_command(
 def apply_status_command(
     plan_id: int,
     config: Annotated[Path | None, typer.Option("--config")] = None,
+    as_json: Annotated[bool, typer.Option("--json", help="Emit versioned JSON.")] = False,
 ) -> None:
     """Show durable apply/recovery state without touching media or providers."""
     summary = _apply_engine(config).status(plan_id)
+    inspections = _apply_engine(config).inspect_recovery(plan_id) if summary else ()
+    if as_json:
+        _emit_json(
+            "apply-status",
+            {
+                "summary": asdict(summary) if summary else None,
+                "friendly_counts": _friendly_counts(summary.counts) if summary else {},
+                "items": [asdict(item) for item in inspections],
+            },
+        )
+        return
     if summary is None:
         typer.echo(f"Plan {plan_id} has no apply run.")
     else:
-        _echo_apply_summary(summary)
-        for item in _apply_engine(config).inspect_recovery(plan_id):
+        typer.echo(f"Plan: {summary.plan_id}\nApply run: {summary.run_id}\n")
+        for label, count in _friendly_counts(summary.counts).items():
+            typer.echo(f"{label:22} {count}")
+        for item in inspections:
+            staging_exists = bool(item.staging and Path(item.staging).exists())
+            typer.echo(f"\n{item.item_id}: last durable state={item.state.value}")
             typer.echo(
-                f"{item.item_id}: state={item.state.value} "
-                f"source={'present' if item.source_exists else 'missing'} "
-                "staging="
-                f"{'present' if item.staging and Path(item.staging).exists() else 'missing'} "
-                f"destination={'present' if item.destination_exists else 'missing'}"
+                f"  source: {_evidence_label(item.source_exists, item.source_matches)}"
+            )
+            typer.echo(
+                "  staging: "
+                f"{_evidence_label(staging_exists, item.staging_matches)}"
+            )
+            typer.echo(
+                "  destination: "
+                f"{_evidence_label(item.destination_exists, item.destination_matches)}"
             )
             typer.echo(f"  proposed: {item.proposed_action}")
+            typer.echo(
+                "  intervention: "
+                f"{'manual required' if item.manual_intervention else 'automatic proof available'}"
+            )
             if item.detail:
                 typer.echo(f"  detail: {item.detail}")
 
@@ -274,15 +428,34 @@ def plan_create(
 def plan_show(
     plan_id: int,
     config: Annotated[Path | None, typer.Option("--config")] = None,
+    as_json: Annotated[bool, typer.Option("--json", help="Emit versioned JSON.")] = False,
+    summary_only: Annotated[
+        bool, typer.Option("--summary", help="Show plan metadata without canonical item bytes.")
+    ] = False,
 ) -> None:
     """Show authoritative plan bytes and approval state without network access."""
     connection, store = _plan_store(config)
     try:
         plan = store.get(plan_id)
+        metadata = {
+            "id": plan.id,
+            "status": plan.status,
+            "sha256": plan.sha256,
+            "byte_length": plan.byte_length,
+            "schema_version": plan.schema_version,
+            "approved_at": plan.approved_at,
+        }
+        if as_json:
+            payload: dict[str, object] = {"plan": metadata}
+            if not summary_only:
+                payload["document"] = json.loads(plan.canonical_json)
+            _emit_json("plan-show", payload)
+            return
         typer.echo(
             f"plan={plan.id} status={plan.status} sha256={plan.sha256} bytes={plan.byte_length}"
         )
-        typer.echo(plan.canonical_json.decode("utf-8"))
+        if not summary_only:
+            typer.echo(plan.canonical_json.decode("utf-8"))
     finally:
         connection.close()
 
@@ -393,6 +566,110 @@ def run_group_history(
             )
     finally:
         connection.close()
+
+
+def _emit_json(command: str, payload: dict[str, object]) -> None:
+    typer.echo(
+        json.dumps(
+            {"output_version": OUTPUT_VERSION, "command": command, **payload},
+            ensure_ascii=True,
+            sort_keys=True,
+            default=str,
+        )
+    )
+
+
+def _log_file(settings: object) -> Path:
+    database = getattr(settings, "database_path", None)
+    return (
+        Path(database).parent / "kavita-ingest.log"
+        if database is not None
+        else AppPaths.default().log_file
+    )
+
+
+def _friendly_counts(counts: dict[str, int]) -> dict[str, int]:
+    return {
+        "Complete": counts.get("complete", 0),
+        "Pending": sum(
+            counts.get(state, 0)
+            for state in ("pending", "preflight_ok", "staging", "staged", "verified")
+        ),
+        "Committed": counts.get("committed", 0),
+        "Cleanup pending": counts.get("cleanup_pending", 0) + counts.get("cleaned", 0),
+        "Recovery required": counts.get("recovery_required", 0),
+        "Failed/stale": counts.get("failed", 0) + counts.get("stale", 0),
+    }
+
+
+def _human_bytes(value: int) -> str:
+    amount = float(value)
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
+        if amount < 1024 or unit == "TiB":
+            return f"{amount:.1f} {unit}"
+        amount /= 1024
+    return f"{amount:.1f} TiB"
+
+
+def _evidence_label(exists: bool, matches: bool | None) -> str:
+    if not exists:
+        return "missing"
+    if matches is True:
+        return "present, hash matches durable evidence"
+    if matches is False:
+        return "present, HASH MISMATCH"
+    return "present, no durable hash available"
+
+
+def _workflow_menu() -> None:
+    typer.echo("Kavita Ingest\n")
+    typer.echo("[1] Scan incoming media")
+    typer.echo("[2] Audit / match metadata")
+    typer.echo("[3] Review identities")
+    typer.echo("[4] Create / inspect ingestion plan")
+    typer.echo("[5] Approve plan")
+    typer.echo("[6] Apply approved plan")
+    typer.echo("[7] Status / recovery")
+    typer.echo("[8] Doctor")
+    typer.echo("[Q] Quit")
+    choice = typer.prompt("Select", default="Q").strip().casefold()
+    if choice == "q":
+        return
+    if choice in {"1", "2", "3"}:
+        root = Path(typer.prompt("Incoming directory")).expanduser().resolve()
+        if choice == "1":
+            scan(root, config=None, no_persist=False, as_json=False)
+        elif choice == "2":
+            audit_command(root, config=None, details=False, as_json=False)
+        else:
+            review_command(root, config=None)
+        return
+    if choice == "4":
+        typer.echo("Use `kavita-ingest plan create FILE` or `plan show PLAN_ID`.")
+        return
+    if choice == "5":
+        plan_id = typer.prompt("Plan ID", type=int)
+        digest = typer.prompt("Exact displayed SHA-256 digest")
+        plan_approve(plan_id, digest=digest, config=None)
+        return
+    if choice == "6":
+        plan_id = typer.prompt("Approved plan ID", type=int)
+        engine = _apply_engine(None)
+        _echo_apply_preview(engine.preview(plan_id))
+        if typer.confirm("Execute this approved immutable plan?", default=False):
+            _echo_apply_summary(engine.apply(plan_id))
+        return
+    if choice == "7":
+        plan_id = typer.prompt("Plan ID", type=int)
+        apply_status_command(plan_id, config=None, as_json=False)
+        if typer.confirm("Attempt safe recovery for this plan?", default=False):
+            recover_command(plan_id, config=None, as_json=False)
+        return
+    if choice == "8":
+        doctor(config=None, as_json=False)
+        return
+    typer.echo("Unknown selection.", err=True)
+    raise typer.Exit(2)
 
 
 if __name__ == "__main__":

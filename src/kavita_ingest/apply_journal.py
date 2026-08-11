@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any
+
+LOGGER = logging.getLogger(__name__)
 
 
 class RunState(StrEnum):
@@ -182,6 +185,13 @@ class JournalRepository:
         except (sqlite3.Error, RuntimeError):
             self.connection.rollback()
             raise
+        LOGGER.info(
+            "apply run=%s item=%s transition=%s->%s",
+            run_id,
+            item_id,
+            current.state.value,
+            to_state.value,
+        )
         return self.get_item(run_id, item_id)
 
     def set_run_state(self, run_id: str, state: RunState, *, error: str | None = None) -> ApplyRun:

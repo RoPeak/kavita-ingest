@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sqlite3
 from dataclasses import replace
 from pathlib import Path
@@ -173,6 +174,47 @@ def test_atomic_commit_race_never_overwrites_new_destination(tmp_path: Path) -> 
     assert summary.status is RunState.FAILED
     assert fixture.source.exists()
     assert fixture.destination.read_bytes() == b"racing-file"
+
+
+class CrashAfterHardLinkFilesystem(LinuxFilesystem):
+    def commit(self, staged: Path, destination: Path) -> None:
+        os.link(staged, destination, follow_symlinks=False)
+        self.make_file_durable(destination)
+        raise InjectedCrash("after-link-before-stage-unlink")
+
+
+class VerifyOnlyRecoveryWriter(WriterDispatcher):
+    def stage(self, item, destination):  # type: ignore[no-untyped-def]
+        raise AssertionError("a VERIFIED stage must never be passed to a writer again")
+
+
+def test_verified_hard_link_stage_is_never_modified_and_recovery_only_unlinks_name(
+    tmp_path: Path,
+) -> None:
+    fixture = make_apply_fixture(tmp_path, "cbz")
+    with pytest.raises(InjectedCrash):
+        ApplyEngine(fixture.config, filesystem=CrashAfterHardLinkFilesystem()).apply(
+            fixture.plan_id
+        )
+    database = fixture.config.database_path
+    assert database is not None
+    with connect(database) as connection:
+        journal = JournalRepository(connection)
+        run = journal.latest_for_plan(fixture.plan_id)
+        assert run is not None
+        recorded = journal.items(run.id)[0]
+    assert recorded.staging_path is not None
+    staging = Path(recorded.staging_path)
+    assert staging.stat().st_ino == fixture.destination.stat().st_ino
+    published = fixture.destination.read_bytes()
+
+    summary = ApplyEngine(fixture.config, writers=VerifyOnlyRecoveryWriter()).recover(
+        fixture.plan_id
+    )
+
+    assert summary.status is RunState.COMPLETE
+    assert fixture.destination.read_bytes() == published
+    assert not staging.exists()
 
 
 def test_process_lock_contention_blocks_apply(tmp_path: Path) -> None:

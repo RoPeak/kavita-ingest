@@ -11,6 +11,9 @@ from .paths import AppPaths
 
 @dataclass(frozen=True, slots=True)
 class ProviderSettings:
+    open_library_enabled: bool = True
+    google_books_enabled: bool = True
+    comic_vine_enabled: bool = True
     open_library_contact: str | None = None
     google_books_api_key: str | None = None
     comic_vine_api_key: str | None = None
@@ -46,6 +49,12 @@ class AppConfig:
     archive_total_size_limit: int = 4 * 1024 * 1024 * 1024
     archive_path_depth_limit: int = 20
     archive_ratio_limit: float = 1_000.0
+    source_lifecycle: str = "move_after_verify"
+    source_archive_root: Path | None = None
+    cbr_conversion_enabled: bool = True
+    book_filename_template: str = "{title} ({year})"
+    comic_filename_template: str = "{series} - {number} - {title}"
+    integer_sequence_padding: int = 3
     providers: ProviderSettings = ProviderSettings()
     matching: MatchingSettings = MatchingSettings()
 
@@ -67,6 +76,10 @@ def load_config(path: Path | None = None, app_paths: AppPaths | None = None) -> 
         raw = {}
     paths = _table(raw, "paths")
     archive = _table(raw, "archive")
+    source = _table(raw, "source")
+    cbr = _table(raw, "cbr")
+    naming = _table(raw, "naming")
+    sequence = _table(raw, "sequence")
     logging = _table(raw, "logging")
     providers = _table(raw, "providers")
     open_library = _nested_table(providers, "open_library")
@@ -74,6 +87,9 @@ def load_config(path: Path | None = None, app_paths: AppPaths | None = None) -> 
     comic_vine = _nested_table(providers, "comic_vine")
     matching = _table(raw, "matching")
     provider_settings = ProviderSettings(
+        open_library_enabled=_boolean(open_library.get("enabled", True), "open_library.enabled"),
+        google_books_enabled=_boolean(google_books.get("enabled", True), "google_books.enabled"),
+        comic_vine_enabled=_boolean(comic_vine.get("enabled", True), "comic_vine.enabled"),
         open_library_contact=_string_or_none(open_library.get("contact"))
         or os.getenv("KAVITA_INGEST_OPEN_LIBRARY_CONTACT"),
         google_books_api_key=_string_or_none(google_books.get("api_key"))
@@ -91,7 +107,11 @@ def load_config(path: Path | None = None, app_paths: AppPaths | None = None) -> 
         timeout_seconds=float(providers.get("timeout_seconds", 15.0)),
     )
     _validate_provider_settings(provider_settings)
-    return AppConfig(
+    if comic_vine.get("enabled") is True and not provider_settings.comic_vine_api_key:
+        raise ValueError(
+            "Comic Vine is explicitly enabled but COMIC_VINE_API_KEY is not configured"
+        )
+    config = AppConfig(
         incoming_roots=_path_tuple(paths.get("incoming", [])),
         books_root=_optional_path(paths.get("books")),
         comics_root=_optional_path(paths.get("comics")),
@@ -104,6 +124,14 @@ def load_config(path: Path | None = None, app_paths: AppPaths | None = None) -> 
         archive_total_size_limit=int(archive.get("max_total_bytes", 4 * 1024 * 1024 * 1024)),
         archive_path_depth_limit=int(archive.get("max_path_depth", 20)),
         archive_ratio_limit=float(archive.get("max_ratio", 1_000.0)),
+        source_lifecycle=str(source.get("lifecycle", "move_after_verify")),
+        source_archive_root=_optional_path(source.get("archive_root")),
+        cbr_conversion_enabled=bool(cbr.get("convert_to_cbz", True)),
+        book_filename_template=str(naming.get("book", "{title} ({year})")),
+        comic_filename_template=str(
+            naming.get("comic", "{series} - {number} - {title}")
+        ),
+        integer_sequence_padding=int(sequence.get("integer_padding", 3)),
         providers=provider_settings,
         matching=MatchingSettings(
             eligible_score=float(matching.get("eligible_score", 92.0)),
@@ -111,6 +139,82 @@ def load_config(path: Path | None = None, app_paths: AppPaths | None = None) -> 
             classification_confidence=float(matching.get("classification_confidence", 0.90)),
         ),
     )
+    validate_config(config)
+    return config
+
+
+def validate_config(config: AppConfig) -> None:
+    errors: list[str] = []
+    if (
+        config.books_root
+        and config.comics_root
+        and _resolved(config.books_root) == _resolved(config.comics_root)
+    ):
+        errors.append("Books and Comics destination roots must be different")
+    destinations = tuple(
+        path for path in (config.books_root, config.comics_root) if path is not None
+    )
+    for incoming in config.incoming_roots:
+        for destination in destinations:
+            incoming_resolved = _resolved(incoming)
+            destination_resolved = _resolved(destination)
+            if _contains(incoming_resolved, destination_resolved):
+                errors.append(
+                    f"destination {destination} is nested inside incoming root {incoming}"
+                )
+            elif _contains(destination_resolved, incoming_resolved):
+                errors.append(
+                    f"incoming root {incoming} is nested inside destination {destination}"
+                )
+    if config.staging_root and config.staging_root.exists():
+        for destination in destinations:
+            if (
+                destination.exists()
+                and config.staging_root.stat().st_dev != destination.stat().st_dev
+            ):
+                errors.append(
+                    f"staging root {config.staging_root} is on a different filesystem from "
+                    f"destination {destination}; apply stages beside each destination instead"
+                )
+    if config.source_lifecycle not in {
+        "move_after_verify",
+        "preserve",
+        "archive_after_verify",
+    }:
+        errors.append(
+            "source lifecycle must be move_after_verify, preserve, or archive_after_verify"
+        )
+    if config.source_lifecycle == "archive_after_verify" and config.source_archive_root is None:
+        errors.append("archive_after_verify requires source.archive_root")
+    if min(
+        config.archive_entry_limit,
+        config.archive_entry_size_limit,
+        config.archive_total_size_limit,
+        config.archive_path_depth_limit,
+    ) <= 0:
+        errors.append("archive limits must be positive")
+    if config.archive_entry_size_limit > config.archive_total_size_limit:
+        errors.append("archive max_entry_bytes cannot exceed max_total_bytes")
+    if config.archive_ratio_limit <= 1:
+        errors.append("archive max_ratio must be greater than 1")
+    if not 0 <= config.matching.eligible_score <= 100:
+        errors.append("matching eligible_score must be between 0 and 100")
+    if not 0 <= config.matching.eligible_margin <= 100:
+        errors.append("matching eligible_margin must be between 0 and 100")
+    if not 0 <= config.matching.classification_confidence <= 1:
+        errors.append("matching classification_confidence must be between 0 and 1")
+    if not 1 <= config.integer_sequence_padding <= 12:
+        errors.append("sequence integer_padding must be between 1 and 12")
+    if errors:
+        raise ValueError("invalid configuration:\n- " + "\n- ".join(errors))
+
+
+def write_initial_config(path: Path, *, force: bool = False) -> Path:
+    if path.exists() and not force:
+        raise FileExistsError(f"configuration already exists: {path}")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(INITIAL_CONFIG, encoding="utf-8")
+    return path
 
 
 def _table(raw: dict[str, Any], key: str) -> dict[str, Any]:
@@ -145,12 +249,22 @@ def _resolved(path: Path) -> Path:
     return path.expanduser().resolve(strict=False)
 
 
+def _contains(parent: Path, child: Path) -> bool:
+    return parent != child and child.is_relative_to(parent)
+
+
 def _string_or_none(value: object) -> str | None:
     if value is None:
         return None
     if not isinstance(value, str):
         raise ValueError("provider contact and credential values must be strings")
     return value.strip() or None
+
+
+def _boolean(value: object, name: str) -> bool:
+    if not isinstance(value, bool):
+        raise ValueError(f"{name} must be true or false")
+    return value
 
 
 def _validate_provider_settings(settings: ProviderSettings) -> None:
@@ -168,3 +282,80 @@ def _validate_provider_settings(settings: ProviderSettings) -> None:
         raise ValueError("Google Books min_interval cannot be less than 0.2 seconds")
     if settings.cache_ttl_seconds < 60:
         raise ValueError("provider cache TTL must be at least 60 seconds")
+
+
+INITIAL_CONFIG = '''# Kavita Ingest configuration
+# Provider secrets belong in environment variables, never this file:
+#   COMIC_VINE_API_KEY
+#   GOOGLE_BOOKS_API_KEY
+# Open Library needs no API key, but identified contact is strongly recommended:
+#   KAVITA_INGEST_OPEN_LIBRARY_CONTACT
+
+[paths]
+incoming = ["~/Incoming/Reading"]
+books = "~/Libraries/Kavita/Books"
+comics = "~/Libraries/Kavita/Comics"
+# Apply creates action staging on the destination filesystem. This path is for
+# local tooling/diagnostics and should share a filesystem with destination roots.
+staging = "~/Libraries/Kavita/.staging"
+ignore = []
+# database = "~/.local/state/kavita-ingest/state.sqlite3"
+
+[source]
+# move_after_verify removes incoming originals only after verified destination commit.
+# Use preserve for the first controlled trial.
+lifecycle = "preserve"
+# archive_root = "~/Archives/Reading-Originals"
+
+[cbr]
+convert_to_cbz = true
+
+[naming]
+book = "{title} ({year})"
+comic = "{series} - {number} - {title}"
+
+[sequence]
+integer_padding = 3
+
+[archive]
+max_entries = 5000
+max_entry_bytes = 536870912
+max_total_bytes = 4294967296
+max_path_depth = 20
+max_ratio = 1000.0
+
+[providers]
+offline = false
+cache_ttl_seconds = 604800
+timeout_seconds = 15
+
+[providers.open_library]
+enabled = true
+# contact = "you@example.com"
+identified_interval = 0.4
+unidentified_interval = 1.25
+
+[providers.google_books]
+enabled = true
+min_interval = 0.25
+# API key is optional; use GOOGLE_BOOKS_API_KEY when configured.
+
+[providers.comic_vine]
+enabled = false
+max_requests = 180
+window_seconds = 3600
+min_interval = 1.25
+# Comic Vine network access requires COMIC_VINE_API_KEY.
+
+[matching]
+# Eligibility is analytical only; every accepted identity still needs explicit approval.
+eligible_score = 92
+eligible_margin = 12
+classification_confidence = 0.90
+
+[cache]
+# Provider cache TTL is configured in [providers].
+
+[logging]
+level = "INFO"
+'''

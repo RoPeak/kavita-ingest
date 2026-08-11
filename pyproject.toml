@@ -5,8 +5,17 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "kavita-ingest"
 version = "0.1.0"
-description = "Read-only discovery and classification for Kavita-bound libraries."
+description = "Safely identify, plan, and ingest ebooks and comics for Kavita."
+readme = "README.md"
 requires-python = ">=3.12"
+keywords = ["kavita", "ebooks", "comics", "epub", "cbz"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Multimedia :: Graphics :: Viewers",
+]
 dependencies = [
   "lxml==6.1.1",
   "pikepdf==10.11.0",

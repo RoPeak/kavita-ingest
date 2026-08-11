@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 
+from . import __version__
 from .config import ProviderSettings
 from .provider_store import ProviderStore
 from .providers.base import Provider
@@ -33,7 +34,11 @@ def build_providers(
                 if contact
                 else settings.open_library_unidentified_interval,
             ),
-            user_agent=f"kavita-ingest/0.1 ({contact})" if contact else "kavita-ingest/0.1",
+            user_agent=(
+                f"kavita-ingest/{__version__} ({contact})"
+                if contact
+                else f"kavita-ingest/{__version__}"
+            ),
             store=store,
             limiter=limiter,
             transport=actual_transport,
@@ -47,7 +52,7 @@ def build_providers(
         CachedProviderClient(
             ProviderName.GOOGLE_BOOKS,
             policy=RatePolicy(10_000, 3_600, settings.google_books_min_interval),
-            user_agent="kavita-ingest/0.1",
+            user_agent=f"kavita-ingest/{__version__}",
             store=store,
             limiter=limiter,
             transport=actual_transport,
@@ -65,7 +70,7 @@ def build_providers(
                 settings.comic_vine_window_seconds,
                 settings.comic_vine_min_interval,
             ),
-            user_agent="kavita-ingest/0.1",
+            user_agent=f"kavita-ingest/{__version__}",
             store=store,
             limiter=limiter,
             transport=actual_transport,
@@ -77,4 +82,11 @@ def build_providers(
         ),
         settings.comic_vine_api_key,
     )
-    return open_library, google, comic_vine
+    providers: list[Provider] = []
+    if settings.open_library_enabled:
+        providers.append(open_library)
+    if settings.google_books_enabled:
+        providers.append(google)
+    if settings.comic_vine_enabled:
+        providers.append(comic_vine)
+    return tuple(providers)

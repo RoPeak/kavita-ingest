@@ -1,0 +1,79 @@
+from __future__ import annotations
+
+import errno
+import json
+from pathlib import Path
+
+import pytest
+from typer.testing import CliRunner
+
+from kavita_ingest.apply_engine import ApplyEngine, StalePlan
+from kavita_ingest.cli import app
+from kavita_ingest.filesystem import LinuxFilesystem
+from tests.apply_helpers import make_apply_fixture
+
+
+def _config(tmp_path: Path) -> Path:
+    books = tmp_path / "books"
+    comics = tmp_path / "comics"
+    incoming = tmp_path / "incoming"
+    for path in (books, comics, incoming):
+        path.mkdir()
+    config = tmp_path / "config.toml"
+    config.write_text(
+        f'''[paths]
+database = "{tmp_path / 'state.sqlite3'}"
+incoming = ["{incoming}"]
+books = "{books}"
+comics = "{comics}"
+
+[providers]
+offline = true
+
+[providers.comic_vine]
+enabled = false
+''',
+        encoding="utf-8",
+    )
+    return config
+
+
+def test_doctor_empirically_probes_no_clobber_without_leaving_files(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    result = CliRunner().invoke(app, ["doctor", "--json", "--config", str(config)])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    publication = [
+        check for check in payload["checks"] if check["category"] == "publication"
+    ]
+    assert publication and all(check["status"] == "OK" for check in publication)
+    assert not list(tmp_path.rglob(".kavita-ingest-doctor-*"))
+    serialized = json.dumps(payload)
+    assert "api_key" not in serialized.casefold()
+
+
+def test_publication_probe_blocks_filesystems_without_hard_links(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def unsupported(*args: object, **kwargs: object) -> None:
+        raise OSError(errno.EOPNOTSUPP, "hard links unsupported")
+
+    monkeypatch.setattr("kavita_ingest.filesystem.os.link", unsupported)
+    result = LinuxFilesystem().probe_no_clobber(tmp_path)
+    assert not result.supported
+    assert "hard-link publication probe failed" in result.detail
+
+
+def test_apply_preflight_blocks_before_staging_when_hard_links_are_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fixture = make_apply_fixture(tmp_path, "cbz")
+
+    def unsupported(*args: object, **kwargs: object) -> None:
+        raise OSError(errno.EOPNOTSUPP, "hard links unsupported")
+
+    monkeypatch.setattr("kavita_ingest.filesystem.os.link", unsupported)
+    with pytest.raises(StalePlan, match="hard-link publication probe failed"):
+        ApplyEngine(fixture.config).apply(fixture.plan_id)
+    assert fixture.source.exists()
+    assert not fixture.destination.exists()

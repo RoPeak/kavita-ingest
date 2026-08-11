@@ -96,11 +96,25 @@ class ApplySummary:
 
 
 @dataclass(frozen=True, slots=True)
+class ApplyPreview:
+    plan_id: int
+    digest: str
+    item_count: int
+    destination_libraries: tuple[str, ...]
+    metadata_write_count: int
+    cbr_to_cbz_count: int
+    lifecycle_counts: dict[str, int]
+    conflict_count: int
+    estimated_temporary_bytes: int
+
+
+@dataclass(frozen=True, slots=True)
 class RecoveryInspection:
     item_id: str
     state: ItemState
     source: str
     source_exists: bool
+    source_matches: bool | None
     staging: str | None
     staging_matches: bool | None
     destination: str
@@ -197,6 +211,31 @@ class ApplyEngine:
                 return self._apply_locked(connection, plan_id)
             finally:
                 connection.close()
+
+    def preview(self, plan_id: int) -> ApplyPreview:
+        migrate(self.database_path)
+        with connect(self.database_path) as connection:
+            plan, document = self._eligible_plan(connection, plan_id)
+            prepared = self._prepare_items(document, run_id="preview")
+        lifecycles: dict[str, int] = {}
+        for item in prepared:
+            lifecycles[item.lifecycle_policy] = lifecycles.get(item.lifecycle_policy, 0) + 1
+        return ApplyPreview(
+            plan_id=plan.id,
+            digest=plan.sha256,
+            item_count=len(prepared),
+            destination_libraries=tuple(
+                sorted({str(self._root_for(item)) for item in prepared})
+            ),
+            metadata_write_count=sum(
+                1 for item in prepared if item.document.get("ownership_manifest", {}).get("set")
+            ),
+            cbr_to_cbz_count=sum(1 for item in prepared if item.source_format == "cbr"),
+            lifecycle_counts=lifecycles,
+            conflict_count=len(document.get("conflicts", []))
+            + sum(len(item.document.get("conflicts", [])) for item in prepared),
+            estimated_temporary_bytes=sum(_estimated_space(item) for item in prepared),
+        )
 
     def _apply_locked(self, connection: sqlite3.Connection, plan_id: int) -> ApplySummary:
         journal = JournalRepository(connection)
@@ -398,6 +437,11 @@ class ApplyEngine:
             if item.item_id not in errors:
                 by_device.setdefault(self._root_for(item).stat().st_dev, []).append(item)
         for grouped in by_device.values():
+            probe = self.filesystem.probe_no_clobber(self._root_for(grouped[0]))
+            if not probe.supported:
+                for item in grouped:
+                    errors.setdefault(item.item_id, []).append(probe.detail)
+                continue
             required = sum(_estimated_space(item) for item in grouped)
             free = self.disk_usage(self._root_for(grouped[0])).free
             if free >= required:
@@ -534,6 +578,7 @@ class ApplyEngine:
                 "verification_json": json.dumps(evidence, sort_keys=True),
             },
         )
+        # VERIFIED seals the staged inode: every later operation is read-only or unlink-only.
         self.fault("after_verified_journal", item.item_id)
         self._commit_verified(journal, run_id, item, staging, evidence)
 
@@ -692,6 +737,7 @@ class ApplyEngine:
                 detail={"recovered": "recognized crash-after-filesystem-commit"},
                 fields={"destination_hash": recorded.staged_hash},
             )
+            self._remove_surviving_stage(recorded, item)
             self._finish_lifecycle(journal, recorded.run_id, item)
             return
         staging = _required_staging(recorded)
@@ -725,6 +771,7 @@ class ApplyEngine:
         ):
             self._manual_recovery(journal, recorded, "committed destination is missing or changed")
             return
+        self._remove_surviving_stage(recorded, item)
         if recorded.state is ItemState.COMMITTED:
             if not item.source.is_file() or sha256_file(item.source) != item.source_hash:
                 self._manual_recovery(
@@ -746,6 +793,22 @@ class ApplyEngine:
             self._recover_archive_cleanup(journal, recorded, item)
             return
         self._manual_recovery(journal, recorded, "preserve lifecycle entered cleanup state")
+
+    def _remove_surviving_stage(self, recorded: ApplyItem, item: PreparedItem) -> None:
+        if not recorded.staging_path:
+            return
+        staging = Path(recorded.staging_path)
+        if not staging.exists():
+            return
+        try:
+            staging.relative_to(item.staging_directory)
+        except ValueError as exc:
+            raise RecoveryRequired("recorded staging path escapes its action directory") from exc
+        if not staging.is_file() or sha256_file(staging) != recorded.staged_hash:
+            raise RecoveryRequired("surviving published staging path is not the verified output")
+        if staging.stat().st_ino != item.destination.stat().st_ino:
+            raise RecoveryRequired("surviving staging path is not the published destination inode")
+        self.filesystem.durable_unlink(staging)
 
     def _recover_archive_cleanup(
         self, journal: JournalRepository, recorded: ApplyItem, item: PreparedItem
@@ -1125,6 +1188,9 @@ def _inspect_item(item: ApplyItem) -> RecoveryInspection:
     source = Path(item.source_path)
     staging = Path(item.staging_path) if item.staging_path else None
     destination = Path(item.destination_path)
+    source_matches = (
+        sha256_file(source) == item.planned_source_hash if source.is_file() else None
+    )
     staging_matches = (
         sha256_file(staging) == item.staged_hash
         if staging and staging.is_file() and item.staged_hash
@@ -1142,6 +1208,7 @@ def _inspect_item(item: ApplyItem) -> RecoveryInspection:
         item.state,
         item.source_path,
         source.exists(),
+        source_matches,
         item.staging_path,
         staging_matches,
         item.destination_path,

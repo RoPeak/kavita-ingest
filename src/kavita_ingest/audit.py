@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import sqlite3
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -22,6 +23,8 @@ from .providers.base import Provider
 from .providers.models import NormalizedCandidate
 from .run_groups import RunGroupRepository, run_group_key
 from .scanner import ScanResult, scan
+
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,6 +108,7 @@ def run_audit(
             items.append(ReviewItem(scanned, local, generated, tuple(scores), resolved))
         summary = _summary(items)
         matches.complete_run(run_id, len(items), summary)
+        LOGGER.info("audit complete run=%s sources=%s summary=%s", run_id, len(items), summary)
         return AuditResult(
             tuple(items),
             summary,

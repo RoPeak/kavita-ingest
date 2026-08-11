@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -63,6 +64,12 @@ def test_recovery_cli_explains_and_recovers_crash_after_commit(tmp_path: Path) -
     recovered = runner.invoke(app, ["recover", str(fixture.plan_id), "--config", str(config)])
     assert recovered.exit_code == 0, recovered.output
     assert "Status: complete" in recovered.output
+    repeated = runner.invoke(
+        app,
+        ["recover", str(fixture.plan_id), "--json", "--config", str(config)],
+    )
+    assert repeated.exit_code == 0
+    assert json.loads(repeated.stdout)["summary"]["status"] == "complete"
 
 
 def test_cli_refuses_unapproved_plan_without_convenience_override(tmp_path: Path) -> None:

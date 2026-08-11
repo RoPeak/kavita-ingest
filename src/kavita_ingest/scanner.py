@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
@@ -19,6 +20,8 @@ from .inspectors import inspect
 from .parsing import classify
 from .repositories import SourceRepository
 
+LOGGER = logging.getLogger(__name__)
+
 
 @dataclass(frozen=True, slots=True)
 class ScanResult:
@@ -28,6 +31,7 @@ class ScanResult:
 
 
 def scan(root: Path, config: AppConfig, *, persist: bool = True) -> list[ScanResult]:
+    LOGGER.info("scan started root=%s persist=%s", root, persist)
     limits = ArchiveLimits(
         config.archive_entry_limit,
         config.archive_entry_size_limit,
@@ -50,6 +54,7 @@ def scan(root: Path, config: AppConfig, *, persist: bool = True) -> list[ScanRes
                 source = inspect_source(path)
                 inspection = inspect(path, source.format, limits)
             except Exception as exc:
+                LOGGER.warning("inspection failed path=%s error=%s", path, exc)
                 source = failed_source_record(path)
                 inspection = InspectionResult(
                     InspectionStatus.FAILED,
@@ -69,4 +74,5 @@ def scan(root: Path, config: AppConfig, *, persist: bool = True) -> list[ScanRes
     finally:
         if connection is not None:
             connection.close()
+    LOGGER.info("scan complete root=%s sources=%s", root, len(results))
     return results

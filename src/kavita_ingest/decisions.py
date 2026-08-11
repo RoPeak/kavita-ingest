@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import sqlite3
 import uuid
@@ -11,6 +12,8 @@ from typing import Any
 
 from .domain import SequenceNumber, SourceRecord
 from .matching import CandidateScore, Reconciliation
+
+LOGGER = logging.getLogger(__name__)
 
 
 class DecisionType(StrEnum):
@@ -79,6 +82,12 @@ class DecisionRepository:
         self.connection.commit()
         if cursor.lastrowid is None:
             raise RuntimeError("decision insert did not return an identifier")
+        LOGGER.info(
+            "recorded explicit decision id=%s type=%s source=%s",
+            cursor.lastrowid,
+            decision_type.value,
+            source.sha256[:12],
+        )
         return DecisionRecord(
             int(cursor.lastrowid),
             source.sha256,
