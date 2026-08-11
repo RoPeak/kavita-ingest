@@ -111,7 +111,9 @@ def local_identity(classification: Classification, metadata: dict[str, Any]) -> 
         classification.kind,
         hypothesis.subtype,
         classification.confidence,
-        hypothesis.title or hypothesis.series or "",
+        (hypothesis.title or "")
+        if classification.kind is MediaKind.COMIC
+        else hypothesis.title or hypothesis.series or "",
         hypothesis.creators,
         identifiers,
         hypothesis.series,
@@ -319,6 +321,50 @@ def _score(local: LocalIdentity, candidate: NormalizedCandidate) -> CandidateSco
                 "titles disagree",
             )
         )
+
+    if (
+        local.kind is MediaKind.COMIC
+        and local.title
+        and candidate.title
+        and _normalize(local.title) != _normalize(local.series_title or "")
+    ):
+        issue_similarity = _similarity(local.title, candidate.title)
+        if issue_similarity >= 0.9:
+            comparisons.append(
+                _comparison(
+                    "issue_title",
+                    local.title,
+                    candidate.title,
+                    ComparisonKind.EXACT,
+                    12,
+                    issue_similarity,
+                    "issue titles agree",
+                )
+            )
+        elif issue_similarity >= 0.7:
+            comparisons.append(
+                _comparison(
+                    "issue_title",
+                    local.title,
+                    candidate.title,
+                    ComparisonKind.SUPPORTING,
+                    6,
+                    issue_similarity,
+                    "issue titles are similar",
+                )
+            )
+        elif issue_similarity < 0.35:
+            comparisons.append(
+                _comparison(
+                    "issue_title",
+                    local.title,
+                    candidate.title,
+                    ComparisonKind.CONFLICT,
+                    -8,
+                    1 - issue_similarity,
+                    "issue titles disagree",
+                )
+            )
 
     local_creators = {_normalize(name) for name in local.creators}
     candidate_creators = {_normalize(item.name) for item in candidate.creators}

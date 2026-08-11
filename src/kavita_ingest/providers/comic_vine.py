@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from dataclasses import replace
 
 from ..domain import MediaKind, SequenceNumber
 from .base import ProviderStatus
@@ -59,6 +60,52 @@ class ComicVineProvider:
             "search:collection" if collected else "search:issue",
             _normalize,
         )
+
+    def search_runs(self, query: SearchQuery) -> list[NormalizedCandidate]:
+        return self.client.get(
+            "search-runs",
+            f"{self.endpoint}/search/",
+            {
+                "query": query.series_title or query.title,
+                "resources": "volume",
+                "limit": "10",
+                "field_list": "id,resource_type,api_detail_url,name,start_year,publisher",
+            },
+            self._secret(),
+            "search:run",
+            _normalize,
+        )
+
+    def search_issue_in_run(
+        self,
+        run: NormalizedCandidate,
+        sequence: SequenceNumber,
+    ) -> list[NormalizedCandidate]:
+        volume_id = run.provider_id.split("-", 1)[-1]
+        candidates = self.client.get(
+            "issues-in-run",
+            f"{self.endpoint}/issues/",
+            {
+                "filter": f"volume:{volume_id},issue_number:{sequence.normalized}",
+                "limit": "10",
+                "field_list": (
+                    "id,resource_type,api_detail_url,name,issue_number,cover_date,"
+                    "store_date,volume,person_credits"
+                ),
+            },
+            self._secret(),
+            "issues",
+            _normalize,
+        )
+        return [
+            replace(
+                candidate,
+                run_id=run.provider_id,
+                run_start_year=run.run_start_year,
+                publisher=candidate.publisher or run.publisher,
+            )
+            for candidate in candidates
+        ]
 
     def fetch(self, provider_id: str) -> list[NormalizedCandidate]:
         prefix = provider_id.split("-", 1)[0]
@@ -127,6 +174,7 @@ def _normalize(raw: object) -> list[NormalizedCandidate]:
                 run_start_year=start_year,
                 sequence=SequenceNumber.parse(number) if number else None,
                 item_type=format_value or ("issue" if is_issue else "run"),
+                run_id=_volume_id(volume) if is_issue else provider_id,
             )
         )
     return output
@@ -135,6 +183,14 @@ def _normalize(raw: object) -> list[NormalizedCandidate]:
 def _api_id(url: str) -> str | None:
     match = re.search(r"/(?:issue|volume)/(\d+-\d+)/", url)
     return match.group(1) if match else None
+
+
+def _volume_id(volume: dict[str, object]) -> str | None:
+    api_id = _api_id(str(volume.get("api_detail_url") or ""))
+    if api_id:
+        return api_id
+    value = volume.get("id")
+    return f"4050-{value}" if value is not None else None
 
 
 def _year(value: object) -> int | None:

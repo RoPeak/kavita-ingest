@@ -216,6 +216,31 @@ def test_structured_collection_filename_outweighs_overloaded_embedded_series() -
     assert result.hypotheses[0].subtype == "collected-edition"
     assert result.hypotheses[0].series == "Animal Man"
     assert any(
+        "separates series, creator, and book index" in reason
+        for reason in result.hypotheses[0].reasons
+    )
+    assert any(
         item.source == "comicinfo" and item.raw == "Animal Man by Grant Morrison Book One"
         for item in result.hypotheses[0].evidence
     )
+
+
+def test_long_unnumbered_comic_archive_is_not_confidently_called_a_one_shot() -> None:
+    inspection = InspectionResult(
+        InspectionStatus.OK,
+        SourceFormat.CBR,
+        metadata={"page_count": 181, "entry_count": 181},
+    )
+
+    result = classify(
+        Path("Superman - The Kryptonite Spectrum (2026) (digital).cbr"),
+        SourceFormat.CBR,
+        inspection,
+    )
+
+    assert result.ambiguous is True
+    assert result.subtype == "collected-edition"
+    assert [item.subtype for item in result.hypotheses] == [
+        "collected-edition",
+        "one-shot",
+    ]

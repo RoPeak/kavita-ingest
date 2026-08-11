@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 from kavita_ingest.config import MatchingSettings
-from kavita_ingest.domain import MediaKind, SequenceNumber
+from kavita_ingest.domain import Classification, MediaKind, ParseHypothesis, SequenceNumber
 from kavita_ingest.matching import (
     ComparisonKind,
     LocalIdentity,
+    local_identity,
     reconcile,
     score_candidates,
 )
@@ -17,6 +18,29 @@ from kavita_ingest.providers.models import (
 )
 
 SETTINGS = MatchingSettings()
+
+
+def test_comic_series_is_not_promoted_to_missing_issue_title() -> None:
+    classification = Classification(
+        MediaKind.COMIC,
+        "issue",
+        0.98,
+        False,
+        (
+            ParseHypothesis(
+                MediaKind.COMIC,
+                "issue",
+                0.98,
+                series="Watchmen",
+                sequence=SequenceNumber.parse("1"),
+            ),
+        ),
+    )
+
+    local = local_identity(classification, {})
+
+    assert local.title == ""
+    assert local.series_title == "Watchmen"
 
 
 def _book(
@@ -124,7 +148,35 @@ def test_comic_series_sequence_and_run_year_score_independently() -> None:
     score = score_candidates(local, [issue], SETTINGS)[0]
     assert score.eligible is True
     assert any(item.field == "sequence" and item.score_delta == 30 for item in score.comparisons)
+    assert any(
+        item.field == "issue_title" and item.kind is ComparisonKind.EXACT
+        for item in score.comparisons
+    )
     assert issue.run_start_year == 2024
+
+
+def test_issue_title_conflict_is_explained_but_not_a_hard_identity_contradiction() -> None:
+    local = LocalIdentity(
+        MediaKind.COMIC,
+        "issue",
+        0.98,
+        "Spider-Man Joined the Fantastic Four",
+        series_title="What If",
+        sequence=SequenceNumber.parse("1"),
+    )
+    wrong_run_issue = NormalizedCandidate(
+        ProviderName.COMIC_VINE,
+        "4000-31454",
+        RecordType.COMIC_ISSUE,
+        MediaKind.COMIC,
+        "What If the Avengers Lost the Evolutionary War?",
+        series_title="What If?",
+        sequence=SequenceNumber.parse("1"),
+    )
+    score = score_candidates(local, [wrong_run_issue], SETTINGS)[0]
+    comparison = next(item for item in score.comparisons if item.field == "issue_title")
+    assert comparison.kind is ComparisonKind.CONFLICT
+    assert score.hard_contradiction is False
 
 
 def test_collected_edition_is_blocked_from_issue_candidate_path() -> None:

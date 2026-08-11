@@ -81,6 +81,17 @@ def audit_command(
     result = run_audit(root, settings)
     for key, value in result.summary.items():
         typer.echo(f"{key:40} {value}")
+    for provider, activity in result.provider_activity.items():
+        typer.echo(
+            f"provider_activity:{provider:22} "
+            f"cache_hits={activity['cache_hits']} "
+            f"cache_misses={activity['cache_misses']} "
+            f"network_requests={activity['network_requests']} "
+            f"errors={activity['errors']} "
+            f"rate_limits={activity['rate_limit_events']}"
+        )
+    for key, value in result.candidate_activity.items():
+        typer.echo(f"candidate_activity:{key:20} {value}")
     if details:
         for item in result.items:
             top = item.scores[0] if item.scores else None

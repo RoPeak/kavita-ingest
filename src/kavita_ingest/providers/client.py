@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable
+from dataclasses import dataclass, field
 from email.utils import parsedate_to_datetime
 
 from ..provider_store import ProviderStore
@@ -11,6 +12,24 @@ from .models import NormalizedCandidate, ProviderName, canonical_request_key
 from .transport import Transport
 
 Normalizer = Callable[[object], list[NormalizedCandidate]]
+
+
+@dataclass(slots=True)
+class ClientActivity:
+    cache_hits: int = 0
+    cache_misses: int = 0
+    network_requests: dict[str, int] = field(default_factory=dict)
+    errors: int = 0
+    rate_limit_events: int = 0
+
+    def snapshot(self) -> dict[str, object]:
+        return {
+            "cache_hits": self.cache_hits,
+            "cache_misses": self.cache_misses,
+            "network_requests": dict(sorted(self.network_requests.items())),
+            "errors": self.errors,
+            "rate_limit_events": self.rate_limit_events,
+        }
 
 
 class CachedProviderClient:
@@ -42,6 +61,7 @@ class CachedProviderClient:
         self.network_enabled = network_enabled
         self.unavailable_reason = unavailable_reason
         self.max_retries = max_retries
+        self.activity = ClientActivity()
 
     def get(
         self,
@@ -56,9 +76,11 @@ class CachedProviderClient:
         cache_key = canonical_request_key(self.provider, operation, request_identity)
         cached = self.store.get_cache(cache_key)
         if cached is not None and not cached.stale:
+            self.activity.cache_hits += 1
             return list(cached.candidates)
         if self.offline:
             if cached is not None:
+                self.activity.cache_hits += 1
                 return list(cached.candidates)
             raise ProviderUnavailable(f"{self.provider.value} has no cached result for offline use")
         if not self.network_enabled:
@@ -66,10 +88,14 @@ class CachedProviderClient:
                 self.unavailable_reason or f"{self.provider.value} network access is disabled"
             )
 
+        self.activity.cache_misses += 1
         params = {**public_params, **secret_params}
         last_error: ProviderError | None = None
         for attempt in range(self.max_retries + 1):
             self.limiter.wait_and_reserve(self.provider.value, bucket, self.policy)
+            self.activity.network_requests[bucket] = (
+                self.activity.network_requests.get(bucket, 0) + 1
+            )
             try:
                 response = self.transport.get(
                     url,
@@ -78,18 +104,23 @@ class CachedProviderClient:
                     self.timeout,
                 )
             except ProviderError as exc:
+                self.activity.errors += 1
                 last_error = exc
                 if attempt < self.max_retries:
                     continue
                 raise
             if response.status == 429:
+                self.activity.errors += 1
+                self.activity.rate_limit_events += 1
                 delay = _retry_after(response.headers.get("retry-after"))
                 self.limiter.block(self.provider.value, bucket, delay, "HTTP 429")
                 raise ProviderError(f"{self.provider.value} rate limited the request")
             if response.status >= 500 and attempt < self.max_retries:
+                self.activity.errors += 1
                 last_error = ProviderError(f"provider HTTP {response.status}")
                 continue
             if response.status < 200 or response.status >= 300:
+                self.activity.errors += 1
                 raise ProviderError(f"provider HTTP {response.status}")
             raw = response.json()
             try:

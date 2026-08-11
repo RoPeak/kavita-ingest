@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import json
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
 
-from kavita_ingest.candidates import generate_candidates
+from kavita_ingest.candidates import CandidateSession, generate_candidates
 from kavita_ingest.config import MatchingSettings
 from kavita_ingest.db import connect, migrate
 from kavita_ingest.decisions import (
@@ -17,9 +19,10 @@ from kavita_ingest.decisions import (
     clear_manual_override,
     validate_manual_override,
 )
-from kavita_ingest.domain import MediaKind, SourceFormat, SourceRecord
+from kavita_ingest.domain import MediaKind, SequenceNumber, SourceFormat, SourceRecord
 from kavita_ingest.matching import LocalIdentity, reconcile, score_candidates
 from kavita_ingest.providers.base import ProviderStatus
+from kavita_ingest.providers.comic_vine import ComicVineProvider
 from kavita_ingest.providers.models import (
     Contributor,
     Identifier,
@@ -65,6 +68,103 @@ class FakeProvider:
         self.operations.append(f"identifier:{identifier.scheme}")
         return self.candidates
 
+
+class RunReuseClient:
+    def __init__(self, *, same_year: bool = False) -> None:
+        self.operations: list[str] = []
+        self.same_year = same_year
+
+    def get(
+        self,
+        operation: str,
+        url: str,
+        public_params: dict[str, str],
+        secret_params: dict[str, str],
+        bucket: str,
+        normalize: Callable[[object], list[NormalizedCandidate]],
+    ) -> list[NormalizedCandidate]:
+        del url, secret_params, bucket
+        self.operations.append(operation)
+        if operation == "search-runs":
+            raw = json.loads(
+                Path("tests/fixtures/providers/comic_vine_runs.json").read_text(encoding="utf-8")
+            )
+            if self.same_year:
+                raw["results"][1]["start_year"] = "2024"
+        else:
+            raw = json.loads(
+                Path("tests/fixtures/providers/comic_vine.json").read_text(encoding="utf-8")
+            )
+            if "volume:167340" in public_params["filter"]:
+                raw["results"] = []
+                return normalize(raw)
+            number = public_params["filter"].rsplit(":", 1)[-1]
+            raw["results"][0]["issue_number"] = number
+        return normalize(raw)
+
+
+class TitleDisambiguationClient:
+    def get(
+        self,
+        operation: str,
+        url: str,
+        public_params: dict[str, str],
+        secret_params: dict[str, str],
+        bucket: str,
+        normalize: Callable[[object], list[NormalizedCandidate]],
+    ) -> list[NormalizedCandidate]:
+        del url, secret_params, bucket
+        if operation == "search":
+            return normalize({"results": []})
+        if operation == "search-runs":
+            return normalize(
+                {
+                    "results": [
+                        _comic_vine_record("volume", 2918, "What If?", start_year=1977),
+                        _comic_vine_record("volume", 4249, "What If...?", start_year=1989),
+                    ]
+                }
+            )
+        volume = int(public_params["filter"].split(",", 1)[0].split(":", 1)[1])
+        number = public_params["filter"].rsplit(":", 1)[-1]
+        title = (
+            "What if Spider-Man joined the Fantastic Four?"
+            if volume == 2918 and number == "1"
+            else "What If the Avengers Lost the Evolutionary War?"
+        )
+        return normalize(
+            {
+                "results": [
+                    {
+                        **_comic_vine_record("issue", volume * 100 + int(number), title),
+                        "issue_number": number,
+                        "volume": {
+                            "id": volume,
+                            "name": "What If?",
+                            "api_detail_url": (
+                                f"https://comicvine.gamespot.com/api/volume/4050-{volume}/"
+                            ),
+                        },
+                    }
+                ]
+            }
+        )
+
+
+def _comic_vine_record(
+    resource: str, identifier: int, name: str, *, start_year: int | None = None
+) -> dict[str, object]:
+    prefix = "4050" if resource == "volume" else "4000"
+    return {
+        "id": identifier,
+        "resource_type": resource,
+        "api_detail_url": (
+            f"https://comicvine.gamespot.com/api/{resource}/{prefix}-{identifier}/"
+        ),
+        "name": name,
+        "start_year": start_year,
+        "publisher": {"name": "Marvel"},
+    }
 
 def _edition() -> NormalizedCandidate:
     return NormalizedCandidate(
@@ -115,6 +215,117 @@ def test_collected_edition_query_retains_collection_semantics() -> None:
     )
     generate_candidates(local, (provider,))
     assert provider.operations[0].startswith("search:collected-edition")
+
+
+def test_comic_run_is_resolved_once_and_reused_without_implicit_approval() -> None:
+    client = RunReuseClient()
+    provider = ComicVineProvider(client, "secret")  # type: ignore[arg-type]
+    first = LocalIdentity(
+        MediaKind.COMIC,
+        "issue",
+        0.98,
+        "Absolute Batman",
+        series_title="Absolute Batman",
+        sequence=SequenceNumber.parse("1"),
+        year=2024,
+    )
+    later = LocalIdentity(
+        MediaKind.COMIC,
+        "issue",
+        0.98,
+        "Absolute Batman",
+        series_title="Absolute Batman",
+        sequence=SequenceNumber.parse("14"),
+        year=2026,
+    )
+    session = CandidateSession.from_local_identities([first, later])
+
+    first_result = generate_candidates(first, (provider,), session)
+    later_result = generate_candidates(later, (provider,), session)
+
+    assert client.operations == ["search-runs", "issues-in-run", "issues-in-run"]
+    assert first_result.candidates[0].run_id == "4050-160294"
+    assert later_result.candidates[0].sequence == SequenceNumber.parse("14")
+    assert "comic_vine:run-reused" in later_result.queries
+    assert session.metrics()["repeated_run_queries_avoided"] == 1
+    assert session.metrics()["run_disambiguation_queries"] == 0
+
+
+def test_comic_run_uses_issue_title_only_when_it_disambiguates() -> None:
+    provider = ComicVineProvider(TitleDisambiguationClient(), "secret")  # type: ignore[arg-type]
+    first = LocalIdentity(
+        MediaKind.COMIC,
+        "issue",
+        0.92,
+        "Spider-Man Joined the Fantastic Four",
+        series_title="What If",
+        sequence=SequenceNumber.parse("1"),
+    )
+    last = LocalIdentity(
+        MediaKind.COMIC,
+        "issue",
+        0.92,
+        "Loki Had Found the Hammer of Thor",
+        series_title="What If",
+        sequence=SequenceNumber.parse("47"),
+    )
+    session = CandidateSession.from_local_identities([first, last])
+
+    result = generate_candidates(first, (provider,), session)
+
+    assert result.candidates[0].run_id == "4050-2918"
+    assert session.resolved_runs["what if"].provider_id == "4050-2918"  # type: ignore[union-attr]
+
+
+def test_highest_local_issue_disambiguates_same_year_collection_run() -> None:
+    client = RunReuseClient(same_year=True)
+    provider = ComicVineProvider(client, "secret")  # type: ignore[arg-type]
+    first = LocalIdentity(
+        MediaKind.COMIC,
+        "issue",
+        0.98,
+        "Absolute Batman",
+        series_title="Absolute Batman",
+        sequence=SequenceNumber.parse("1"),
+        year=2024,
+    )
+    later = LocalIdentity(
+        MediaKind.COMIC,
+        "issue",
+        0.98,
+        "Absolute Batman",
+        series_title="Absolute Batman",
+        sequence=SequenceNumber.parse("14"),
+        year=2026,
+    )
+    session = CandidateSession.from_local_identities([first, later])
+
+    generate_candidates(first, (provider,), session)
+
+    resolved = session.resolved_runs["absolute batman"]
+    assert resolved is not None and resolved.provider_id == "4050-160294"
+    assert session.metrics()["run_disambiguation_queries"] == 2
+
+
+def test_run_disambiguation_budget_preserves_ambiguity_instead_of_overquerying() -> None:
+    provider = ComicVineProvider(TitleDisambiguationClient(), "secret")  # type: ignore[arg-type]
+    local = LocalIdentity(
+        MediaKind.COMIC,
+        "issue",
+        0.92,
+        "Spider-Man Joined the Fantastic Four",
+        series_title="What If",
+        sequence=SequenceNumber.parse("1"),
+    )
+    session = CandidateSession.from_local_identities([local])
+    session.max_disambiguation_queries = 1
+
+    result = generate_candidates(local, (provider,), session)
+
+    assert not result.candidates
+    assert session.resolved_runs["what if"] is None
+    assert session.metrics()["run_disambiguation_queries"] == 1
+    assert session.metrics()["disambiguation_budget_exhausted"] == 1
 
 
 def test_unavailable_provider_does_not_block_other_or_cached_workflows() -> None:

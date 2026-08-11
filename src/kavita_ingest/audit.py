@@ -4,7 +4,7 @@ import sqlite3
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-from .candidates import CandidateGeneration, generate_candidates
+from .candidates import CandidateGeneration, CandidateSession, generate_candidates
 from .config import AppConfig
 from .db import connect, migrate
 from .decisions import DecisionRepository
@@ -36,6 +36,8 @@ class AuditResult:
     items: tuple[ReviewItem, ...]
     summary: dict[str, int]
     run_id: int
+    provider_activity: dict[str, dict[str, object]]
+    candidate_activity: dict[str, int]
 
 
 def run_audit(
@@ -55,10 +57,14 @@ def run_audit(
         matches = MatchRepository(connection)
         decisions = DecisionRepository(connection)
         run_id = matches.start_run(mode)
+        local_values = [
+            local_identity(scanned.classification, scanned.inspection.metadata)
+            for scanned in scans
+        ]
+        candidate_session = CandidateSession.from_local_identities(local_values)
         items = []
-        for scanned in scans:
-            local = local_identity(scanned.classification, scanned.inspection.metadata)
-            generated = generate_candidates(local, providers)
+        for scanned, local in zip(scans, local_values, strict=True):
+            generated = generate_candidates(local, providers, candidate_session)
             scores = score_candidates(local, list(generated.candidates), config.matching)
             scores = [
                 replace(
@@ -85,7 +91,13 @@ def run_audit(
             items.append(ReviewItem(scanned, local, generated, tuple(scores), resolved))
         summary = _summary(items)
         matches.complete_run(run_id, len(items), summary)
-        return AuditResult(tuple(items), summary, run_id)
+        return AuditResult(
+            tuple(items),
+            summary,
+            run_id,
+            _provider_activity(providers),
+            candidate_session.metrics(),
+        )
     finally:
         connection.close()
 
@@ -107,7 +119,10 @@ def _summary(items: list[ReviewItem]) -> dict[str, int]:
         "eligible_high_confidence": 0,
         "review_required": 0,
         "unresolved": 0,
+        "appropriate_provider_available": 0,
+        "no_candidate_despite_provider_available": 0,
         "provider_unavailable": 0,
+        "partial_provider_unavailable": 0,
         "work_accepted_edition_unresolved": 0,
         "hard_contradictions": 0,
         "collected_editions": 0,
@@ -126,8 +141,14 @@ def _summary(items: list[ReviewItem]) -> dict[str, int]:
         else:
             summary["no_candidate"] += 1
             summary["unresolved"] += 1
-        if item.generation.unavailable:
+            if item.generation.available:
+                summary["no_candidate_despite_provider_available"] += 1
+        if item.generation.available:
+            summary["appropriate_provider_available"] += 1
+        if not item.generation.available:
             summary["provider_unavailable"] += 1
+        elif item.generation.unavailable:
+            summary["partial_provider_unavailable"] += 1
         if (
             item.reconciliation.work_state == "accepted"
             and item.reconciliation.edition_state == "unresolved"
@@ -140,3 +161,13 @@ def _summary(items: list[ReviewItem]) -> dict[str, int]:
             ):
                 summary["collected_as_issue_contradictions"] += 1
     return summary
+
+
+def _provider_activity(providers: tuple[Provider, ...]) -> dict[str, dict[str, object]]:
+    output: dict[str, dict[str, object]] = {}
+    for provider in providers:
+        client = getattr(provider, "client", None)
+        activity = getattr(client, "activity", None)
+        if activity is not None:
+            output[provider.name.value] = activity.snapshot()
+    return output

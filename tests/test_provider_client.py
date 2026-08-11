@@ -96,6 +96,13 @@ def test_cache_avoids_duplicate_traffic_and_sends_user_agent(tmp_path: Path) -> 
     assert len(transport.calls) == 1
     assert transport.calls[0][0]["key"] == "secret"
     assert "contact@example.test" in transport.calls[0][1]["User-Agent"]
+    assert client.activity.snapshot() == {
+        "cache_hits": 1,
+        "cache_misses": 1,
+        "network_requests": {"books": 1},
+        "errors": 0,
+        "rate_limit_events": 0,
+    }
     connection.close()
 
 

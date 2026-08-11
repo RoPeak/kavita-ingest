@@ -87,8 +87,31 @@ def test_comic_vine_normalizes_run_issue_without_kavita_volume_conflation() -> N
     assert candidate.series_title == "Absolute Batman"
     assert candidate.run_start_year == 2024
     assert candidate.sequence == SequenceNumber.parse("14")
+    assert candidate.run_id == "4050-160294"
     assert not hasattr(candidate, "volume")
     assert client.calls[0][2]["api_key"] == "secret"
+
+
+def test_comic_vine_resolves_runs_then_filters_issues_by_run_and_sequence() -> None:
+    run_client = FixtureClient(_fixture("comic_vine_runs.json"))
+    provider = ComicVineProvider(run_client, "secret")  # type: ignore[arg-type]
+    runs = provider.search_runs(
+        SearchQuery(MediaKind.COMIC, "Absolute Batman", series_title="Absolute Batman")
+    )
+    assert [(item.provider_id, item.run_start_year) for item in runs] == [
+        ("4050-160294", 2024),
+        ("4050-167340", 2025),
+    ]
+    assert run_client.calls[0][1]["resources"] == "volume"
+    assert run_client.calls[0][3] == "search:run"
+
+    issue_client = FixtureClient(_fixture("comic_vine.json"))
+    provider = ComicVineProvider(issue_client, "secret")  # type: ignore[arg-type]
+    issue = provider.search_issue_in_run(runs[0], SequenceNumber.parse("014"))[0]
+    assert issue.run_id == "4050-160294"
+    assert issue.run_start_year == 2024
+    assert issue_client.calls[0][1]["filter"] == "volume:160294,issue_number:14"
+    assert issue_client.calls[0][3] == "issues"
 
 
 def test_comic_vine_collected_search_uses_collection_oriented_query_bucket() -> None:

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from .domain import (
@@ -69,6 +69,33 @@ def classify(path: Path, format_: SourceFormat, inspection: InspectionResult) ->
         )
     if format_ in {SourceFormat.CBZ, SourceFormat.CBR}:
         hypothesis = _comic_hypothesis(path, inspection, tuple(evidence), 0.98)
+        page_count = inspection.metadata.get("page_count")
+        if (
+            hypothesis.subtype == "one-shot"
+            and isinstance(page_count, int)
+            and page_count >= 120
+        ):
+            collected = replace(
+                hypothesis,
+                subtype="collected-edition",
+                confidence=0.78,
+                reasons=(
+                    *hypothesis.reasons,
+                    "long unnumbered archive may collect multiple issues",
+                ),
+            )
+            one_shot = replace(
+                hypothesis,
+                confidence=0.72,
+                reasons=(*hypothesis.reasons, "a long original graphic work remains possible"),
+            )
+            return Classification(
+                MediaKind.COMIC,
+                collected.subtype,
+                collected.confidence,
+                True,
+                (collected, one_shot),
+            )
         return Classification(
             MediaKind.COMIC, hypothesis.subtype, hypothesis.confidence, False, (hypothesis,)
         )
@@ -175,6 +202,7 @@ def _comic_hypothesis(
     sequence = SequenceNumber.parse(str(comicinfo["Number"])) if comicinfo.get("Number") else None
     creators: tuple[str, ...] = ()
     subtype = "issue"
+    identity_reasons: list[str] = []
 
     collection = re.match(
         r"^(.*?)\s+by\s+(.+?)\s+(?:(Ultimate Collection)\s+)?Book\s+([\w.-]+)$",
@@ -190,6 +218,11 @@ def _comic_hypothesis(
         creators = (_clean_title(creator),)
         sequence = sequence or SequenceNumber.parse(number)
         subtype = "collected-edition"
+        if comicinfo.get("Series") and _normalize(str(comicinfo["Series"])) != _normalize(series):
+            identity_reasons.append(
+                "structured collection filename separates series, creator, and book index; "
+                "embedded ComicInfo Series is retained as conflicting edition-label evidence"
+            )
     elif re.search(
         r"\b(?:TPB|Omnibus|Ultimate Collection|Collected Edition)\b", stem, re.IGNORECASE
     ):
@@ -237,7 +270,7 @@ def _comic_hypothesis(
         year=year,
         creators=creators,
         evidence=evidence,
-        reasons=("comic archive or strong issue/folder evidence",),
+        reasons=("comic archive or strong issue/folder evidence", *identity_reasons),
     )
 
 

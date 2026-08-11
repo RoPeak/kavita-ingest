@@ -9,6 +9,8 @@
       "issue_number": "14",
       "cover_date": "2026-01-15",
       "volume": {
+        "id": 160294,
+        "api_detail_url": "https://comicvine.gamespot.com/api/volume/4050-160294/",
         "name": "Absolute Batman",
         "start_year": "2024",
         "publisher": {"name": "DC Comics"}

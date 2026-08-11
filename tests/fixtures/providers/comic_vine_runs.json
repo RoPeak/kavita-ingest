@@ -1,0 +1,21 @@
+{
+  "status_code": 1,
+  "results": [
+    {
+      "id": 160294,
+      "resource_type": "volume",
+      "api_detail_url": "https://comicvine.gamespot.com/api/volume/4050-160294/",
+      "name": "Absolute Batman",
+      "start_year": "2024",
+      "publisher": {"name": "DC Comics"}
+    },
+    {
+      "id": 167340,
+      "resource_type": "volume",
+      "api_detail_url": "https://comicvine.gamespot.com/api/volume/4050-167340/",
+      "name": "Absolute Batman",
+      "start_year": "2025",
+      "publisher": {"name": "DC Comics"}
+    }
+  ]
+}

@@ -54,6 +54,7 @@ class NormalizedCandidate:
     item_type: str | None = None
     work_id: str | None = None
     edition_id: str | None = None
+    run_id: str | None = None
     provider_schema_version: int = 1
 
     @property
@@ -87,6 +88,7 @@ class NormalizedCandidate:
             item_type=value.get("item_type"),
             work_id=value.get("work_id"),
             edition_id=value.get("edition_id"),
+            run_id=value.get("run_id"),
             provider_schema_version=int(value.get("provider_schema_version", 1)),
         )
 
