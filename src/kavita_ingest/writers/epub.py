@@ -42,6 +42,7 @@ def write_epub(
     calibre_fields: Mapping[str, object],
     exact_date: str | None = None,
     contributor_roles: Mapping[str, Sequence[str]] | None = None,
+    native_fields: Mapping[str, object] | None = None,
     ebook_meta: str = "ebook-meta",
 ) -> VerificationResult:
     unsupported = set(calibre_fields) - CALIBRE_FIELDS
@@ -62,9 +63,15 @@ def write_epub(
                 capture_output=True,
                 text=True,
             )
-        if exact_date is not None or contributor_roles:
-            _patch_opf(staged, exact_date=exact_date, contributor_roles=contributor_roles or {})
-        result = verify_epub(source, staged, calibre_fields, exact_date, contributor_roles or {})
+        if exact_date is not None or contributor_roles or native_fields:
+            _patch_opf(
+                staged,
+                exact_date=exact_date,
+                contributor_roles=contributor_roles or {},
+                native_fields=native_fields or {},
+            )
+        expected_fields = {**calibre_fields, **(native_fields or {})}
+        result = verify_epub(source, staged, expected_fields, exact_date, contributor_roles or {})
         result.require_valid()
         os.replace(staged, destination)
         return result
@@ -158,7 +165,11 @@ def _read_opf(epub: Path) -> tuple[etree._Element, str]:
 
 
 def _patch_opf(
-    epub: Path, *, exact_date: str | None, contributor_roles: Mapping[str, Sequence[str]]
+    epub: Path,
+    *,
+    exact_date: str | None,
+    contributor_roles: Mapping[str, Sequence[str]],
+    native_fields: Mapping[str, object] | None = None,
 ) -> None:
     invalid = set(contributor_roles) - OWNABLE_ROLES
     if invalid:
@@ -178,6 +189,7 @@ def _patch_opf(
         date_node.text = exact_date
         if not dates:
             metadata.append(date_node)
+    _patch_native_work_fields(metadata, native_fields or {})
     _patch_roles(metadata, contributor_roles)
     payloads[opf_path] = etree.tostring(root, encoding="utf-8", xml_declaration=True)
     fd, name = tempfile.mkstemp(prefix=f".{epub.name}.", suffix=".tmp", dir=epub.parent)
@@ -234,6 +246,26 @@ def _patch_roles(metadata: etree._Element, updates: Mapping[str, Sequence[str]])
             refs = metadata.xpath("opf:meta[@refines=$ref]", namespaces=NS, ref=f"#{creator_id}")
             if not refs:
                 metadata.remove(creator)
+
+
+def _patch_native_work_fields(metadata: etree._Element, fields: Mapping[str, object]) -> None:
+    invalid = set(fields) - {"title", "authors"}
+    if invalid:
+        raise ValueError(f"unsupported native work fields: {sorted(invalid)}")
+    if "title" in fields:
+        titles = metadata.findall("dc:title", NS)
+        if len(titles) > 1:
+            raise ValueError("ambiguous duplicate OPF titles")
+        title = titles[0] if titles else etree.Element(f"{{{NS['dc']}}}title")
+        title.text = str(fields["title"])
+        if not titles:
+            metadata.append(title)
+    if "authors" not in fields:
+        return
+    authors = fields["authors"]
+    if not isinstance(authors, Sequence) or isinstance(authors, str):
+        raise ValueError("native authors must be a sequence")
+    _patch_roles(metadata, {"aut": tuple(str(author) for author in authors)})
 
 
 def _verify_fields(

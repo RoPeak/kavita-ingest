@@ -2,9 +2,8 @@
 
 Kavita Ingest provides read-only discovery, inspection, local classification,
 external metadata matching, explicit identity review, staged metadata writers,
-and immutable offline plans for EPUB, PDF, CBZ, and ordinary single-file
-RAR3/RAR5 CBR sources. It does not yet apply plans, move files, or remove
-sources.
+immutable offline plans, and recoverable plan execution for EPUB, PDF, CBZ,
+and ordinary single-file RAR3/RAR5 CBR sources.
 
 ## Development
 
@@ -25,6 +24,10 @@ python3 -m venv .venv
 .venv/bin/kavita-ingest plan create resolved-plan.json
 .venv/bin/kavita-ingest plan show 1
 .venv/bin/kavita-ingest plan approve 1 --digest DISPLAYED_SHA256
+.venv/bin/kavita-ingest apply 1
+.venv/bin/kavita-ingest apply-status 1
+.venv/bin/kavita-ingest recover 1
+.venv/bin/kavita-ingest rollback 1
 ```
 
 Omit `--no-persist` to retain source fingerprints, inspection outcomes, and
@@ -103,4 +106,15 @@ derivatives of those canonical JSON bytes, and approval must name their exact
 SHA-256 digest. Plans are self-contained and require no provider lookup to
 interpret. The staged writer library supports independently verified EPUB,
 CBZ/ComicInfo, ordinary single-volume CBR-to-CBZ, and unsigned, unencrypted PDF
-outputs, but no writer is connected to a filesystem apply command yet.
+outputs. `apply` accepts only an explicitly approved exact plan digest and does
+not contact metadata providers. It performs whole-plan preflight, writes and
+verifies each item in a destination-filesystem staging area, and uses an
+atomic Linux no-clobber publication primitive before any planned source
+cleanup. Interrupted runs must be resumed with `recover`; `rollback` is a
+conservative preview only.
+
+Apply, recovery, and rollback preview take a shared OS-backed state lock. The
+apply journal uses SQLite WAL with `synchronous=FULL`; critical staged and
+destination files and their parent directories are also flushed independently.
+Existing destinations are never replaced. Apply currently fails conservatively
+on platforms that cannot provide the required Linux atomic no-clobber commit.

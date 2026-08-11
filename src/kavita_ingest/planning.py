@@ -4,7 +4,7 @@ import hashlib
 import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from .canonical import CanonicalIdentity
@@ -121,6 +121,9 @@ def build_snapshot(
     expected_inventory: tuple[dict[str, Any], ...],
     verification_requirements: tuple[str, ...],
     retain_source: bool = False,
+    lifecycle_policy: str = "move_after_verify",
+    archive_path: str | None = None,
+    destination_root: str | None = None,
 ) -> ResolvedItemSnapshot:
     conflicts = tuple(
         PlanConflict("unresolved_identity", explanation)
@@ -128,13 +131,31 @@ def build_snapshot(
     )
     if projection is None and not conflicts:
         conflicts = (PlanConflict("missing_projection", "Kavita output projection is unresolved"),)
+    if retain_source:
+        lifecycle_policy = "preserve"
+    if lifecycle_policy not in {"move_after_verify", "preserve", "archive_after_verify"}:
+        raise ValueError(f"unsupported source lifecycle policy: {lifecycle_policy}")
+    if lifecycle_policy == "archive_after_verify" and not archive_path:
+        raise ValueError("archive_after_verify requires a planned archive path")
+    if lifecycle_policy != "archive_after_verify" and archive_path is not None:
+        raise ValueError("archive path is valid only for archive_after_verify")
+    lifecycle_action: dict[str, Any] = {"action": lifecycle_policy}
+    if archive_path:
+        lifecycle_action["archive_path"] = archive_path
     lifecycle = (
         {"action": "stage_output"},
         {"action": "verify_staged_output"},
         {"action": "commit_destination"},
-        {"action": "retain_source" if retain_source else "remove_source_after_verified_commit"},
+        lifecycle_action,
     )
     projection_dict = projection.to_dict() if projection else None
+    if projection_dict is not None and destination_root is not None:
+        assert projection is not None
+        root = Path(destination_root).expanduser()
+        if not root.is_absolute():
+            raise ValueError("destination root embedded in a plan must be absolute")
+        projection_dict["library_root"] = str(root)
+        projection_dict["absolute_destination"] = str(root / projection.destination)
     ownership = (
         projection.ownership.to_dict()
         if projection

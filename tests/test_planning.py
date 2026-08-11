@@ -79,7 +79,7 @@ def test_authoritative_plan_bytes_digest_approval_and_offline_export(tmp_path: P
         store.export(stored.id, export)
     assert export.read_bytes() == plan.canonical_bytes()
     assert b'provider_identity":{}' in export.read_bytes()
-    assert b"remove_source_after_verified_commit" in export.read_bytes()
+    assert b'"action":"move_after_verify"' in export.read_bytes()
 
 
 def test_import_is_exact_and_always_creates_unapproved_draft(tmp_path: Path) -> None:

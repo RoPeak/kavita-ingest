@@ -104,6 +104,11 @@ def _require_writable(pdf: pikepdf.Pdf) -> None:
         raise ValueError("signature-bearing PDFs are ineligible for metadata writes")
 
 
+def require_pdf_write_eligible(path: Path) -> None:
+    with pikepdf.open(path) as pdf:
+        _require_writable(pdf)
+
+
 def _fingerprint(pdf: pikepdf.Pdf) -> PdfSemanticFingerprint:
     boxes: list[tuple[float, ...]] = []
     content: list[str] = []

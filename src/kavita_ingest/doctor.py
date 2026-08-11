@@ -76,6 +76,7 @@ def checks(
         ]
     )
     output.extend(_provider_database_checks(config.database_path))
+    output.extend(_apply_database_checks(config.database_path))
     output.append(Check("provider-live", "INFO", "not tested; doctor is network-independent"))
     return tuple(output)
 
@@ -152,3 +153,34 @@ def _provider_database_checks(path: Path | None) -> list[Check]:
         ]
     except sqlite3.Error as exc:
         return [Check("provider-cache", "BLOCKED", str(exc))]
+
+
+def _apply_database_checks(path: Path | None) -> list[Check]:
+    if path is None or not path.exists():
+        return [Check("apply-state", "INFO", "state database has not been created")]
+    try:
+        with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as connection:
+            tables = {
+                row[0]
+                for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            }
+            if "apply_runs" not in tables:
+                return [Check("apply-state", "INFO", "apply migration not applied")]
+            active = connection.execute(
+                "SELECT count(*) FROM apply_runs WHERE status IN "
+                "('preflighting', 'running', 'recovery_required')"
+            ).fetchone()[0]
+            recovery = connection.execute(
+                "SELECT count(*) FROM apply_items WHERE state IN "
+                "('failed', 'recovery_required', 'cleanup_pending')"
+            ).fetchone()[0]
+        status = "BLOCKED" if recovery else "OK"
+        return [
+            Check(
+                "apply-state",
+                status,
+                f"{active} active/recoverable run(s); {recovery} item(s) require attention",
+            )
+        ]
+    except sqlite3.Error as exc:
+        return [Check("apply-state", "BLOCKED", str(exc))]

@@ -8,20 +8,25 @@ from typing import Annotated
 
 import typer
 
+from .apply_engine import ApplyEngine, ApplyRefused, ApplySummary
 from .audit import run_audit
 from .config import load_config
 from .db import connect
 from .doctor import checks
+from .locking import LockUnavailable
 from .logging_config import configure_logging
 from .paths import AppPaths
 from .plan_store import PlanStore
 from .planning import validate_plan_payload
 from .providers.models import NormalizedCandidate, ProviderName, RecordType
 from .review import interactive_review
+from .rollback import preview_rollback
 from .run_groups import RunGroupRepository
 from .scanner import scan as run_scan
 
-app = typer.Typer(help="Inspect and classify reading-media sources without modifying them.")
+app = typer.Typer(
+    help="Inspect, plan, and safely execute explicitly approved reading-media ingestion."
+)
 plan_app = typer.Typer(help="Create and approve immutable offline execution plans.")
 run_group_app = typer.Typer(help="Inspect and manage explicit comic run-group choices.")
 app.add_typer(plan_app, name="plan")
@@ -141,6 +146,8 @@ def status(
             "decisions",
             "run_group_decisions",
             "plans",
+            "apply_runs",
+            "apply_items",
             "provider_cache",
         ):
             exists = connection.execute(
@@ -167,6 +174,83 @@ def _state_connection(config: Path | None) -> sqlite3.Connection:
 def _plan_store(config: Path | None) -> tuple[sqlite3.Connection, PlanStore]:
     connection = _state_connection(config)
     return connection, PlanStore(connection)
+
+
+def _apply_engine(config: Path | None) -> ApplyEngine:
+    return ApplyEngine(load_config(config))
+
+
+def _echo_apply_summary(summary: ApplySummary) -> None:
+    typer.echo(f"Plan: {summary.plan_id}")
+    typer.echo(f"Apply run: {summary.run_id}")
+    typer.echo(f"Status: {summary.status.value}")
+    for state, count in sorted(summary.counts.items()):
+        typer.echo(f"{state:20} {count}")
+
+
+@app.command("apply")
+def apply_command(
+    plan_id: int,
+    config: Annotated[Path | None, typer.Option("--config")] = None,
+) -> None:
+    """Execute an already approved immutable plan; no approval shortcut exists."""
+    try:
+        _echo_apply_summary(_apply_engine(config).apply(plan_id))
+    except (ApplyRefused, LockUnavailable) as exc:
+        typer.echo(f"REFUSED: {exc}", err=True)
+        raise typer.Exit(2) from exc
+
+
+@app.command("recover")
+def recover_command(
+    plan_id: int,
+    config: Annotated[Path | None, typer.Option("--config")] = None,
+) -> None:
+    """Recover a prior apply run using only its immutable plan and durable journal."""
+    try:
+        _echo_apply_summary(_apply_engine(config).recover(plan_id))
+    except (ApplyRefused, LockUnavailable) as exc:
+        typer.echo(f"RECOVERY REFUSED: {exc}", err=True)
+        raise typer.Exit(2) from exc
+
+
+@app.command("apply-status")
+def apply_status_command(
+    plan_id: int,
+    config: Annotated[Path | None, typer.Option("--config")] = None,
+) -> None:
+    """Show durable apply/recovery state without touching media or providers."""
+    summary = _apply_engine(config).status(plan_id)
+    if summary is None:
+        typer.echo(f"Plan {plan_id} has no apply run.")
+    else:
+        _echo_apply_summary(summary)
+        for item in _apply_engine(config).inspect_recovery(plan_id):
+            typer.echo(
+                f"{item.item_id}: state={item.state.value} "
+                f"source={'present' if item.source_exists else 'missing'} "
+                "staging="
+                f"{'present' if item.staging and Path(item.staging).exists() else 'missing'} "
+                f"destination={'present' if item.destination_exists else 'missing'}"
+            )
+            typer.echo(f"  proposed: {item.proposed_action}")
+            if item.detail:
+                typer.echo(f"  detail: {item.detail}")
+
+
+@app.command("rollback")
+def rollback_command(
+    plan_id: int,
+    config: Annotated[Path | None, typer.Option("--config")] = None,
+) -> None:
+    """Preview only provably reversible rollback actions; never execute them."""
+    settings = load_config(config)
+    if settings.database_path is None:
+        raise typer.BadParameter("database path is required")
+    for item in preview_rollback(settings.database_path, plan_id):
+        marker = "REVERSIBLE" if item.reversible else "REFUSED"
+        typer.echo(f"{marker:10} {item.item_id}: {item.action} - {item.explanation}")
+    typer.echo("Preview only; no rollback filesystem action was executed.")
 
 
 @plan_app.command("create")
