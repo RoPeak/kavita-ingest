@@ -19,6 +19,8 @@ from .matching import (
 )
 from .provider_runtime import build_providers
 from .providers.base import Provider
+from .providers.models import NormalizedCandidate
+from .run_groups import RunGroupRepository, run_group_key
 from .scanner import ScanResult, scan
 
 
@@ -58,10 +60,22 @@ def run_audit(
         decisions = DecisionRepository(connection)
         run_id = matches.start_run(mode)
         local_values = [
-            local_identity(scanned.classification, scanned.inspection.metadata)
-            for scanned in scans
+            local_identity(scanned.classification, scanned.inspection.metadata) for scanned in scans
         ]
         candidate_session = CandidateSession.from_local_identities(local_values)
+        run_groups = RunGroupRepository(connection)
+        for local in local_values:
+            if local.kind.value != "comic" or not local.series_title:
+                continue
+            decision = run_groups.latest(run_group_key(local.series_title), "comic_vine")
+            if decision and decision.active:
+                try:
+                    candidate_session.seed_resolved_run(
+                        local.series_title, NormalizedCandidate.from_dict(decision.run_snapshot)
+                    )
+                except (KeyError, TypeError, ValueError):
+                    # Invalid history remains auditable but cannot influence matching.
+                    continue
         items = []
         for scanned, local in zip(scans, local_values, strict=True):
             generated = generate_candidates(local, providers, candidate_session)

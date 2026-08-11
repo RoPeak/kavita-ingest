@@ -22,6 +22,8 @@ from .decisions import (
 from .domain import SourceRecord
 from .matching import CandidateScore, Reconciliation, reconcile, score_candidates
 from .provider_runtime import build_providers
+from .providers.models import NormalizedCandidate, ProviderName, RecordType
+from .run_groups import RunGroupRepository, run_group_key
 
 
 def interactive_review(
@@ -33,6 +35,7 @@ def interactive_review(
         raise ValueError("review requires a state database")
     connection = connect(config.database_path)
     repository = DecisionRepository(connection)
+    run_groups = RunGroupRepository(connection)
     providers = build_providers(connection, config.providers)
     try:
         for item in audit.items:
@@ -42,7 +45,8 @@ def interactive_review(
                 action = (
                     typer.prompt(
                         "[A]ccept [N]ext [B]atch [R]eject [S]earch [E]dit "
-                        "[I]dentity [W]ork-only [U]nresolved [K]skip e[X]plain [Q]uit",
+                        "[I]dentity [G]roup-run [W]ork-only [U]nresolved [K]skip "
+                        "e[X]plain [Q]uit",
                         default="N",
                     )
                     .strip()
@@ -126,6 +130,41 @@ def interactive_review(
                     )
                     output.print("Manual canonical identity explicitly approved.")
                     break
+                if action == "G" and top:
+                    candidate = top.candidate
+                    if (
+                        candidate.provider is not ProviderName.COMIC_VINE
+                        or not candidate.run_id
+                        or not candidate.series_title
+                    ):
+                        output.print("The displayed candidate has no selectable Comic Vine run.")
+                        continue
+                    run = NormalizedCandidate(
+                        provider=ProviderName.COMIC_VINE,
+                        provider_id=candidate.run_id,
+                        record_type=RecordType.COMIC_RUN,
+                        media_kind=candidate.media_kind,
+                        title=candidate.series_title,
+                        series_title=candidate.series_title,
+                        run_start_year=candidate.run_start_year,
+                        run_id=candidate.run_id,
+                    )
+                    if typer.confirm(
+                        f"Use run {run.title} ({run.run_start_year or 'year unknown'}) "
+                        "for this local series group?"
+                    ):
+                        run_groups.choose(
+                            run_group_key(candidate.series_title),
+                            ProviderName.COMIC_VINE.value,
+                            candidate.run_id,
+                            run.to_dict(),
+                        )
+                        output.print(
+                            "Run-group choice recorded. Re-run review to constrain the group; "
+                            "this issue was not accepted."
+                        )
+                        break
+                    continue
                 if action == "A" and top:
                     if not top.eligible and not typer.confirm(
                         "Candidate is not batch-eligible. Accept anyway?"

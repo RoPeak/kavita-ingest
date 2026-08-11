@@ -1,9 +1,10 @@
 # Kavita Ingest
 
 Kavita Ingest provides read-only discovery, inspection, local classification,
-external metadata matching, and explicit identity review for EPUB, PDF, CBZ,
-and ordinary single-file RAR3/RAR5 CBR sources. It does not write media
-metadata, construct filesystem plans, or move files.
+external metadata matching, explicit identity review, staged metadata writers,
+and immutable offline plans for EPUB, PDF, CBZ, and ordinary single-file
+RAR3/RAR5 CBR sources. It does not yet apply plans, move files, or remove
+sources.
 
 ## Development
 
@@ -20,6 +21,10 @@ python3 -m venv .venv
 .venv/bin/kavita-ingest scan /path/to/incoming --no-persist
 .venv/bin/kavita-ingest audit /path/to/incoming
 .venv/bin/kavita-ingest review /path/to/incoming
+.venv/bin/kavita-ingest run-group history comic:watchmen
+.venv/bin/kavita-ingest plan create resolved-plan.json
+.venv/bin/kavita-ingest plan show 1
+.venv/bin/kavita-ingest plan approve 1 --digest DISPLAYED_SHA256
 ```
 
 Omit `--no-persist` to retain source fingerprints, inspection outcomes, and
@@ -88,3 +93,14 @@ Provider responses and rate reservations are persisted in SQLite. Candidate
 scores never imply approval: acceptance, rejection, work-only acceptance,
 manual overrides, unresolved, and skipped outcomes are append-only explicit
 decisions bound to source content fingerprints.
+
+Comic run-group choices are separate append-only decisions: selecting a run
+constrains later candidate generation but never accepts an individual issue.
+They can be inspected, superseded, or cleared through `run-group` commands.
+
+SQLite is the sole authority for immutable plan bytes. Plan exports are exact
+derivatives of those canonical JSON bytes, and approval must name their exact
+SHA-256 digest. Plans are self-contained and require no provider lookup to
+interpret. The staged writer library supports independently verified EPUB,
+CBZ/ComicInfo, ordinary single-volume CBR-to-CBZ, and unsigned, unencrypted PDF
+outputs, but no writer is connected to a filesystem apply command yet.

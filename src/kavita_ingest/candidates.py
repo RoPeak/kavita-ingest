@@ -98,6 +98,11 @@ class CandidateSession:
         queries.append(f"comic_vine:issue-in-run:{run.provider_id}")
         return provider.search_issue_in_run(run, local.sequence), queries
 
+    def seed_resolved_run(self, series_title: str, run: NormalizedCandidate) -> None:
+        if run.record_type.value != "comic_run":
+            raise ValueError("candidate-session run seed must be a comic run")
+        self.resolved_runs[_run_key(series_title)] = run
+
     def metrics(self) -> dict[str, int]:
         return {
             "run_resolution_queries": self.run_resolution_queries,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from dataclasses import asdict
 from pathlib import Path
 from typing import Annotated
@@ -13,10 +14,18 @@ from .db import connect
 from .doctor import checks
 from .logging_config import configure_logging
 from .paths import AppPaths
+from .plan_store import PlanStore
+from .planning import validate_plan_payload
+from .providers.models import NormalizedCandidate, ProviderName, RecordType
 from .review import interactive_review
+from .run_groups import RunGroupRepository
 from .scanner import scan as run_scan
 
 app = typer.Typer(help="Inspect and classify reading-media sources without modifying them.")
+plan_app = typer.Typer(help="Create and approve immutable offline execution plans.")
+run_group_app = typer.Typer(help="Inspect and manage explicit comic run-group choices.")
+app.add_typer(plan_app, name="plan")
+app.add_typer(run_group_app, name="run-group")
 
 
 @app.command()
@@ -126,7 +135,14 @@ def status(
         return
     connection = connect(settings.database_path)
     try:
-        for table in ("match_runs", "match_candidates", "decisions", "provider_cache"):
+        for table in (
+            "match_runs",
+            "match_candidates",
+            "decisions",
+            "run_group_decisions",
+            "plans",
+            "provider_cache",
+        ):
             exists = connection.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
             ).fetchone()
@@ -134,6 +150,163 @@ def status(
                 connection.execute(f"SELECT count(*) FROM {table}").fetchone()[0] if exists else 0
             )
             typer.echo(f"{table:20} {count}")
+    finally:
+        connection.close()
+
+
+def _state_connection(config: Path | None) -> sqlite3.Connection:
+    settings = load_config(config)
+    if settings.database_path is None:
+        raise typer.BadParameter("database path is required")
+    from .db import migrate
+
+    migrate(settings.database_path)
+    return connect(settings.database_path)
+
+
+def _plan_store(config: Path | None) -> tuple[sqlite3.Connection, PlanStore]:
+    connection = _state_connection(config)
+    return connection, PlanStore(connection)
+
+
+@plan_app.command("create")
+def plan_create(
+    resolved_plan: Annotated[Path, typer.Argument(exists=True, dir_okay=False)],
+    config: Annotated[Path | None, typer.Option("--config")] = None,
+) -> None:
+    """Canonicalize and store a fully resolved plan document as a new draft."""
+    raw = json.loads(resolved_plan.read_text(encoding="utf-8"))
+    payload = json.dumps(raw, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode()
+    validate_plan_payload(payload)
+    connection, store = _plan_store(config)
+    try:
+        plan = store.import_bytes(payload)
+        typer.echo(f"Created draft plan {plan.id} sha256={plan.sha256} bytes={plan.byte_length}")
+    finally:
+        connection.close()
+
+
+@plan_app.command("show")
+def plan_show(
+    plan_id: int,
+    config: Annotated[Path | None, typer.Option("--config")] = None,
+) -> None:
+    """Show authoritative plan bytes and approval state without network access."""
+    connection, store = _plan_store(config)
+    try:
+        plan = store.get(plan_id)
+        typer.echo(
+            f"plan={plan.id} status={plan.status} sha256={plan.sha256} bytes={plan.byte_length}"
+        )
+        typer.echo(plan.canonical_json.decode("utf-8"))
+    finally:
+        connection.close()
+
+
+@plan_app.command("approve")
+def plan_approve(
+    plan_id: int,
+    digest: Annotated[str, typer.Option("--digest", help="Exact displayed SHA-256 digest.")],
+    config: Annotated[Path | None, typer.Option("--config")] = None,
+) -> None:
+    """Explicitly bind approval to the exact authoritative plan digest."""
+    connection, store = _plan_store(config)
+    try:
+        plan = store.approve(plan_id, digest)
+        typer.echo(f"Approved plan {plan.id} sha256={plan.sha256}")
+    finally:
+        connection.close()
+
+
+@plan_app.command("export")
+def plan_export(
+    plan_id: int,
+    destination: Path,
+    config: Annotated[Path | None, typer.Option("--config")] = None,
+) -> None:
+    """Export the exact canonical bytes stored in SQLite."""
+    connection, store = _plan_store(config)
+    try:
+        store.export(plan_id, destination)
+        typer.echo(f"Exported plan {plan_id} to {destination}")
+    finally:
+        connection.close()
+
+
+@plan_app.command("import")
+def plan_import(
+    source: Annotated[Path, typer.Argument(exists=True, dir_okay=False)],
+    config: Annotated[Path | None, typer.Option("--config")] = None,
+) -> None:
+    """Import canonical plan bytes as an unapproved draft after digest validation."""
+    connection, store = _plan_store(config)
+    try:
+        plan = store.import_bytes(source.read_bytes())
+        typer.echo(f"Imported draft plan {plan.id} sha256={plan.sha256}")
+    finally:
+        connection.close()
+
+
+@run_group_app.command("choose")
+def run_group_choose(
+    group_key: str,
+    provider_run_id: str,
+    snapshot: Annotated[Path, typer.Argument(exists=True, dir_okay=False)],
+    manual: Annotated[bool, typer.Option(help="Mark this as a manual override.")] = False,
+    config: Annotated[Path | None, typer.Option("--config")] = None,
+) -> None:
+    """Explicitly select or supersede a provider run for a local comic group."""
+    value = json.loads(snapshot.read_text(encoding="utf-8"))
+    if not isinstance(value, dict):
+        raise typer.BadParameter("run snapshot must be a JSON object")
+    try:
+        run = NormalizedCandidate.from_dict(value)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise typer.BadParameter(f"invalid normalized run snapshot: {exc}") from exc
+    if (
+        run.provider is not ProviderName.COMIC_VINE
+        or run.record_type is not RecordType.COMIC_RUN
+        or run.provider_id != provider_run_id
+    ):
+        raise typer.BadParameter("snapshot must describe the selected Comic Vine run id")
+    connection = _state_connection(config)
+    try:
+        decision = RunGroupRepository(connection).choose(
+            group_key, "comic_vine", provider_run_id, value, manual=manual
+        )
+        typer.echo(f"Recorded run-group decision {decision.id}; no issue identity was accepted.")
+    finally:
+        connection.close()
+
+
+@run_group_app.command("clear")
+def run_group_clear(
+    group_key: str,
+    config: Annotated[Path | None, typer.Option("--config")] = None,
+) -> None:
+    """Append a clearing decision without deleting run-group history."""
+    connection = _state_connection(config)
+    try:
+        decision = RunGroupRepository(connection).clear(group_key, "comic_vine")
+        typer.echo(f"Cleared run-group choice with decision {decision.id}.")
+    finally:
+        connection.close()
+
+
+@run_group_app.command("history")
+def run_group_history(
+    group_key: str,
+    config: Annotated[Path | None, typer.Option("--config")] = None,
+) -> None:
+    """Display the append-only decision trail without querying providers."""
+    connection = _state_connection(config)
+    try:
+        history = RunGroupRepository(connection).history(group_key, "comic_vine")
+        for decision in history:
+            typer.echo(
+                f"{decision.id} {decision.created_at} {decision.decision_type.value} "
+                f"run={decision.provider_run_id or '-'} supersedes={decision.supersedes_id or '-'}"
+            )
     finally:
         connection.close()
 

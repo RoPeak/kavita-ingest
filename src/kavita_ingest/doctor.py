@@ -48,7 +48,7 @@ def checks(
             "OK" if calibre else "INFO",
             _tool_version(calibre, version_hint="ebook-meta (calibre")
             if calibre
-            else "not required until metadata-writing milestones",
+            else "not found; Calibre-owned EPUB metadata writes are unavailable",
         )
     )
     contact = config.providers.open_library_contact
