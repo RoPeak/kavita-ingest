@@ -21,6 +21,7 @@ from .decisions import (
     batch_eligible_items,
 )
 from .domain import SourceRecord
+from .hydration import HydrationResult, hydrate_candidate
 from .matching import (
     CandidateScore,
     Reconciliation,
@@ -29,6 +30,7 @@ from .matching import (
     usable_identity_scores,
 )
 from .provider_runtime import build_providers
+from .providers.base import Provider
 from .providers.models import NormalizedCandidate, ProviderName, RecordType
 from .run_groups import RunGroupRepository, run_group_key
 
@@ -189,6 +191,10 @@ def interactive_review(
                         "Accept it work-only?"
                     ):
                         continue
+                    hydrated = _hydrate_for_acceptance(selected, providers, output)
+                    if hydrated is None:
+                        continue
+                    selected, hydration = hydrated
                     accept_candidate(
                         repository,
                         current.scan.source,
@@ -196,12 +202,17 @@ def interactive_review(
                         reconcile(current.local, selected),
                         current.local.evidence_hash(),
                         work_only=work_only,
+                        hydration=hydration.to_dict(),
                     )
                     output.print("Decision saved.")
                     counts["work_only" if work_only else "accepted"] += 1
                     decided = True
                     break
                 if action == "W" and selected and current.local.kind.value == "book":
+                    hydrated = _hydrate_for_acceptance(selected, providers, output)
+                    if hydrated is None:
+                        continue
+                    selected, hydration = hydrated
                     accept_candidate(
                         repository,
                         current.scan.source,
@@ -209,6 +220,7 @@ def interactive_review(
                         reconcile(current.local, selected),
                         current.local.evidence_hash(),
                         work_only=True,
+                        hydration=hydration.to_dict(),
                     )
                     output.print("Decision saved.")
                     counts["work_only"] += 1
@@ -243,10 +255,37 @@ def interactive_review(
                     output.print(
                         f"Eligible, non-conflicting, edition-resolved items: {len(eligible)}"
                     )
-                    if typer.confirm(f"Explicitly accept all {len(eligible)} items?"):
-                        batch_accept(repository, eligible, confirmed_count=len(eligible))
-                        counts["accepted"] += len(eligible)
-                        output.print(f"Decisions saved: {len(eligible)}.")
+                    hydrated_items: list[
+                        tuple[SourceRecord, CandidateScore, Reconciliation, str]
+                    ] = []
+                    hydration_records: dict[str, dict[str, object]] = {}
+                    for source, score, reconciliation, evidence_hash in eligible:
+                        hydrated = _hydrate_for_acceptance(score, providers, output)
+                        if hydrated is None:
+                            output.print("Batch cancelled; no batch decisions were saved.")
+                            hydrated_items = []
+                            break
+                        hydrated_score, hydration = hydrated
+                        hydrated_items.append(
+                            (
+                                source,
+                                hydrated_score,
+                                reconciliation,
+                                evidence_hash,
+                            )
+                        )
+                        hydration_records[hydrated_score.candidate.key] = hydration.to_dict()
+                    if hydrated_items and typer.confirm(
+                        f"Explicitly accept all {len(hydrated_items)} enriched items?"
+                    ):
+                        batch_accept(
+                            repository,
+                            hydrated_items,
+                            confirmed_count=len(hydrated_items),
+                            hydration=hydration_records,
+                        )
+                        counts["accepted"] += len(hydrated_items)
+                        output.print(f"Decisions saved: {len(hydrated_items)}.")
                     _show_summary(output, counts, len(audit.items))
                     return audit
                 if action == "Q":
@@ -271,6 +310,62 @@ def _batch_items(
         if item.scores
     ]
     return batch_eligible_items(items)
+
+
+def _hydrate_for_acceptance(
+    selected: CandidateScore,
+    providers: tuple[Provider, ...],
+    output: Console,
+) -> tuple[CandidateScore, HydrationResult] | None:
+    result = hydrate_candidate(selected.candidate, providers)
+    if result.status == "unavailable" and typer.confirm(
+        f"Exact metadata enrichment failed: {result.error}. Retry?", default=False
+    ):
+        result = hydrate_candidate(selected.candidate, providers)
+    if result.status == "conflict":
+        output.print("Exact provider detail conflicts with the selected identity:")
+        for conflict in result.conflicts:
+            output.print(f"  {conflict}")
+        output.print("Not accepted; review or search again.")
+        return None
+    if result.status == "unavailable":
+        output.print(f"Exact metadata enrichment remains unavailable: {result.error}")
+        if not typer.confirm(
+            "Accept this candidate with explicitly incomplete provider metadata?", default=False
+        ):
+            output.print("Not accepted; no decision was saved.")
+            return None
+        result = HydrationResult(
+            selected.candidate,
+            "sparse_explicit",
+            error=result.error,
+        )
+    hydrated_score = replace(selected, candidate=result.candidate)
+    if result.accepted_detail:
+        _show_hydrated_metadata(output, result)
+    return hydrated_score, result
+
+
+def _show_hydrated_metadata(output: Console, result: HydrationResult) -> None:
+    candidate = result.candidate
+    output.print("Exact provider metadata:")
+    if result.changes:
+        output.print("  Enriched: " + ", ".join(result.changes))
+    labels = {
+        "writer": "Writer",
+        "artist": "Artist",
+        "penciller": "Penciller",
+        "penciler": "Penciller",
+        "inker": "Inker",
+        "colorist": "Colorist",
+        "letterer": "Letterer",
+        "cover-artist": "Cover artist",
+        "editor": "Editor",
+        "translator": "Translator",
+        "author": "Author",
+    }
+    for contributor in candidate.creators:
+        output.print(f"  {labels.get(contributor.role, contributor.role)}: {contributor.name}")
 
 
 def _show_item(console: Console, item: ReviewItem, selected_rank: int | None) -> None:

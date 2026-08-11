@@ -16,10 +16,12 @@ from .models import (
     SearchQuery,
 )
 
+NORMALIZATION_SCHEMA_VERSION = 3
+
 
 class ComicVineProvider:
     name = ProviderName.COMIC_VINE
-    normalization_schema_version = 2
+    normalization_schema_version = NORMALIZATION_SCHEMA_VERSION
     endpoint = "https://comicvine.gamespot.com/api"
 
     def __init__(self, client: CachedProviderClient, api_key: str | None) -> None:
@@ -158,6 +160,7 @@ _CREDIT_ROLES = {
     "cover artist": "cover-artist",
     "editor": "editor",
     "translator": "translator",
+    "artist": "artist",
 }
 
 
@@ -225,7 +228,7 @@ def _normalize(raw: object) -> list[NormalizedCandidate]:
                     **({"raw_format": format_value} if format_value else {}),
                     **date_provenance,
                 },
-                provider_schema_version=2,
+                provider_schema_version=NORMALIZATION_SCHEMA_VERSION,
             )
         )
     return output
@@ -285,16 +288,22 @@ def _credits(value: object) -> tuple[Contributor, ...]:
     if not isinstance(value, list):
         return ()
     output = []
+    seen: set[tuple[str, str]] = set()
     for item in value:
         if isinstance(item, dict) and item.get("name"):
             raw_role = str(item.get("role") or "creator").strip()
-            role = _CREDIT_ROLES.get(_normalized_label(raw_role))
-            output.append(
-                Contributor(
-                    str(item["name"]),
-                    role or f"unknown:{_normalized_label(raw_role) or 'creator'}",
-                )
-            )
+            for token in raw_role.split(","):
+                normalized = _normalized_label(token)
+                role = _CREDIT_ROLES.get(normalized) or f"unknown:{normalized or 'creator'}"
+                key = (str(item["name"]).casefold(), role)
+                if key not in seen:
+                    seen.add(key)
+                    output.append(
+                        Contributor(
+                            str(item["name"]),
+                            role,
+                        )
+                    )
     return tuple(output)
 
 

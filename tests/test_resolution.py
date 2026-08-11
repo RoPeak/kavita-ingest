@@ -126,6 +126,7 @@ def test_comic_candidate_roles_survive_canonical_identity_and_projection(tmp_pat
         creators=(
             Contributor("Scott Snyder", "writer"),
             Contributor("Nick Dragotta", "penciller"),
+            Contributor("Generic Artist", "artist"),
             Contributor("Mystery Person", "unknown:designer"),
         ),
         publisher="DC Comics",
@@ -149,10 +150,12 @@ def test_comic_candidate_roles_survive_canonical_identity_and_projection(tmp_pat
     assert resolved.identity.contributors == {
         "writers": ("Scott Snyder",),
         "pencillers": ("Nick Dragotta",),
+        "artists": ("Generic Artist",),
         "unknown:designer": ("Mystery Person",),
     }
     projection = project_comic(resolved.identity)
     assert projection.metadata["Writer"] == "Scott Snyder"
+    assert "Artist" not in projection.metadata
     assert projection.metadata["Publisher"] == "DC Comics"
     assert (
         projection.metadata["Year"],

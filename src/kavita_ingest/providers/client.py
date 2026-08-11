@@ -19,6 +19,7 @@ class ClientActivity:
     cache_hits: int = 0
     cache_misses: int = 0
     cache_schema_migrations: int = 0
+    exact_detail_hydrations: int = 0
     network_requests: dict[str, int] = field(default_factory=dict)
     errors: int = 0
     rate_limit_events: int = 0
@@ -28,6 +29,7 @@ class ClientActivity:
             "cache_hits": self.cache_hits,
             "cache_misses": self.cache_misses,
             "cache_schema_migrations": self.cache_schema_migrations,
+            "exact_detail_hydrations": self.exact_detail_hydrations,
             "network_requests": dict(sorted(self.network_requests.items())),
             "errors": self.errors,
             "rate_limit_events": self.rate_limit_events,
@@ -76,6 +78,8 @@ class CachedProviderClient:
         bucket: str,
         normalize: Normalizer,
     ) -> list[NormalizedCandidate]:
+        if operation == "fetch":
+            self.activity.exact_detail_hydrations += 1
         request_identity: dict[str, object] = {"url": url, "params": public_params}
         cache_key = canonical_request_key(self.provider, operation, request_identity)
         cached = self.store.get_cache(cache_key)

@@ -194,6 +194,7 @@ def audit_command(
                 f"cache_hits={activity['cache_hits']} "
                 f"cache_misses={activity['cache_misses']} "
                 f"cache_schema_migrations={activity['cache_schema_migrations']} "
+                f"exact_detail_hydrations={activity['exact_detail_hydrations']} "
                 f"network_requests={activity['network_requests']} "
                 f"errors={activity['errors']} "
                 f"rate_limits={activity['rate_limit_events']}"

@@ -215,6 +215,7 @@ _CONTRIBUTOR_GROUPS = {
     "cover artist": "cover_artists",
     "editor": "editors",
     "translator": "translators",
+    "artist": "artists",
 }
 
 

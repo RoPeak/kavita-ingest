@@ -190,6 +190,7 @@ def accept_candidate(
     *,
     work_only: bool = False,
     batch_id: str | None = None,
+    hydration: dict[str, Any] | None = None,
 ) -> DecisionRecord:
     if score.candidate.record_type is RecordType.COMIC_RUN:
         raise ValueError(
@@ -208,6 +209,7 @@ def accept_candidate(
             "candidate": score.candidate.to_dict(),
             "score": score.score,
             "reconciliation": asdict(reconciliation),
+            "hydration": hydration or {"status": "not_requested"},
             "explicit": True,
         },
         batch_id=batch_id,
@@ -270,6 +272,7 @@ def batch_accept(
     items: list[tuple[SourceRecord, CandidateScore, Reconciliation, str]],
     *,
     confirmed_count: int,
+    hydration: dict[str, dict[str, Any]] | None = None,
 ) -> list[DecisionRecord]:
     eligible = batch_eligible_items(items)
     if confirmed_count != len(eligible):
@@ -277,7 +280,13 @@ def batch_accept(
     batch_id = str(uuid.uuid4())
     return [
         accept_candidate(
-            repository, source, score, reconciliation, evidence_hash, batch_id=batch_id
+            repository,
+            source,
+            score,
+            reconciliation,
+            evidence_hash,
+            batch_id=batch_id,
+            hydration=(hydration or {}).get(score.candidate.key),
         )
         for source, score, reconciliation, evidence_hash in eligible
     ]

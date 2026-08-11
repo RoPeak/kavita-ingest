@@ -18,6 +18,7 @@ from kavita_ingest.providers.base import (
 from kavita_ingest.providers.client import CachedProviderClient
 from kavita_ingest.providers.comic_vine import ComicVineProvider
 from kavita_ingest.providers.models import (
+    Contributor,
     NormalizedCandidate,
     ProviderName,
     RecordType,
@@ -107,6 +108,7 @@ def test_cache_avoids_duplicate_traffic_and_sends_user_agent(tmp_path: Path) -> 
         "cache_hits": 1,
         "cache_misses": 1,
         "cache_schema_migrations": 0,
+        "exact_detail_hydrations": 0,
         "network_requests": {"books": 1},
         "errors": 0,
         "rate_limit_events": 0,
@@ -230,10 +232,10 @@ def _seed_legacy_comic_vine_cache(
     )
     obsolete = NormalizedCandidate(
         ProviderName.COMIC_VINE,
-        "4000-140001",
+        "4000-1145497",
         RecordType.COMIC_ISSUE,
         MediaKind.COMIC,
-        "The Zoo",
+        "Abomination, Conclusion",
         publication_date="2026-01-01",
         series_title="Absolute Batman",
         provider_schema_version=1,
@@ -289,9 +291,9 @@ def test_comic_vine_cache_schema_upgrade_renormalizes_raw_without_network(
     assert candidate.cover_date_precision == "month"
     assert candidate.release_date == "2025-11-26"
     assert candidate.release_date_precision == "day"
-    assert candidate.provider_schema_version == 2
+    assert candidate.provider_schema_version == 3
     migrated = client.store.get_cache(cache_key, now=now + 1)
-    assert migrated is not None and migrated.schema_version == 2
+    assert migrated is not None and migrated.schema_version == 3
     row = connection.execute(
         "SELECT raw_json, fetched_at, expires_at FROM provider_cache WHERE cache_key = ?",
         (cache_key,),
@@ -407,4 +409,56 @@ def test_failed_cache_schema_migration_never_uses_obsolete_normalized_data(
             schema_two_normalizer,
         )
         assert result[0].title == "Network"
+    connection.close()
+
+
+def test_offline_exact_detail_cache_migrates_compound_roles_without_network(
+    tmp_path: Path,
+) -> None:
+    client, connection = _client(
+        tmp_path,
+        FakeTransport([]),
+        offline=True,
+        provider=ProviderName.COMIC_VINE,
+        normalization_schema_version=ComicVineProvider.normalization_schema_version,
+    )
+    url = "https://comicvine.gamespot.com/api/issue/4000-1145497/"
+    request = {"url": url, "params": {}}
+    cache_key = canonical_request_key(ProviderName.COMIC_VINE, "fetch", request)
+    raw = json.loads(
+        (
+            Path(__file__).parent / "fixtures/providers/comic_vine_issue_detail.json"
+        ).read_text(encoding="utf-8")
+    )
+    obsolete = NormalizedCandidate(
+        ProviderName.COMIC_VINE,
+        "4000-1145497",
+        RecordType.COMIC_ISSUE,
+        MediaKind.COMIC,
+        "Abomination, Conclusion",
+        creators=(Contributor("Frank Martin", "unknown:colorist cover"),),
+        provider_schema_version=2,
+    )
+    client.store.put_cache(
+        cache_key,
+        ProviderName.COMIC_VINE,
+        "fetch",
+        request,
+        [obsolete],
+        raw,
+        2,
+        3_600,
+    )
+
+    candidate = ComicVineProvider(client, "unused-cache-only-key").fetch("4000-1145497")[0]
+
+    assert ("Frank Martin", "colorist") in [
+        (item.name, item.role) for item in candidate.creators
+    ]
+    assert ("Frank Martin", "cover-artist") in [
+        (item.name, item.role) for item in candidate.creators
+    ]
+    assert client.activity.exact_detail_hydrations == 1
+    assert client.activity.cache_schema_migrations == 1
+    assert client.store.get_cache(cache_key).schema_version == 3  # type: ignore[union-attr]
     connection.close()

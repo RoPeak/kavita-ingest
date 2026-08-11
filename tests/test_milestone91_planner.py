@@ -11,13 +11,15 @@ from typer.testing import CliRunner
 
 from compatibility.helpers.epub_factory import create_epub
 from kavita_ingest.apply_engine import ApplyEngine, ApplyRefused
+from kavita_ingest.audit import run_audit
 from kavita_ingest.cli import app
 from kavita_ingest.comicinfo import read_comicinfo
 from kavita_ingest.config import load_config
 from kavita_ingest.db import connect
-from kavita_ingest.decisions import DecisionRepository, DecisionType
+from kavita_ingest.decisions import DecisionRepository, DecisionType, accept_candidate
 from kavita_ingest.discovery import inspect_source
 from kavita_ingest.domain import MediaKind
+from kavita_ingest.matching import reconcile
 from kavita_ingest.plan_store import PlanStore
 from kavita_ingest.providers.base import ProviderStatus
 from kavita_ingest.providers.comic_vine import ComicVineProvider
@@ -60,6 +62,9 @@ class _BookWorkProvider:
 
 
 class _ComicVineFixtureClient:
+    def __init__(self) -> None:
+        self.operations: list[str] = []
+
     def get(
         self,
         operation: str,
@@ -70,6 +75,7 @@ class _ComicVineFixtureClient:
         normalize: Callable[[object], list[NormalizedCandidate]],
     ) -> list[NormalizedCandidate]:
         del url, public_params, secret_params, bucket
+        self.operations.append(operation)
         if operation == "search-runs":
             payload: object = {
                 "results": [
@@ -85,6 +91,12 @@ class _ComicVineFixtureClient:
                     }
                 ]
             }
+        elif operation == "fetch":
+            payload = json.loads(
+                Path("tests/fixtures/providers/comic_vine_issue_detail.json").read_text(
+                    encoding="utf-8"
+                )
+            )
         else:
             payload = json.loads(
                 Path("tests/fixtures/providers/comic_vine.json").read_text(encoding="utf-8")
@@ -93,6 +105,9 @@ class _ComicVineFixtureClient:
 
 
 class _IncrementalComicVineFixtureClient:
+    def __init__(self) -> None:
+        self.operations: list[str] = []
+
     def get(
         self,
         operation: str,
@@ -103,6 +118,7 @@ class _IncrementalComicVineFixtureClient:
         normalize: Callable[[object], list[NormalizedCandidate]],
     ) -> list[NormalizedCandidate]:
         del url, secret_params, bucket
+        self.operations.append(operation)
         if operation == "search-runs":
             return normalize(
                 {
@@ -120,6 +136,14 @@ class _IncrementalComicVineFixtureClient:
                         for identifier, year in ((160294, 2024), (260294, 2026), (360294, 1989))
                     ]
                 }
+            )
+        if operation == "fetch":
+            return normalize(
+                json.loads(
+                    Path("tests/fixtures/providers/comic_vine_issue_detail.json").read_text(
+                        encoding="utf-8"
+                    )
+                )
             )
         volume = int(public_params["filter"].split(",", 1)[0].split(":", 1)[1])
         if volume == 360294:
@@ -322,7 +346,8 @@ def test_comic_vine_candidate_survives_real_review_plan_apply_and_readback(
     incoming.mkdir()
     source = _cbz(incoming / "Absolute Batman 14 (2026).cbz")
     config = _config(tmp_path, incoming, lifecycle="preserve")
-    provider = (ComicVineProvider(_ComicVineFixtureClient(), "fixture-key"),)  # type: ignore[arg-type]
+    fixture_client = _ComicVineFixtureClient()
+    provider = (ComicVineProvider(fixture_client, "fixture-key"),)  # type: ignore[arg-type]
     monkeypatch.setattr("kavita_ingest.audit.build_providers", lambda *_: provider)
     monkeypatch.setattr("kavita_ingest.review.build_providers", lambda *_: provider)
 
@@ -337,13 +362,21 @@ def test_comic_vine_candidate_survives_real_review_plan_apply_and_readback(
     assert canonical["provider_identity"]["run_id"] == "4050-160294"
     assert canonical["run_start_year"] == 2024
     assert canonical["sequence"]["normalized"] == "14"
-    assert canonical["title"] == "The Zoo"
+    assert canonical["title"] == "Abomination, Conclusion"
     assert canonical["contributors"]["writers"] == ["Scott Snyder"]
+    assert canonical["contributors"]["artists"] == ["Nick Dragotta"]
+    assert canonical["contributors"]["colorists"] == ["Frank Martin"]
+    assert canonical["contributors"]["cover_artists"] == ["Frank Martin"]
+    assert canonical["contributors"]["letterers"] == ["Clayton Cowles"]
     assert metadata["Series"] == "Absolute Batman (2024)"
     assert metadata["Number"] == "14"
-    assert metadata["Title"] == "The Zoo"
+    assert metadata["Title"] == "Abomination, Conclusion"
     assert metadata["Writer"] == "Scott Snyder"
     assert metadata["Publisher"] == "DC Comics"
+    assert metadata["Colorist"] == "Frank Martin"
+    assert metadata["CoverArtist"] == "Frank Martin"
+    assert metadata["Letterer"] == "Clayton Cowles"
+    assert "Penciller" not in metadata
     assert canonical["cover_date"] == "2026-01"
     assert canonical["cover_date_precision"] == "month"
     assert canonical["release_date"] == "2025-11-26"
@@ -352,11 +385,16 @@ def test_comic_vine_candidate_survives_real_review_plan_apply_and_readback(
     assert canonical["provenance"]["release_date_source"] == "store_date"
     assert (metadata["Year"], metadata["Month"], metadata["Day"]) == (2025, 11, 26)
     assert applied["summary"]["status"] == "complete"
+    assert fixture_client.operations == ["search-runs", "issues-in-run", "fetch"]
     assert source.is_file() and destination.is_file()
     with zipfile.ZipFile(destination) as archive:
         comicinfo = read_comicinfo(archive.read("ComicInfo.xml"), require_schema=True).metadata
     assert comicinfo["Writer"] == "Scott Snyder"
     assert comicinfo["Publisher"] == "DC Comics"
+    assert comicinfo["Colorist"] == "Frank Martin"
+    assert comicinfo["CoverArtist"] == "Frank Martin"
+    assert comicinfo["Letterer"] == "Clayton Cowles"
+    assert "Penciller" not in comicinfo
     assert (comicinfo["Year"], comicinfo["Month"], comicinfo["Day"]) == (
         "2025",
         "11",
@@ -371,9 +409,8 @@ def test_incremental_absolute_batman_14_cli_journey_creates_plan_without_issue_o
     incoming.mkdir()
     source = _cbz(incoming / "Absolute Batman 014 (2026) (Digital) (Shan-Empire).cbz")
     config = _config(tmp_path, incoming, lifecycle="preserve")
-    provider = (
-        ComicVineProvider(_IncrementalComicVineFixtureClient(), "fixture-key"),  # type: ignore[arg-type]
-    )
+    fixture_client = _IncrementalComicVineFixtureClient()
+    provider = (ComicVineProvider(fixture_client, "fixture-key"),)  # type: ignore[arg-type]
     monkeypatch.setattr("kavita_ingest.audit.build_providers", lambda *_: provider)
     monkeypatch.setattr("kavita_ingest.review.build_providers", lambda *_: provider)
     runner = CliRunner()
@@ -410,6 +447,9 @@ def test_incremental_absolute_batman_14_cli_journey_creates_plan_without_issue_o
     assert item["canonical"]["cover_date_precision"] == "month"
     assert item["canonical"]["release_date"] == "2025-11-26"
     assert item["canonical"]["release_date_precision"] == "day"
+    assert item["canonical"]["contributors"]["writers"] == ["Scott Snyder"]
+    assert "Exact provider metadata" in reviewed.output
+    assert fixture_client.operations[-1] == "fetch"
     assert (
         item["kavita_projection"]["metadata"]["Year"],
         item["kavita_projection"]["metadata"]["Month"],
@@ -417,6 +457,86 @@ def test_incremental_absolute_batman_14_cli_journey_creates_plan_without_issue_o
     ) == (2025, 11, 26)
     assert item["lifecycle_actions"][-1]["action"] == "preserve"
     assert source.is_file()
+
+
+def test_hydrated_reacceptance_invalidates_sparse_plan_and_builds_enriched_replacement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    incoming = tmp_path / "incoming"
+    incoming.mkdir()
+    _cbz(incoming / "Absolute Batman 014 (2026) (Digital) (Shan-Empire).cbz")
+    config_path = _config(tmp_path, incoming, lifecycle="preserve")
+    settings = load_config(config_path)
+    fixture_client = _IncrementalComicVineFixtureClient()
+    providers = (ComicVineProvider(fixture_client, "fixture-key"),)  # type: ignore[arg-type]
+    monkeypatch.setattr("kavita_ingest.audit.build_providers", lambda *_: providers)
+    monkeypatch.setattr("kavita_ingest.review.build_providers", lambda *_: providers)
+
+    historical = run_audit(incoming, settings, mode="review", providers_override=providers)
+    item = historical.items[0]
+    assert item.scores[0].candidate.creators == ()
+    with connect(settings.database_path) as connection:  # type: ignore[arg-type]
+        accept_candidate(
+            DecisionRepository(connection),
+            item.scan.source,
+            item.scores[0],
+            reconcile(item.local, item.scores[0]),
+            item.local.evidence_hash(),
+        )
+
+    runner = CliRunner()
+    calls_before_plan = tuple(fixture_client.operations)
+    first = runner.invoke(
+        app,
+        ["plan", "create", str(incoming), "--json", "--config", str(config_path)],
+    )
+    assert first.exit_code == 0, first.output
+    plan_a = json.loads(first.stdout)
+    assert tuple(fixture_client.operations) == calls_before_plan
+
+    reviewed = runner.invoke(
+        app,
+        ["review", str(incoming), "--config", str(config_path)],
+        input="A\n",
+    )
+    assert reviewed.exit_code == 0, reviewed.output
+    assert "Writer: Scott Snyder" in reviewed.output
+
+    with connect(settings.database_path) as connection:  # type: ignore[arg-type]
+        invalidation = connection.execute(
+            "SELECT reason FROM plan_invalidations WHERE plan_id=?",
+            (plan_a["plan_id"],),
+        ).fetchone()
+        with pytest.raises(ValueError, match="invalidated plan"):
+            PlanStore(connection).approve(int(plan_a["plan_id"]), str(plan_a["sha256"]))
+    assert invalidation and "identity decision changed" in invalidation[0]
+    with pytest.raises(ApplyRefused, match="not explicitly approved"):
+        ApplyEngine(settings).apply(int(plan_a["plan_id"]))
+
+    calls_before_replacement = tuple(fixture_client.operations)
+    second = runner.invoke(
+        app,
+        ["plan", "create", str(incoming), "--json", "--config", str(config_path)],
+    )
+    assert second.exit_code == 0, second.output
+    plan_b = json.loads(second.stdout)
+    assert plan_b["plan_id"] != plan_a["plan_id"]
+    assert tuple(fixture_client.operations) == calls_before_replacement
+    shown = runner.invoke(
+        app,
+        [
+            "plan",
+            "show",
+            str(plan_b["plan_id"]),
+            "--json",
+            "--config",
+            str(config_path),
+        ],
+    )
+    document = json.loads(shown.stdout)["document"]
+    assert document["items"][0]["canonical"]["contributors"]["writers"] == [
+        "Scott Snyder"
+    ]
 
 
 @pytest.mark.skipif(shutil.which("unrar") is None, reason="unrar is required for CBR workflow")

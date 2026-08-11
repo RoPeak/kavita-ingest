@@ -16,9 +16,21 @@ from kavita_ingest.cli import app
 from kavita_ingest.config import AppConfig, MatchingSettings, ProviderSettings
 from kavita_ingest.db import migrate
 from kavita_ingest.domain import MediaKind, SequenceNumber, SourceFormat, SourceRecord
+from kavita_ingest.hydration import HydrationResult
 from kavita_ingest.matching import LocalIdentity, reconcile, score_candidates
-from kavita_ingest.providers.models import NormalizedCandidate, ProviderName, RecordType
-from kavita_ingest.review import _action_prompt, _batch_items, interactive_review
+from kavita_ingest.providers.base import ProviderError, ProviderStatus
+from kavita_ingest.providers.models import (
+    Contributor,
+    NormalizedCandidate,
+    ProviderName,
+    RecordType,
+)
+from kavita_ingest.review import (
+    _action_prompt,
+    _batch_items,
+    _hydrate_for_acceptance,
+    interactive_review,
+)
 
 
 def _candidate(identifier: str, year: int, date: str) -> NormalizedCandidate:
@@ -210,3 +222,89 @@ def test_audit_details_reports_unresolved_when_only_candidates_are_unusable(
     assert result.exit_code == 0, result.output
     assert f"{audit.items[0].scan.source.path.name}: unresolved" in result.output
     assert "comic_run" not in result.output
+
+
+class _DetailProvider:
+    name = ProviderName.COMIC_VINE
+
+    def __init__(self, detail: NormalizedCandidate | ProviderError) -> None:
+        self.detail = detail
+
+    def status(self) -> ProviderStatus:
+        return ProviderStatus(self.name, True, True, True, "fixture", ("exact_fetch",))
+
+    def search(self, query: object) -> list[NormalizedCandidate]:
+        del query
+        return []
+
+    def fetch(self, provider_id: str) -> list[NormalizedCandidate]:
+        del provider_id
+        if isinstance(self.detail, ProviderError):
+            raise self.detail
+        return [self.detail]
+
+    def lookup_identifier(self, identifier: object) -> list[NormalizedCandidate]:
+        del identifier
+        return []
+
+
+def test_successful_hydration_shows_enriched_creators_before_decision(
+    tmp_path: Path,
+) -> None:
+    score = _audit(tmp_path).items[0].scores[0]
+    detail = replace(
+        score.candidate,
+        creators=(
+            Contributor("Scott Snyder", "writer"),
+            Contributor("Nick Dragotta", "artist"),
+        ),
+    )
+    output = io.StringIO()
+
+    result = _hydrate_for_acceptance(
+        score,
+        (_DetailProvider(detail),),  # type: ignore[arg-type]
+        Console(file=output, force_terminal=False),
+    )
+
+    assert result is not None and result[1].status == "hydrated"
+    assert "Writer: Scott Snyder" in output.getvalue()
+    assert "Artist: Nick Dragotta" in output.getvalue()
+
+
+def test_failed_hydration_requires_explicit_sparse_acceptance(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    score = _audit(tmp_path).items[0].scores[0]
+    answers = iter([False, True])
+    monkeypatch.setattr(
+        "kavita_ingest.review.typer.confirm", lambda *args, **kwargs: next(answers)
+    )
+    output = io.StringIO()
+
+    result = _hydrate_for_acceptance(
+        score,
+        (_DetailProvider(ProviderError("temporary outage")),),  # type: ignore[arg-type]
+        Console(file=output, force_terminal=False),
+    )
+
+    assert result is not None
+    assert isinstance(result[1], HydrationResult)
+    assert result[1].status == "sparse_explicit"
+    assert "remains unavailable" in output.getvalue()
+
+
+def test_conflicting_exact_identity_cannot_be_accepted(tmp_path: Path) -> None:
+    score = _audit(tmp_path).items[0].scores[0]
+    detail = replace(score.candidate, sequence=SequenceNumber.parse("99"))
+    output = io.StringIO()
+
+    result = _hydrate_for_acceptance(
+        score,
+        (_DetailProvider(detail),),  # type: ignore[arg-type]
+        Console(file=output, force_terminal=False),
+    )
+
+    assert result is None
+    assert "issue number differs" in output.getvalue()
+    assert "Not accepted" in output.getvalue()
