@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
+from datetime import date
 from pathlib import PurePosixPath
 from typing import Any
 
@@ -71,6 +73,17 @@ _FORMATS = {
     "graphic-novel": "Graphic Novel",
 }
 
+_COMICINFO_CONTRIBUTORS = {
+    "writers": "Writer",
+    "pencillers": "Penciller",
+    "inkers": "Inker",
+    "colorists": "Colorist",
+    "letterers": "Letterer",
+    "cover_artists": "CoverArtist",
+    "editors": "Editor",
+    "translators": "Translator",
+}
+
 
 def project_comic(
     identity: CanonicalIdentity,
@@ -97,6 +110,15 @@ def project_comic(
         "Format": comic_format,
         "Title": identity.title,
     }
+    for group, field_name in _COMICINFO_CONTRIBUTORS.items():
+        names = identity.contributors.get(group, ())
+        if names:
+            metadata[field_name] = ", ".join(names)
+    if identity.publisher:
+        metadata["Publisher"] = identity.publisher
+    metadata.update(_comic_date_fields(identity.publication_date))
+    if identity.language:
+        metadata["LanguageISO"] = identity.language
     policy = naming or NamingPolicy()
     policy.validate()
     naming_values = {
@@ -183,3 +205,21 @@ def project_book(
 
 def _extension(value: str) -> str:
     return value if value.startswith(".") else f".{value}"
+
+
+def _comic_date_fields(value: str | None) -> dict[str, int]:
+    if not value:
+        return {}
+    if match := re.fullmatch(r"(\d{4})", value):
+        year = int(match.group(1))
+        return {"Year": year} if year > 0 else {}
+    if match := re.fullmatch(r"(\d{4})-(\d{2})", value):
+        year, month = (int(part) for part in match.groups())
+        return {"Year": year, "Month": month} if year > 0 and 1 <= month <= 12 else {}
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+        return {}
+    try:
+        parsed = date.fromisoformat(value)
+    except ValueError:
+        return {}
+    return {"Year": parsed.year, "Month": parsed.month, "Day": parsed.day}

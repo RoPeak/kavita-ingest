@@ -22,6 +22,7 @@ OWNED_FIELDS = (
     "Letterer",
     "CoverArtist",
     "Editor",
+    "Translator",
     "Publisher",
     "Imprint",
     "LanguageISO",

@@ -16,7 +16,7 @@ Supported inputs and transformations:
 | --- | --- | --- | --- |
 | EPUB | Yes | EPUB/OPF | Calibre plus narrow contributor-role OPF patching |
 | PDF | Yes | PDF metadata | Unsigned, unencrypted PDFs only |
-| CBZ | Yes | CBZ + ComicInfo 2.1 | Existing publication payloads preserved |
+| CBZ | Yes | CBZ + rich ComicInfo 2.1 | Existing publication payloads preserved |
 | CBR/RAR3 | Yes | Repacked CBZ + ComicInfo | Single-volume ordinary archives |
 | CBR/RAR5 | Yes | Repacked CBZ + ComicInfo | Single-volume ordinary archives |
 
@@ -171,7 +171,15 @@ without contaminating canonical issue identity.
 Sparse ebook provider records may identify the work reliably without proving a
 specific edition. A work-only acceptance owns work fields such as title and
 authors while leaving unresolved edition fields, including publisher, date,
-language, and identifiers, untouched.
+language, and identifiers, untouched. Provider `BOOK_WORK` candidates are
+intrinsically work-only: ordinary Accept presents an explicit warning and cannot
+turn aggregate work data into edition metadata.
+
+ComicInfo projection includes resolved creator roles, publisher, conservative
+publication date components, and language. Comic Vine formats are normalized to
+the canonical issue/annual/one-shot/collection/omnibus/graphic-novel vocabulary;
+unknown non-empty formats block planning for review instead of masquerading as
+ordinary issues.
 
 ### Plans and approval
 

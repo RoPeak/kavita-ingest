@@ -12,6 +12,7 @@ from typing import Any
 
 from .domain import SequenceNumber, SourceRecord
 from .matching import CandidateScore, Reconciliation
+from .providers.models import RecordType
 
 LOGGER = logging.getLogger(__name__)
 
@@ -190,6 +191,7 @@ def accept_candidate(
     work_only: bool = False,
     batch_id: str | None = None,
 ) -> DecisionRecord:
+    work_only = work_only or score.candidate.record_type is RecordType.BOOK_WORK
     decision_type = DecisionType.WORK_ACCEPTED if work_only else DecisionType.ACCEPTED
     return repository.add(
         source,

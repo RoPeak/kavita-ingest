@@ -20,7 +20,13 @@ from kavita_ingest.decisions import (
     validate_manual_override,
 )
 from kavita_ingest.domain import MediaKind, SequenceNumber, SourceFormat, SourceRecord
-from kavita_ingest.matching import LocalIdentity, reconcile, score_candidates
+from kavita_ingest.matching import (
+    CandidateScore,
+    LocalIdentity,
+    Reconciliation,
+    reconcile,
+    score_candidates,
+)
 from kavita_ingest.providers.base import ProviderStatus
 from kavita_ingest.providers.comic_vine import ComicVineProvider
 from kavita_ingest.providers.models import (
@@ -354,6 +360,34 @@ def test_score_alone_never_creates_decision_and_acceptance_is_explicit(tmp_path:
     )
     assert decision.decision_type is DecisionType.ACCEPTED
     assert decision.payload["explicit"] is True
+    connection.close()
+
+
+def test_book_work_normal_acceptance_api_is_safely_normalized_to_work_only(
+    tmp_path: Path,
+) -> None:
+    repository, connection = _repository(tmp_path)
+    candidate = NormalizedCandidate(
+        ProviderName.OPEN_LIBRARY,
+        "works/OL123W",
+        RecordType.BOOK_WORK,
+        MediaKind.BOOK,
+        "Crime and Punishment",
+        creators=(Contributor("Fyodor Dostoevsky", "author"),),
+        identifiers=(Identifier("isbn", "9780140449136"),),
+        publisher="Aggregate Publisher",
+        publication_date="1866",
+        language="eng",
+    )
+    score = CandidateScore(candidate, 99, 0.99, (), (), False, True, eligible=True)
+    decision = accept_candidate(
+        repository,
+        _source(),
+        score,
+        Reconciliation("accepted", "unresolved", (), ()),
+        "evidence",
+    )
+    assert decision.decision_type is DecisionType.WORK_ACCEPTED
     connection.close()
 
 

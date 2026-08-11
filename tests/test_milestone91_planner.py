@@ -12,6 +12,7 @@ from typer.testing import CliRunner
 from compatibility.helpers.epub_factory import create_epub
 from kavita_ingest.apply_engine import ApplyEngine, ApplyRefused
 from kavita_ingest.cli import app
+from kavita_ingest.comicinfo import read_comicinfo
 from kavita_ingest.config import load_config
 from kavita_ingest.db import connect
 from kavita_ingest.decisions import DecisionRepository, DecisionType
@@ -19,6 +20,7 @@ from kavita_ingest.discovery import inspect_source
 from kavita_ingest.domain import MediaKind
 from kavita_ingest.plan_store import PlanStore
 from kavita_ingest.providers.base import ProviderStatus
+from kavita_ingest.providers.comic_vine import ComicVineProvider
 from kavita_ingest.providers.models import (
     Contributor,
     Identifier,
@@ -55,6 +57,39 @@ class _BookWorkProvider:
 
     def lookup_identifier(self, identifier: Identifier) -> list[NormalizedCandidate]:
         return [self.candidate]
+
+
+class _ComicVineFixtureClient:
+    def get(
+        self,
+        operation: str,
+        url: str,
+        public_params: dict[str, str],
+        secret_params: dict[str, str],
+        bucket: str,
+        normalize: Callable[[object], list[NormalizedCandidate]],
+    ) -> list[NormalizedCandidate]:
+        del url, public_params, secret_params, bucket
+        if operation == "search-runs":
+            payload: object = {
+                "results": [
+                    {
+                        "id": 160294,
+                        "resource_type": "volume",
+                        "api_detail_url": (
+                            "https://comicvine.gamespot.com/api/volume/4050-160294/"
+                        ),
+                        "name": "Absolute Batman",
+                        "start_year": "2024",
+                        "publisher": {"name": "DC Comics"},
+                    }
+                ]
+            }
+        else:
+            payload = json.loads(
+                Path("tests/fixtures/providers/comic_vine.json").read_text(encoding="utf-8")
+            )
+        return normalize(payload)
 
 
 def _config(
@@ -177,7 +212,7 @@ def test_generated_epub_runs_through_real_scan_review_plan_and_apply(tmp_path: P
     assert not source.exists()
 
 
-def test_work_only_review_builds_partial_plan_and_preserves_edition_metadata(
+def test_book_work_normal_accept_is_confirmed_and_persisted_work_only(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     incoming = tmp_path / "incoming"
@@ -189,7 +224,7 @@ def test_work_only_review_builds_partial_plan_and_preserves_edition_metadata(
     monkeypatch.setattr("kavita_ingest.review.build_providers", lambda *_: provider)
 
     document, applied = _create_approve_apply(
-        CliRunner(), config, incoming, "W\n"
+        CliRunner(), config, incoming, "A\ny\ny\n"
     )
 
     item = document["items"][0]
@@ -231,6 +266,51 @@ def test_generated_cbz_freezes_symbolic_naming_and_preserve_policy(tmp_path: Pat
     assert item["expected_inventory"]
     assert applied["summary"]["status"] == "complete"
     assert source.is_file() and destination.is_file()
+
+
+def test_comic_vine_candidate_survives_real_review_plan_apply_and_readback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    incoming = tmp_path / "incoming"
+    incoming.mkdir()
+    source = _cbz(incoming / "Absolute Batman 14 (2024).cbz")
+    config = _config(tmp_path, incoming, lifecycle="preserve")
+    provider = (ComicVineProvider(_ComicVineFixtureClient(), "fixture-key"),)  # type: ignore[arg-type]
+    monkeypatch.setattr("kavita_ingest.audit.build_providers", lambda *_: provider)
+    monkeypatch.setattr("kavita_ingest.review.build_providers", lambda *_: provider)
+
+    document, applied = _create_approve_apply(
+        CliRunner(), config, incoming, "A\ny\n"
+    )
+
+    item = document["items"][0]
+    canonical = item["canonical"]
+    projection = item["kavita_projection"]
+    metadata = projection["metadata"]
+    destination = tmp_path / "comics" / projection["destination"]
+    assert item["provenance"]["decision_type"] == "accepted"
+    assert canonical["provider_identity"]["run_id"] == "4050-160294"
+    assert canonical["run_start_year"] == 2024
+    assert canonical["sequence"]["normalized"] == "14"
+    assert canonical["title"] == "The Zoo"
+    assert canonical["contributors"]["writers"] == ["Scott Snyder"]
+    assert metadata["Series"] == "Absolute Batman (2024)"
+    assert metadata["Number"] == "14"
+    assert metadata["Title"] == "The Zoo"
+    assert metadata["Writer"] == "Scott Snyder"
+    assert metadata["Publisher"] == "DC Comics"
+    assert (metadata["Year"], metadata["Month"], metadata["Day"]) == (2026, 1, 15)
+    assert applied["summary"]["status"] == "complete"
+    assert source.is_file() and destination.is_file()
+    with zipfile.ZipFile(destination) as archive:
+        comicinfo = read_comicinfo(archive.read("ComicInfo.xml"), require_schema=True).metadata
+    assert comicinfo["Writer"] == "Scott Snyder"
+    assert comicinfo["Publisher"] == "DC Comics"
+    assert (comicinfo["Year"], comicinfo["Month"], comicinfo["Day"]) == (
+        "2026",
+        "1",
+        "15",
+    )
 
 
 @pytest.mark.skipif(shutil.which("unrar") is None, reason="unrar is required for CBR workflow")

@@ -47,6 +47,17 @@ class CanonicalIdentity:
                 blocks.append("comic run/series identity is unresolved")
             if not self.item_type:
                 blocks.append("comic item type is unresolved")
+            elif self.item_type not in {
+                "issue",
+                "annual",
+                "special",
+                "one-shot",
+                "trade",
+                "collected-edition",
+                "omnibus",
+                "graphic-novel",
+            }:
+                blocks.append(f"comic item type is unsupported: {self.item_type}")
             if self.item_type in {"issue", "annual", "special"} and self.run_start_year is None:
                 blocks.append("comic run start year is unresolved")
             if self.sequence is None and self.item_type not in {"one-shot", "graphic-novel"}:

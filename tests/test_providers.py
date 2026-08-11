@@ -88,6 +88,10 @@ def test_comic_vine_normalizes_run_issue_without_kavita_volume_conflation() -> N
     assert candidate.run_start_year == 2024
     assert candidate.sequence == SequenceNumber.parse("14")
     assert candidate.run_id == "4050-160294"
+    assert candidate.creators[0].name == "Scott Snyder"
+    assert candidate.creators[0].role == "writer"
+    assert candidate.publisher == "DC Comics"
+    assert candidate.publication_date == "2026-01-15"
     assert not hasattr(candidate, "volume")
     assert client.calls[0][2]["api_key"] == "secret"
 
@@ -111,7 +115,44 @@ def test_comic_vine_resolves_runs_then_filters_issues_by_run_and_sequence() -> N
     assert issue.run_id == "4050-160294"
     assert issue.run_start_year == 2024
     assert issue_client.calls[0][1]["filter"] == "volume:160294,issue_number:14"
+    assert "format" in issue_client.calls[0][1]["field_list"]
     assert issue_client.calls[0][3] == "issues"
+
+
+@pytest.mark.parametrize(
+    ("raw_format", "item_type", "record_type"),
+    [
+        ("", "issue", RecordType.COMIC_ISSUE),
+        ("Annual", "annual", RecordType.COMIC_ISSUE),
+        ("One-Shot", "one-shot", RecordType.COMIC_ISSUE),
+        ("TPB", "collected-edition", RecordType.COMIC_COLLECTION),
+        ("Trade Paperback", "collected-edition", RecordType.COMIC_COLLECTION),
+        ("Hardcover", "collected-edition", RecordType.COMIC_COLLECTION),
+        ("Omnibus", "omnibus", RecordType.COMIC_COLLECTION),
+        ("Graphic Novel", "graphic-novel", RecordType.COMIC_COLLECTION),
+    ],
+)
+def test_comic_vine_normalizes_formats_at_provider_boundary(
+    raw_format: str, item_type: str, record_type: RecordType
+) -> None:
+    payload = _fixture("comic_vine.json")
+    assert isinstance(payload, dict)
+    payload["results"][0]["format"] = raw_format  # type: ignore[index]
+    provider = ComicVineProvider(FixtureClient(payload), "secret")  # type: ignore[arg-type]
+    candidate = provider.search(SearchQuery(MediaKind.COMIC, "Absolute Batman"))[0]
+    assert candidate.item_type == item_type
+    assert candidate.record_type is record_type
+    assert candidate.provider_metadata == ({"raw_format": raw_format} if raw_format else {})
+
+
+def test_comic_vine_unknown_format_is_preserved_and_not_masqueraded_as_issue() -> None:
+    payload = _fixture("comic_vine.json")
+    assert isinstance(payload, dict)
+    payload["results"][0]["format"] = "Prestige Mystery"  # type: ignore[index]
+    provider = ComicVineProvider(FixtureClient(payload), "secret")  # type: ignore[arg-type]
+    candidate = provider.search(SearchQuery(MediaKind.COMIC, "Absolute Batman"))[0]
+    assert candidate.item_type == "unsupported"
+    assert candidate.provider_metadata == {"raw_format": "Prestige Mystery"}
 
 
 def test_comic_vine_collected_search_uses_collection_oriented_query_bucket() -> None:

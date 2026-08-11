@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -156,6 +157,23 @@ def test_plan_detects_casefolded_destination_collision_and_refuses_approval(tmp_
         stored = store.add(plan)
         with pytest.raises(ValueError, match="conflicts"):
             store.approve(stored.id, stored.sha256)
+
+
+def test_plan_collision_identity_uses_frozen_absolute_destination() -> None:
+    first = _manual_comic("one", "Same", "1", "e")
+    second = _manual_comic("two", "Same", "1", "f")
+
+    def rooted(item: object, root: str):  # type: ignore[no-untyped-def]
+        projection = dict(item.kavita_projection)  # type: ignore[attr-defined]
+        projection["library_root"] = root
+        projection["absolute_destination"] = str(Path(root) / projection["destination"])
+        return replace(item, kavita_projection=projection)
+
+    separate = new_plan("separate", (rooted(first, "/books"), rooted(second, "/comics")))
+    assert not separate.conflicts
+
+    same = new_plan("same", (rooted(first, "/library"), rooted(second, "/LIBRARY")))
+    assert same.conflicts[0].code == "destination_collision"
 
 
 def test_projected_item_without_explicit_item_decision_is_rejected(tmp_path: Path) -> None:

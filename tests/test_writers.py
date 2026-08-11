@@ -29,6 +29,18 @@ def test_comicinfo_patcher_preserves_unowned_standard_fields_and_schema_order() 
     assert output.index(b"<Series>") < output.index(b"<Notes>")
 
 
+def test_comicinfo_translator_is_owned_schema_ordered_and_read_back() -> None:
+    output = patch_comicinfo(
+        b"<ComicInfo><Publisher>Original</Publisher></ComicInfo>",
+        set_fields={"Writer": "W. Writer", "Translator": "T. Translator"},
+    )
+    document = read_comicinfo(output, require_schema=True)
+    assert document.metadata["Translator"] == "T. Translator"
+    assert output.index(b"<Writer>") < output.index(b"<Translator>") < output.index(
+        b"<Publisher>"
+    )
+
+
 def test_comicinfo_rejects_duplicate_owned_fields() -> None:
     with pytest.raises(ComicInfoError, match="duplicate"):
         patch_comicinfo(

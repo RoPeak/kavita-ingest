@@ -6,7 +6,7 @@ from typing import Any
 from .canonical import CanonicalIdentity, ResolutionLevel
 from .decisions import DecisionRecord, DecisionRepository, DecisionType
 from .domain import MediaKind, SequenceNumber, SourceRecord
-from .providers.models import NormalizedCandidate
+from .providers.models import NormalizedCandidate, RecordType
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,12 +61,21 @@ def _candidate_identity(decision: DecisionRecord) -> CanonicalIdentity:
     if not isinstance(value, dict):
         raise ValueError("accepted decision has no resolved candidate snapshot")
     candidate = NormalizedCandidate.from_dict(value)
-    work_only = decision.decision_type is DecisionType.WORK_ACCEPTED
+    work_only = (
+        decision.decision_type is DecisionType.WORK_ACCEPTED
+        or candidate.record_type is RecordType.BOOK_WORK
+    )
+    contributors = _contributor_groups(candidate)
+    creators = (
+        contributors.get("writers", ())
+        if candidate.media_kind is MediaKind.COMIC
+        else contributors.get("authors", ())
+    )
     identifiers = {} if work_only else {item.scheme: item.value for item in candidate.identifiers}
     return CanonicalIdentity(
         media_kind=candidate.media_kind,
         title=candidate.title,
-        creators=tuple(item.name for item in candidate.creators if item.role == "author"),
+        creators=creators,
         series_title=candidate.series_title,
         sequence=candidate.sequence,
         run_start_year=candidate.run_start_year,
@@ -75,6 +84,7 @@ def _candidate_identity(decision: DecisionRecord) -> CanonicalIdentity:
         publication_date=None if work_only else candidate.publication_date,
         language=None if work_only else candidate.language,
         identifiers=identifiers,
+        contributors=contributors,
         provider_identity={
             "provider": candidate.provider.value,
             "provider_id": candidate.provider_id,
@@ -82,7 +92,15 @@ def _candidate_identity(decision: DecisionRecord) -> CanonicalIdentity:
             **({"run_id": candidate.run_id} if candidate.run_id else {}),
         },
         resolution=ResolutionLevel.WORK_ONLY if work_only else ResolutionLevel.COMPLETE,
-        provenance={"decision_id": str(decision.id), "decision_type": decision.decision_type.value},
+        provenance={
+            "decision_id": str(decision.id),
+            "decision_type": decision.decision_type.value,
+            **(
+                {"provider_format": candidate.provider_metadata["raw_format"]}
+                if candidate.provider_metadata.get("raw_format")
+                else {}
+            ),
+        },
     )
 
 
@@ -158,6 +176,36 @@ def _strings(value: object) -> tuple[str, ...]:
     if isinstance(value, (list, tuple)):
         return tuple(str(item) for item in value)
     return ()
+
+
+_CONTRIBUTOR_GROUPS = {
+    "author": "authors",
+    "writer": "writers",
+    "script": "writers",
+    "penciler": "pencillers",
+    "penciller": "pencillers",
+    "inker": "inkers",
+    "colorist": "colorists",
+    "colourist": "colorists",
+    "letterer": "letterers",
+    "cover": "cover_artists",
+    "cover-artist": "cover_artists",
+    "cover artist": "cover_artists",
+    "editor": "editors",
+    "translator": "translators",
+}
+
+
+def _contributor_groups(candidate: NormalizedCandidate) -> dict[str, tuple[str, ...]]:
+    grouped: dict[str, list[str]] = {}
+    for contributor in candidate.creators:
+        role = contributor.role.strip().casefold()
+        group = _CONTRIBUTOR_GROUPS.get(
+            role,
+            role if role.startswith("unknown:") else f"unknown:{role or 'creator'}",
+        )
+        grouped.setdefault(group, []).append(contributor.name)
+    return {key: tuple(dict.fromkeys(names)) for key, names in grouped.items()}
 
 
 def _optional_string(value: object) -> str | None:

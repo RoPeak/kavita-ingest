@@ -247,8 +247,8 @@ def new_plan(
     for item in items:
         projection = item.kavita_projection
         if projection:
-            destination = str(projection["destination"])
-            destinations.setdefault(destination.casefold(), []).append(item.item_id)
+            destination = _immutable_destination_identity(projection)
+            destinations.setdefault(destination, []).append(item.item_id)
     conflicts = tuple(
         PlanConflict(
             "destination_collision", "multiple items project to the same destination", tuple(ids)
@@ -263,6 +263,18 @@ def new_plan(
         policy.to_dict(),
         conflicts,
     )
+
+
+def _immutable_destination_identity(projection: dict[str, Any]) -> str:
+    absolute = projection.get("absolute_destination")
+    if isinstance(absolute, str) and absolute:
+        return f"absolute:{PurePosixPath(absolute).as_posix().casefold()}"
+    root = projection.get("library_root")
+    destination = str(projection["destination"])
+    if isinstance(root, str) and root:
+        path = PurePosixPath(root) / PurePosixPath(destination)
+        return f"absolute:{path.as_posix().casefold()}"
+    return f"legacy-relative:{PurePosixPath(destination).as_posix().casefold()}"
 
 
 def validate_plan_payload(payload: bytes) -> dict[str, Any]:

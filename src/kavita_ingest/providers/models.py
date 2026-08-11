@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from enum import StrEnum
 from typing import Any
 
@@ -55,6 +55,7 @@ class NormalizedCandidate:
     work_id: str | None = None
     edition_id: str | None = None
     run_id: str | None = None
+    provider_metadata: dict[str, str] = field(default_factory=dict)
     provider_schema_version: int = 1
 
     @property
@@ -89,6 +90,9 @@ class NormalizedCandidate:
             work_id=value.get("work_id"),
             edition_id=value.get("edition_id"),
             run_id=value.get("run_id"),
+            provider_metadata={
+                str(key): str(item) for key, item in value.get("provider_metadata", {}).items()
+            },
             provider_schema_version=int(value.get("provider_schema_version", 1)),
         )
 

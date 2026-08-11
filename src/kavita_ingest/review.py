@@ -157,12 +157,19 @@ def interactive_review(
                         "Candidate is not batch-eligible. Accept anyway?"
                     ):
                         continue
+                    work_only = top.candidate.record_type is RecordType.BOOK_WORK
+                    if work_only and not typer.confirm(
+                        "This candidate identifies only the work, not this EPUB edition. "
+                        "Accept it work-only?"
+                    ):
+                        continue
                     accept_candidate(
                         repository,
                         current.scan.source,
                         top,
                         current.reconciliation,
                         current.local.evidence_hash(),
+                        work_only=work_only,
                     )
                     break
                 if action == "W" and top:

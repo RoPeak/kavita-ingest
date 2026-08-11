@@ -95,6 +95,82 @@ def test_integer_collection_volume_is_explicit_and_separate_from_run_year() -> N
     assert not identity.provider_identity
 
 
+def test_comic_projection_emits_only_resolved_rich_comicinfo_metadata() -> None:
+    identity = CanonicalIdentity(
+        MediaKind.COMIC,
+        "The Zoo",
+        ("Scott Snyder",),
+        series_title="Absolute Batman",
+        sequence=SequenceNumber.parse("14"),
+        run_start_year=2024,
+        item_type="issue",
+        publisher="DC Comics",
+        publication_date="2026-01-15",
+        language="en-US",
+        identifiers={"comic_vine": "4000-140001"},
+        contributors={
+            "writers": ("Scott Snyder",),
+            "pencillers": ("Nick Dragotta",),
+            "inkers": ("Inky Person",),
+            "colorists": ("Colour Person",),
+            "letterers": ("Letter Person",),
+            "cover_artists": ("Cover Person",),
+            "editors": ("Editor Person",),
+            "translators": ("Translator Person",),
+        },
+    )
+    metadata = project_comic(identity).metadata
+    assert metadata == {
+        "Series": "Absolute Batman (2024)",
+        "Number": "14",
+        "Volume": "",
+        "Format": "",
+        "Title": "The Zoo",
+        "Writer": "Scott Snyder",
+        "Penciller": "Nick Dragotta",
+        "Inker": "Inky Person",
+        "Colorist": "Colour Person",
+        "Letterer": "Letter Person",
+        "CoverArtist": "Cover Person",
+        "Editor": "Editor Person",
+        "Translator": "Translator Person",
+        "Publisher": "DC Comics",
+        "Year": 2026,
+        "Month": 1,
+        "Day": 15,
+        "LanguageISO": "en-US",
+    }
+    assert "GTIN" not in metadata
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("2026", {"Year": 2026}),
+        ("2026-02", {"Year": 2026, "Month": 2}),
+        ("2024-02-29", {"Year": 2024, "Month": 2, "Day": 29}),
+        ("2026-13", {}),
+        ("2025-02-29", {}),
+        ("unknown", {}),
+    ],
+)
+def test_comic_projection_parses_partial_dates_conservatively(
+    value: str, expected: dict[str, int]
+) -> None:
+    identity = CanonicalIdentity(
+        MediaKind.COMIC,
+        "Issue",
+        (),
+        series_title="Series",
+        sequence=SequenceNumber.parse("1"),
+        run_start_year=2024,
+        item_type="issue",
+        publication_date=value,
+    )
+    metadata = project_comic(identity).metadata
+    assert {key: metadata[key] for key in ("Year", "Month", "Day") if key in metadata} == expected
+
+
 def test_work_only_book_preserves_all_unresolved_edition_metadata() -> None:
     identity = work_only_identity(
         title="The Left Hand of Darkness", creators=("Ursula K. Le Guin",)

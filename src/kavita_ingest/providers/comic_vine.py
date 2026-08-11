@@ -90,7 +90,7 @@ class ComicVineProvider:
                 "limit": "10",
                 "field_list": (
                     "id,resource_type,api_detail_url,name,issue_number,cover_date,"
-                    "store_date,volume,person_credits"
+                    "store_date,volume,person_credits,format"
                 ),
             },
             self._secret(),
@@ -131,7 +131,32 @@ class ComicVineProvider:
         return values
 
 
-_COLLECTION_FORMATS = {"tpb", "trade paperback", "hardcover", "omnibus", "graphic novel"}
+_ITEM_TYPES = {
+    "annual": "annual",
+    "one shot": "one-shot",
+    "oneshot": "one-shot",
+    "special": "special",
+    "tpb": "collected-edition",
+    "trade paperback": "collected-edition",
+    "hardcover": "collected-edition",
+    "omnibus": "omnibus",
+    "graphic novel": "graphic-novel",
+}
+_COLLECTION_TYPES = {"collected-edition", "omnibus", "graphic-novel"}
+_CREDIT_ROLES = {
+    "writer": "writer",
+    "script": "writer",
+    "penciler": "penciller",
+    "penciller": "penciller",
+    "inker": "inker",
+    "colorist": "colorist",
+    "colourist": "colorist",
+    "letterer": "letterer",
+    "cover": "cover-artist",
+    "cover artist": "cover-artist",
+    "editor": "editor",
+    "translator": "translator",
+}
 
 
 def _normalize(raw: object) -> list[NormalizedCandidate]:
@@ -154,7 +179,8 @@ def _normalize(raw: object) -> list[NormalizedCandidate]:
             continue
         number = str(item.get("issue_number") or "").strip()
         format_value = str(item.get("format") or "").strip()
-        collection = format_value.casefold() in _COLLECTION_FORMATS
+        item_type = _item_type(format_value, is_issue)
+        collection = item_type in _COLLECTION_TYPES
         provider_id = _api_id(api_url) or (f"{'4000' if is_issue else '4050'}-{item['id']}")
         start_year = _year(item.get("start_year")) or _year(volume.get("start_year"))
         output.append(
@@ -173,8 +199,9 @@ def _normalize(raw: object) -> list[NormalizedCandidate]:
                 series_title=series_title,
                 run_start_year=start_year,
                 sequence=SequenceNumber.parse(number) if number else None,
-                item_type=format_value or ("issue" if is_issue else "run"),
+                item_type=item_type,
                 run_id=_volume_id(volume) if is_issue else provider_id,
+                provider_metadata={"raw_format": format_value} if format_value else {},
             )
         )
     return output
@@ -216,5 +243,22 @@ def _credits(value: object) -> tuple[Contributor, ...]:
     output = []
     for item in value:
         if isinstance(item, dict) and item.get("name"):
-            output.append(Contributor(str(item["name"]), str(item.get("role") or "creator")))
+            raw_role = str(item.get("role") or "creator").strip()
+            role = _CREDIT_ROLES.get(_normalized_label(raw_role))
+            output.append(
+                Contributor(
+                    str(item["name"]),
+                    role or f"unknown:{_normalized_label(raw_role) or 'creator'}",
+                )
+            )
     return tuple(output)
+
+
+def _item_type(format_value: str, is_issue: bool) -> str:
+    if not format_value:
+        return "issue" if is_issue else "run"
+    return _ITEM_TYPES.get(_normalized_label(format_value), "unsupported")
+
+
+def _normalized_label(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", value.casefold()).strip()
