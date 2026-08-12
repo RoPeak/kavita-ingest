@@ -22,6 +22,7 @@ from kavita_ingest.wizard import (
     DiscoverySelection,
     _incomplete_review_items,
     _select_discovered_sources,
+    _select_root,
     detect_resume_state,
 )
 from tests.apply_helpers import ApplyFixture, make_apply_fixture
@@ -350,7 +351,9 @@ enabled = false
     assert destination.exists()
 
 
-def test_review_completion_gate_blocks_missing_and_unresolved_decisions(tmp_path: Path) -> None:
+def test_review_completion_gate_blocks_missing_but_allows_explicit_unresolved(
+    tmp_path: Path,
+) -> None:
     from tests.test_review_ux import _audit
 
     database = tmp_path / "state.sqlite3"
@@ -366,7 +369,7 @@ def test_review_completion_gate_blocks_missing_and_unresolved_decisions(tmp_path
             audit.items[0].local.evidence_hash(),
             payload={"explicit": True},
         )
-    assert len(_incomplete_review_items(settings, audit)) == 1
+    assert _incomplete_review_items(settings, audit) == ()
 
     with connect(database) as connection:
         DecisionRepository(connection).add(
@@ -376,6 +379,20 @@ def test_review_completion_gate_blocks_missing_and_unresolved_decisions(tmp_path
             payload={"explicit": True},
         )
     assert _incomplete_review_items(settings, audit) == ()
+
+
+
+def test_select_root_reprompts_after_nonexistent_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    valid = tmp_path / "valid"
+    valid.mkdir()
+    answers = iter([str(tmp_path / "missing"), str(valid)])
+    monkeypatch.setattr(
+        "kavita_ingest.wizard.typer.prompt", lambda *args, **kwargs: next(answers)
+    )
+
+    assert _select_root(AppConfig()) == valid.resolve()
 
 
 def test_completed_preserved_source_is_suppressed_only_with_matching_destination(

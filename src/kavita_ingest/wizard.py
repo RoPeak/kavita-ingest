@@ -226,8 +226,20 @@ def _run_new(
         count = len(incomplete)
         verb = "need" if count != 1 else "needs"
         output.print(f"{count} item{'s' if count != 1 else ''} still {verb} a decision.\n")
-        output.print("[R] Return to review   [Q] Save and quit")
-        if _choice("Q") != "R":
+        output.print(
+            "[R] Return to review   [P] Plan approved items only   [Q] Save and quit"
+        )
+        choice = _choice("Q")
+        if choice == "P":
+            if typer.confirm(
+                f"Build a plan from explicitly approved items only and leave the other "
+                f"{count} item{'s' if count != 1 else ''} untouched?",
+                default=False,
+            ):
+                _stage(output, 3, "Review", "saved")
+                return _plan_reviewed(config, root, output)
+            continue
+        if choice != "R":
             output.print("Review decisions saved. Resume later to finish review.")
             return None
     _stage(output, 3, "Review", "saved")
@@ -327,6 +339,7 @@ def _incomplete_review_items(
             DecisionType.WORK_ACCEPTED,
             DecisionType.MANUAL_IDENTITY,
             DecisionType.REJECTED,
+            DecisionType.UNRESOLVED,
             DecisionType.SKIPPED,
         }
         incomplete = []
@@ -460,14 +473,30 @@ def _source_for_action(config: AppConfig, action: str) -> Path:
 
 
 def _select_root(config: AppConfig) -> Path:
-    if len(config.incoming_roots) > 1:
-        typer.echo("Configured incoming roots:")
-        for index, root in enumerate(config.incoming_roots, 1):
-            typer.echo(f"  [{index}] {root}")
-        choice = int(typer.prompt("Choose root number, or 0 for another directory", type=int))
-        if 1 <= choice <= len(config.incoming_roots):
-            return config.incoming_roots[choice - 1].expanduser().resolve(strict=True)
-    return Path(str(typer.prompt("Incoming directory"))).expanduser().resolve(strict=True)
+    while True:
+        selected: Path | None = None
+        if len(config.incoming_roots) > 1:
+            typer.echo("Configured incoming roots:")
+            for index, root in enumerate(config.incoming_roots, 1):
+                typer.echo(f"  [{index}] {root}")
+            choice = int(
+                typer.prompt("Choose root number, or 0 for another directory", type=int)
+            )
+            if 1 <= choice <= len(config.incoming_roots):
+                selected = config.incoming_roots[choice - 1]
+        if selected is None:
+            selected = Path(str(typer.prompt("Incoming directory")))
+
+        candidate = selected.expanduser()
+        try:
+            resolved = candidate.resolve(strict=True)
+        except (FileNotFoundError, OSError, RuntimeError):
+            typer.echo(f"Directory does not exist or cannot be resolved: {candidate}")
+            continue
+        if not resolved.is_dir():
+            typer.echo(f"Path is not a directory: {resolved}")
+            continue
+        return resolved
 
 
 def _single_valid_root(config: AppConfig) -> Path | None:
@@ -605,10 +634,12 @@ def _render_audit(audit: AuditResult, output: Console) -> None:
 
 
 def _render_build_result(result: PlanBuildResult, output: Console) -> None:
+    unresolved = sum(1 for item in result.exclusions if item.category == "unresolved")
+    skipped = sum(1 for item in result.exclusions if item.category == "skipped")
     output.print(
         f"Prepared {result.accepted_included} item{'s' if result.accepted_included != 1 else ''}; "
-        f"left out {result.unapproved_excluded} unapproved, "
-        f"{result.unresolved_blocked} blocked and {result.skipped} skipped."
+        f"left out {result.unapproved_excluded} unapproved, {unresolved} unresolved, "
+        f"{result.unresolved_blocked} blocked and {skipped} skipped."
     )
     for exclusion in result.exclusions:
         output.print(f"  {Path(exclusion.path).name}: {exclusion.explanation}")

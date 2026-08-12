@@ -358,6 +358,91 @@ def test_comic_run_is_resolved_once_and_reused_without_implicit_approval() -> No
     assert session.metrics()["run_disambiguation_queries"] == 2
 
 
+
+def test_highest_local_issue_breaks_same_name_issue_one_run_tie() -> None:
+    class SameNameRunClient:
+        def get(
+            self,
+            operation: str,
+            url: str,
+            public_params: dict[str, str],
+            secret_params: dict[str, str],
+            bucket: str,
+            normalize: Callable[[object], list[NormalizedCandidate]],
+        ) -> list[NormalizedCandidate]:
+            del url, secret_params, bucket
+            if operation == "search-runs":
+                return normalize(
+                    {
+                        "results": [
+                            _comic_vine_record(
+                                "volume", 163145, "Absolute Green Lantern", start_year=2025
+                            ),
+                            _comic_vine_record(
+                                "volume", 169121, "Absolute Green Lantern", start_year=2025
+                            ),
+                            _comic_vine_record(
+                                "volume", 170601, "Absolute Green Lantern", start_year=2026
+                            ),
+                            _comic_vine_record(
+                                "volume", 171173, "Absolute Green Lantern", start_year=2025
+                            ),
+                        ]
+                    }
+                )
+            if operation == "search":
+                return normalize({"results": []})
+            volume = int(public_params["filter"].split(",", 1)[0].split(":", 1)[1])
+            number = public_params["filter"].rsplit(":", 1)[-1]
+            if number != "1" and volume != 163145:
+                return normalize({"results": []})
+            return normalize(
+                {
+                    "results": [
+                        {
+                            **_comic_vine_record(
+                                "issue", volume * 100 + int(number), f"Episode {number}"
+                            ),
+                            "issue_number": number,
+                            "cover_date": "2025-06-01",
+                            "store_date": "2025-04-02",
+                            "volume": {
+                                "id": volume,
+                                "name": "Absolute Green Lantern",
+                                "api_detail_url": (
+                                    f"https://comicvine.gamespot.com/api/volume/4050-{volume}/"
+                                ),
+                            },
+                            "person_credits": [{"name": "Al Ewing", "role": "writer"}],
+                        }
+                    ]
+                }
+            )
+
+    provider = ComicVineProvider(SameNameRunClient(), "secret")  # type: ignore[arg-type]
+    locals_ = [
+        LocalIdentity(
+            MediaKind.COMIC,
+            "issue",
+            0.98,
+            "Absolute Green Lantern",
+            series_title="Absolute Green Lantern",
+            sequence=SequenceNumber.parse(str(number)),
+            year=2025 if number <= 8 else 2026,
+        )
+        for number in range(1, 18)
+    ]
+    session = CandidateSession.from_local_identities(locals_)
+
+    results = [generate_candidates(local, (provider,), session) for local in locals_]
+
+    resolved = session.resolved_runs["absolute green lantern"]
+    assert resolved is not None and resolved.provider_id == "4050-163145"
+    assert all(result.candidates for result in results)
+    assert all(result.candidates[0].run_id == "4050-163145" for result in results)
+    assert session.metrics()["repeated_run_queries_avoided"] == 16
+
+
 def test_issue_one_publication_year_cannot_filter_same_title_runs() -> None:
     provider = ComicVineProvider(IssueOneYearTrapClient(), "secret")  # type: ignore[arg-type]
     local = LocalIdentity(

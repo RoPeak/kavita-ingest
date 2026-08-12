@@ -161,6 +161,28 @@ class CandidateSession:
             runner = ranked[1][0] if len(ranked) > 1 else 0.0
             if ranked and ranked[0][0] >= 0.75 and ranked[0][0] - runner >= 0.15:
                 return ranked[0][1], [ranked[0][2]]
+
+        # A same-named collected/translated run can legitimately contain issue #1 too.
+        # Use the highest issue number present in the current local series group as
+        # additional run evidence before giving up and caching the group as ambiguous.
+        # This is intentionally only a discriminator: absence of that issue does not
+        # prove a run is wrong unless another candidate run does contain it.
+        max_sequence = self.run_max_sequences.get(key)
+        if max_sequence and max_sequence.normalized != local.sequence.normalized:
+            candidate_runs = {run.provider_id: run for run, _ in found}
+            max_issue_runs: list[NormalizedCandidate] = []
+            for run in candidate_runs.values():
+                issues = self._probe_issue(provider, run, max_sequence)
+                if issues is None:
+                    return None, [issue for _, issue in found]
+                if issues:
+                    max_issue_runs.append(run)
+            if len(max_issue_runs) == 1:
+                selected = max_issue_runs[0]
+                return selected, [
+                    issue for run, issue in found if run.provider_id == selected.provider_id
+                ]
+
         return None, [issue for _, issue in found]
 
     def _probe_issue(

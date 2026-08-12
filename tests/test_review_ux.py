@@ -28,6 +28,7 @@ from kavita_ingest.providers.models import (
 from kavita_ingest.review import (
     _action_prompt,
     _batch_items,
+    _candidate_writers,
     _hydrate_for_acceptance,
     interactive_review,
 )
@@ -167,6 +168,25 @@ def test_batch_items_and_prompt_use_same_eligible_subset(tmp_path: Path) -> None
     audit = _audit(tmp_path, eligible=True)
     assert len(_batch_items(audit)) == 1
     assert "[B]atch" in _action_prompt(audit.items[0], audit)
+
+
+
+def test_batch_items_can_exclude_source_already_decided_this_pass(tmp_path: Path) -> None:
+    audit = _audit(tmp_path, eligible=True)
+    fingerprint = audit.items[0].scan.source.sha256
+    assert _batch_items(audit, exclude_fingerprints={fingerprint}) == []
+
+
+def test_candidate_writer_summary_uses_search_credit_data() -> None:
+    candidate = replace(
+        _candidate("4000-writer", 2025, "2025-06-01"),
+        creators=(
+            Contributor("Al Ewing", "writer"),
+            Contributor("Al Ewing", "writer"),
+            Contributor("Jahnoy Lindsay", "artist"),
+        ),
+    )
+    assert _candidate_writers(candidate) == "Al Ewing"
 
 
 def test_wizard_review_uses_compact_primary_actions_and_more_reveals_advanced(

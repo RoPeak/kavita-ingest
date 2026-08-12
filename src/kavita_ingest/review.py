@@ -54,6 +54,7 @@ def interactive_review(
     counts = {
         key: 0 for key in ("accepted", "work_only", "manual", "rejected", "unresolved", "skipped")
     }
+    decided_this_pass: set[str] = set()
     try:
         for item in audit.items:
             current = item
@@ -156,6 +157,7 @@ def interactive_review(
                     output.print("Manual canonical identity explicitly approved.")
                     output.print("Decision saved.")
                     counts["manual"] += 1
+                    decided_this_pass.add(current.scan.source.sha256)
                     decided = True
                     break
                 if action == "G" and selected:
@@ -223,6 +225,7 @@ def interactive_review(
                     )
                     output.print("Decision saved.")
                     counts["work_only" if work_only else "accepted"] += 1
+                    decided_this_pass.add(current.scan.source.sha256)
                     decided = True
                     break
                 if action == "W" and selected and current.local.kind.value == "book":
@@ -241,6 +244,7 @@ def interactive_review(
                     )
                     output.print("Decision saved.")
                     counts["work_only"] += 1
+                    decided_this_pass.add(current.scan.source.sha256)
                     decided = True
                     break
                 if action == "R" and selected:
@@ -254,6 +258,7 @@ def interactive_review(
                     )
                     output.print("Decision saved.")
                     counts["rejected"] += 1
+                    decided_this_pass.add(current.scan.source.sha256)
                     decided = True
                     break
                 if action in {"U", "K"}:
@@ -265,10 +270,11 @@ def interactive_review(
                     )
                     output.print("Decision saved.")
                     counts["unresolved" if action == "U" else "skipped"] += 1
+                    decided_this_pass.add(current.scan.source.sha256)
                     decided = True
                     break
                 if action == "B":
-                    eligible = _batch_items(audit)
+                    eligible = _batch_items(audit, exclude_fingerprints=decided_this_pass)
                     output.print(
                         f"Eligible, non-conflicting, edition-resolved items: {len(eligible)}"
                     )
@@ -303,16 +309,16 @@ def interactive_review(
                         )
                         counts["accepted"] += len(hydrated_items)
                         output.print(f"Decisions saved: {len(hydrated_items)}.")
-                    _show_summary(output, counts, len(audit.items))
+                    _show_summary(output, counts, len(audit.items), repository=repository, audit=audit)
                     return audit
                 if action == "Q":
-                    _show_summary(output, counts, len(audit.items))
+                    _show_summary(output, counts, len(audit.items), repository=repository, audit=audit)
                     return audit
                 if action == "N":
                     break
             if not decided:
                 continue
-        _show_summary(output, counts, len(audit.items))
+        _show_summary(output, counts, len(audit.items), repository=repository, audit=audit)
         return audit
     finally:
         connection.close()
@@ -320,11 +326,14 @@ def interactive_review(
 
 def _batch_items(
     audit: AuditResult,
+    *,
+    exclude_fingerprints: set[str] | None = None,
 ) -> list[tuple[SourceRecord, CandidateScore, Reconciliation, str]]:
+    excluded = exclude_fingerprints or set()
     items = [
         (item.scan.source, item.scores[0], item.reconciliation, item.local.evidence_hash())
         for item in audit.items
-        if item.scores
+        if item.scores and item.scan.source.sha256 not in excluded
     ]
     return batch_eligible_items(items)
 
@@ -416,6 +425,7 @@ def _show_item(
             "Issue",
             "Run context",
             "Publication",
+            "Writer",
             "Score",
             "Eligible",
         )
@@ -436,6 +446,7 @@ def _show_item(
                 f"cover {score.candidate.cover_date or '-'}\n"
                 f"release {score.candidate.release_date or '-'}\n"
                 f"{score.candidate.publisher or '-'}",
+                _candidate_writers(score.candidate),
                 f"{score.score:.1f}",
                 "yes" if score.eligible else "no",
             )
@@ -459,6 +470,10 @@ def _show_item(
     if item.generation.unavailable:
         console.print("Unavailable: " + "; ".join(item.generation.unavailable))
 
+
+def _candidate_writers(candidate: NormalizedCandidate) -> str:
+    names = [item.name for item in candidate.creators if item.role == "writer"]
+    return ", ".join(dict.fromkeys(names)) or "-"
 
 def _displayed_scores(item: ReviewItem) -> list[CandidateScore]:
     return usable_identity_scores(item.scores)[:9]
@@ -515,8 +530,18 @@ def _low_confidence_message(score: CandidateScore) -> str:
     )
 
 
-def _show_summary(console: Console, counts: dict[str, int], total: int) -> None:
-    decided = sum(counts.values())
+def _show_summary(
+    console: Console,
+    counts: dict[str, int],
+    total: int,
+    *,
+    repository: DecisionRepository | None = None,
+    audit: AuditResult | None = None,
+) -> None:
+    if repository is not None and audit is not None:
+        counts, no_decision = _persisted_review_counts(repository, audit)
+    else:
+        no_decision = max(total - sum(counts.values()), 0)
     console.print("\nReview complete.\n")
     console.print(f"Accepted:    {counts['accepted']}")
     console.print(f"Work-only:   {counts['work_only']}")
@@ -524,8 +549,39 @@ def _show_summary(console: Console, counts: dict[str, int], total: int) -> None:
     console.print(f"Rejected:    {counts['rejected']}")
     console.print(f"Unresolved:  {counts['unresolved']}")
     console.print(f"Skipped:     {counts['skipped']}")
-    console.print(f"No decision: {max(total - decided, 0)}")
+    console.print(f"No decision: {no_decision}")
     console.print("\nNo media files were modified.")
+
+
+def _persisted_review_counts(
+    repository: DecisionRepository, audit: AuditResult
+) -> tuple[dict[str, int], int]:
+    counts = {
+        key: 0
+        for key in ("accepted", "work_only", "manual", "rejected", "unresolved", "skipped")
+    }
+    mapping = {
+        DecisionType.ACCEPTED: "accepted",
+        DecisionType.WORK_ACCEPTED: "work_only",
+        DecisionType.MANUAL_IDENTITY: "manual",
+        DecisionType.REJECTED: "rejected",
+        DecisionType.UNRESOLVED: "unresolved",
+        DecisionType.SKIPPED: "skipped",
+    }
+    no_decision = 0
+    for item in audit.items:
+        decision = repository.latest(item.scan.source)
+        key = (
+            mapping.get(decision.decision_type)
+            if decision is not None
+            and decision.source_evidence_hash == item.local.evidence_hash()
+            else None
+        )
+        if key is None:
+            no_decision += 1
+        else:
+            counts[key] += 1
+    return counts, no_decision
 
 
 def _manual_identity_fields(item: ReviewItem) -> dict[str, str]:
