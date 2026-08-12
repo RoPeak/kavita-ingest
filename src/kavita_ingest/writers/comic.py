@@ -77,7 +77,7 @@ def verify_cbz(
             else:
                 document = read_comicinfo(archive.read(names[0]), require_schema=True)
                 for field, expected in set_fields.items():
-                    if document.metadata.get(field) != str(expected):
+                    if document.metadata.get(field) != str(expected).strip():
                         errors.append(f"ComicInfo {field} read-back mismatch")
                 for field in clear_fields:
                     if field in document.metadata:
