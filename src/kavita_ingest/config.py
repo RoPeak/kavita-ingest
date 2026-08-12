@@ -137,10 +137,6 @@ def load_config(path: Path | None = None, app_paths: AppPaths | None = None) -> 
         timeout_seconds=float(providers.get("timeout_seconds", 15.0)),
     )
     _validate_provider_settings(provider_settings)
-    if comic_vine.get("enabled") is True and not provider_settings.comic_vine_api_key:
-        raise ValueError(
-            "Comic Vine is explicitly enabled but COMIC_VINE_API_KEY is not configured"
-        )
     config = AppConfig(
         incoming_roots=_path_tuple(paths.get("incoming", [])),
         books_root=_optional_path(paths.get("books")),

@@ -162,8 +162,8 @@ enabled = false
 
     assert result.exit_code == 0, result.output
     assert "Provider problems" in result.output
-    assert "Review is incomplete" in result.output
-    assert "Review decisions saved" in result.output
+    assert "No plan was created" in result.output
+    assert "Review remains saved" in result.output
 
 
 def test_reviewed_decision_without_plan_resumes_directly_to_offline_planning(

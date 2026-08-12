@@ -309,10 +309,22 @@ def interactive_review(
                         )
                         counts["accepted"] += len(hydrated_items)
                         output.print(f"Decisions saved: {len(hydrated_items)}.")
-                    _show_summary(output, counts, len(audit.items), repository=repository, audit=audit)
+                    _show_summary(
+                        output,
+                        counts,
+                        len(audit.items),
+                        repository=repository,
+                        audit=audit,
+                    )
                     return audit
                 if action == "Q":
-                    _show_summary(output, counts, len(audit.items), repository=repository, audit=audit)
+                    _show_summary(
+                        output,
+                        counts,
+                        len(audit.items),
+                        repository=repository,
+                        audit=audit,
+                    )
                     return audit
                 if action == "N":
                     break
