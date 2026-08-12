@@ -127,6 +127,7 @@ def patch_comicinfo(
         raise ComicInfoError(f"invalid ComicInfo XML: {exc}") from exc
     if etree.QName(root).localname != "ComicInfo":
         raise ComicInfoError("ComicInfo root element is required")
+    _normalize_legacy_issue_alias(root, set_fields=set_fields)
     for field in OWNED_FIELDS:
         nodes = _field_nodes(root, field)
         if len(nodes) > 1:
@@ -146,6 +147,48 @@ def patch_comicinfo(
         if not schema.validate(root):
             raise ComicInfoError(_validation_message(schema))
     return cast(bytes, etree.tostring(root, encoding="utf-8", xml_declaration=True))
+
+
+def _normalize_legacy_issue_alias(
+    root: etree._Element,
+    *,
+    set_fields: dict[str, Any],
+) -> None:
+    """Remove a redundant unnamespaced <Issue> alias when Number is authoritative."""
+    nodes = _field_nodes(root, "Issue")
+
+    if not nodes:
+        return
+
+    if len(nodes) > 1:
+        raise ComicInfoError(
+            "ambiguous duplicate legacy ComicInfo field: Issue"
+        )
+
+    if "Number" not in set_fields:
+        return
+
+    node = nodes[0]
+    legacy_value = (node.text or "").strip()
+    planned_value = str(set_fields["Number"]).strip()
+
+    equivalent = legacy_value == planned_value
+
+    if (
+        not equivalent
+        and legacy_value.isdigit()
+        and planned_value.isdigit()
+    ):
+        equivalent = int(legacy_value) == int(planned_value)
+
+    if legacy_value and not equivalent:
+        raise ComicInfoError(
+            "legacy ComicInfo Issue value "
+            f"{legacy_value!r} conflicts with planned Number "
+            f"{planned_value!r}"
+        )
+
+    root.remove(node)
 
 
 def _field_nodes(root: etree._Element, field: str) -> list[etree._Element]:

@@ -32,6 +32,45 @@ def test_comicinfo_patcher_preserves_unowned_standard_fields_and_schema_order() 
     assert output.index(b"<Series>") < output.index(b"<Notes>")
 
 
+def test_comicinfo_normalizes_matching_legacy_issue_alias() -> None:
+    source = b"""<ComicInfo>
+      <Series>Absolute Green Lantern</Series>
+      <Issue>004</Issue>
+    </ComicInfo>"""
+
+    output = patch_comicinfo(
+        source,
+        set_fields={
+            "Series": "Absolute Green Lantern (2025)",
+            "Number": "4",
+        },
+    )
+
+    document = read_comicinfo(output, require_schema=True)
+
+    assert document.metadata["Number"] == "4"
+    assert b"<Issue>" not in output
+
+
+def test_comicinfo_rejects_conflicting_legacy_issue_alias() -> None:
+    source = b"""<ComicInfo>
+      <Series>Absolute Green Lantern</Series>
+      <Issue>5</Issue>
+    </ComicInfo>"""
+
+    with pytest.raises(
+        ComicInfoError,
+        match="conflicts with planned Number",
+    ):
+        patch_comicinfo(
+            source,
+            set_fields={
+                "Series": "Absolute Green Lantern (2025)",
+                "Number": "4",
+            },
+        )
+
+
 def test_comicinfo_translator_is_owned_schema_ordered_and_read_back() -> None:
     output = patch_comicinfo(
         b"<ComicInfo><Publisher>Original</Publisher></ComicInfo>",
