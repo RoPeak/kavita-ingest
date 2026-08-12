@@ -75,6 +75,9 @@ def run_wizard(
             return
         if action == "resume" and resume:
             result = _resume(config, resume, output)
+        elif action == "abandon" and resume:
+            _abandon_recovery(config, resume, output)
+            continue
         else:
             root = _source_for_action(config, action)
             result = _run_new(config, root, config_path, output)
@@ -89,7 +92,8 @@ def detect_resume_state(config: AppConfig) -> ResumeState | None:
     migrate(database)
     with connect(database) as connection:
         recovery = connection.execute(
-            "SELECT plan_id, status FROM apply_runs WHERE status<>'complete' "
+            "SELECT plan_id, status FROM apply_runs "
+            "WHERE status IN ('preflighting', 'running', 'recovery_required') "
             "ORDER BY started_at DESC LIMIT 1"
         ).fetchone()
         if recovery:
@@ -148,7 +152,17 @@ def latest_invalidation_notice(config: AppConfig) -> str | None:
         ).fetchone()
     if row is None:
         return None
-    return f"A previous plan became stale ({row['reason']}). A new plan is required."
+
+    reason = str(row["reason"])
+
+    if reason.startswith("abandoned by user:"):
+        detail = reason.removeprefix("abandoned by user:").strip()
+        return (
+            f"A previous ingest was abandoned ({detail}). "
+            "A new plan is required."
+        )
+
+    return f"A previous plan became stale ({reason}). A new plan is required."
 
 
 def _home(
@@ -164,10 +178,16 @@ def _home(
             output.print(notice)
         if resume and resume.kind == "recovery":
             output.print(f"\n{resume.detail}\n")
-            output.print("[R] Recover interrupted ingest   [D] Diagnostics   [Q] Quit")
+            output.print(
+                "[R] Recover interrupted ingest   "
+                "[A] Abandon this ingest   "
+                "[D] Diagnostics   [Q] Quit"
+            )
             choice = _choice("R")
             if choice in {"", "R"}:
                 return "resume"
+            if choice == "A":
+                return "abandon"
         else:
             root = _single_valid_root(config)
             if root:
@@ -371,6 +391,55 @@ def _plan_reviewed(config: AppConfig, root: Path, output: Console) -> str | None
     _render_build_result(result, output)
     _stage(output, 4, "Plan", "complete")
     return _review_and_maybe_apply(config, plan, output)
+
+
+def _abandon_recovery(
+    config: AppConfig,
+    state: ResumeState,
+    output: Console,
+) -> None:
+    if state.plan_id is None:
+        output.print("No apply run is available to abandon.")
+        return
+
+    output.print(
+        "\nAbandoning closes this apply run and invalidates its immutable plan."
+    )
+    output.print(
+        "No source, staging, or destination files will be moved, deleted, or restored."
+    )
+    output.print(
+        "Runs with uncertain commit/cleanup state cannot be abandoned this way.\n"
+    )
+
+    if not typer.confirm(
+        f"Abandon Plan {state.plan_id} and start over?",
+        default=False,
+    ):
+        output.print("Abandonment cancelled.")
+        return
+
+    reason = str(
+        typer.prompt(
+            "Reason",
+            default="user chose to start over",
+        )
+    )
+
+    try:
+        summary = ApplyEngine(config).abandon(
+            state.plan_id,
+            reason=reason,
+        )
+    except ApplyRefused as exc:
+        output.print(f"Abandon refused: {exc}")
+        return
+
+    output.print(
+        f"Plan {summary.plan_id} closed as abandoned. "
+        "Its history has been preserved."
+    )
+    output.print("No media files were modified.")
 
 
 def _resume(config: AppConfig, state: ResumeState, output: Console) -> str | None:
@@ -659,7 +728,8 @@ def _configuration_summary(config: AppConfig) -> str:
 
 
 def _reviewed_without_plan(
-    connection: sqlite3.Connection, config: AppConfig
+    connection: sqlite3.Connection,
+    config: AppConfig,
 ) -> tuple[Path, int] | None:
     rows = connection.execute(
         "SELECT DISTINCT s.path FROM sources s JOIN decisions d ON d.source_fingerprint=s.sha256 "
@@ -670,33 +740,65 @@ def _reviewed_without_plan(
         "AND NOT EXISTS (SELECT 1 FROM plan_items_index pi JOIN apply_runs a "
         "ON a.plan_id=pi.plan_id WHERE pi.source_fingerprint=s.sha256)"
     ).fetchall()
-    paths = [Path(str(row["path"])).expanduser().resolve(strict=False) for row in rows]
-    roots = [root.expanduser().resolve(strict=False) for root in config.incoming_roots]
-    for root in roots:
-        count = sum(path.is_relative_to(root) for path in paths)
-        if count:
-            return root, count
-    if paths:
-        return paths[0].parent, len(paths)
-    return None
+    paths = [
+        Path(str(row["path"])).expanduser().resolve(strict=False)
+        for row in rows
+    ]
+    return _narrow_resume_scope(paths, config)
 
 
 def _unresolved_review(
-    connection: sqlite3.Connection, config: AppConfig
+    connection: sqlite3.Connection,
+    config: AppConfig,
 ) -> tuple[Path, int] | None:
     rows = connection.execute(
         "SELECT DISTINCT s.path FROM sources s JOIN decisions d ON d.source_fingerprint=s.sha256 "
         "WHERE d.id=(SELECT max(d2.id) FROM decisions d2 "
         "WHERE d2.source_fingerprint=d.source_fingerprint "
-        "AND d2.media_signature=d.media_signature) AND d.decision_type='unresolved'"
+        "AND d2.media_signature=d.media_signature) "
+        "AND d.decision_type='unresolved'"
     ).fetchall()
-    paths = [Path(str(row["path"])).expanduser().resolve(strict=False) for row in rows]
+    paths = [
+        Path(str(row["path"])).expanduser().resolve(strict=False)
+        for row in rows
+    ]
+    return _narrow_resume_scope(paths, config)
+
+
+def _narrow_resume_scope(
+    paths: list[Path],
+    config: AppConfig,
+) -> tuple[Path, int] | None:
+    if not paths:
+        return None
+
+    existing = [path for path in paths if path.exists()]
+    candidates = existing or paths
+
     for configured in config.incoming_roots:
         root = configured.expanduser().resolve(strict=False)
-        count = sum(path.is_relative_to(root) for path in paths)
-        if count:
-            return root, count
-    return (paths[0].parent, len(paths)) if paths else None
+        subset = [
+            path
+            for path in candidates
+            if path.is_relative_to(root)
+        ]
+        if not subset:
+            continue
+
+        common = Path(
+            os.path.commonpath(
+                [str(path.parent) for path in subset]
+            )
+        )
+        return common, len(subset)
+
+    common = Path(
+        os.path.commonpath(
+            [str(path.parent) for path in candidates]
+        )
+    )
+    return common, len(candidates)
+
 
 
 def _connection(config: AppConfig) -> sqlite3.Connection:

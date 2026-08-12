@@ -9,7 +9,7 @@ import sqlite3
 import subprocess
 import zipfile
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 from typing import Any, Protocol, cast
 
@@ -324,6 +324,72 @@ class ApplyEngine:
                 self._mark_failure(journal, run.id, recorded.item_id, exc)
         return self._finalize(journal, run.id)
 
+    def abandon(self, plan_id: int, *, reason: str) -> ApplySummary:
+        """Close a safely abandonable apply run without touching media."""
+        reason = reason.strip()
+        if not reason:
+            raise ApplyRefused("an abandonment reason is required")
+
+        with ProcessLock(lock_path(self.database_path)):
+            migrate(self.database_path)
+            connection = connect(self.database_path)
+            try:
+                journal = JournalRepository(connection)
+                plan = PlanStore(connection).get(plan_id)
+                run = journal.latest_for_plan(plan_id)
+
+                if run is None:
+                    raise ApplyRefused(f"plan {plan_id} has no apply run to abandon")
+                if run.plan_digest != plan.sha256:
+                    raise ApplyRefused(
+                        "apply run digest does not match the immutable plan"
+                    )
+                if run.status is RunState.COMPLETE:
+                    raise ApplyRefused(
+                        f"plan {plan_id} is already complete and cannot be abandoned"
+                    )
+
+                safe_states = {
+                    ItemState.PENDING,
+                    ItemState.PREFLIGHT_OK,
+                    ItemState.FAILED,
+                    ItemState.STALE,
+                    ItemState.COMPLETE,
+                }
+                unsafe = [
+                    item
+                    for item in journal.items(run.id)
+                    if item.state not in safe_states
+                ]
+                if unsafe:
+                    rendered = ", ".join(
+                        f"{item.item_id}={item.state.value}"
+                        for item in unsafe
+                    )
+                    raise ApplyRefused(
+                        "run cannot be abandoned while filesystem reconciliation "
+                        f"may still be required: {rendered}; inspect recovery details first"
+                    )
+
+                message = f"abandoned by user: {reason}"
+
+                connection.execute(
+                    "INSERT OR IGNORE INTO plan_invalidations"
+                    "(plan_id, reason, invalidated_at) "
+                    "VALUES (?, ?, datetime('now'))",
+                    (plan_id, message),
+                )
+                connection.commit()
+
+                closed = journal.set_run_state(
+                    run.id,
+                    RunState.FAILED,
+                    error=message,
+                )
+                return _summary(journal, closed)
+            finally:
+                connection.close()
+
     def status(self, plan_id: int) -> ApplySummary | None:
         migrate(self.database_path)
         with connect(self.database_path) as connection:
@@ -338,7 +404,29 @@ class ApplyEngine:
             run = journal.latest_for_plan(plan_id)
             if run is None:
                 return ()
-            return tuple(_inspect_item(item) for item in journal.items(run.id))
+
+            inspections = tuple(
+                _inspect_item(item)
+                for item in journal.items(run.id)
+            )
+
+            invalidated = connection.execute(
+                "SELECT reason FROM plan_invalidations WHERE plan_id=?",
+                (plan_id,),
+            ).fetchone()
+
+            if invalidated is not None:
+                reason = str(invalidated["reason"])
+                return tuple(
+                    replace(
+                        item,
+                        proposed_action=f"none; plan is invalidated ({reason})",
+                        manual_intervention=False,
+                    )
+                    for item in inspections
+                )
+
+            return inspections
 
     def _eligible_plan(
         self, connection: sqlite3.Connection, plan_id: int

@@ -5,7 +5,7 @@ import os
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pikepdf
 from pikepdf import Name, String
@@ -109,6 +109,19 @@ def require_pdf_write_eligible(path: Path) -> None:
         _require_writable(pdf)
 
 
+def _stream_payload(stream: Any) -> bytes:
+    try:
+        return b"decoded\0" + cast(bytes, stream.read_bytes())
+    except (pikepdf.PdfError, ValueError):
+        filters = str(stream.get("/Filter", ""))
+        return (
+            b"raw\0"
+            + filters.encode("utf-8", errors="replace")
+            + b"\0"
+            + cast(bytes, stream.read_raw_bytes())
+        )
+
+
 def _fingerprint(pdf: pikepdf.Pdf) -> PdfSemanticFingerprint:
     boxes: list[tuple[float, ...]] = []
     content: list[str] = []
@@ -117,10 +130,17 @@ def _fingerprint(pdf: pikepdf.Pdf) -> PdfSemanticFingerprint:
         boxes.append(tuple(float(value) for value in page.MediaBox))
         streams = page.get("/Contents")
         values = list(streams) if isinstance(streams, pikepdf.Array) else [streams]
-        payload = b"".join(stream.read_bytes() for stream in values if stream is not None)
+        payload = b"".join(
+            _stream_payload(stream)
+            for stream in values
+            if stream is not None
+        )
         content.append(hashlib.sha256(payload).hexdigest())
         for key, stream in page.Resources.get("/XObject", {}).items():
             resources.append(
-                (f"{page_index}:{key}", hashlib.sha256(stream.read_bytes()).hexdigest())
+                (
+                    f"{page_index}:{key}",
+                    hashlib.sha256(_stream_payload(stream)).hexdigest(),
+                )
             )
     return PdfSemanticFingerprint(len(pdf.pages), tuple(boxes), tuple(content), tuple(resources))

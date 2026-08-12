@@ -58,6 +58,7 @@ def interactive_review(
     try:
         for item in audit.items:
             current = item
+            source_evidence_hash = item.local.evidence_hash()
             advanced = not wizard_mode
             selected_rank = (
                 _displayed_scores(current)[0].rank if _displayed_scores(current) else None
@@ -140,7 +141,7 @@ def interactive_review(
                     add_manual_override(
                         repository,
                         current.scan.source,
-                        current.local.evidence_hash(),
+                        source_evidence_hash,
                         field,
                         value,
                     )
@@ -151,7 +152,7 @@ def interactive_review(
                     add_manual_identity(
                         repository,
                         current.scan.source,
-                        current.local.evidence_hash(),
+                        source_evidence_hash,
                         fields,
                     )
                     output.print("Manual canonical identity explicitly approved.")
@@ -219,7 +220,7 @@ def interactive_review(
                         current.scan.source,
                         selected,
                         reconcile(current.local, selected),
-                        current.local.evidence_hash(),
+                        source_evidence_hash,
                         work_only=work_only,
                         hydration=hydration.to_dict(),
                     )
@@ -238,7 +239,7 @@ def interactive_review(
                         current.scan.source,
                         selected,
                         reconcile(current.local, selected),
-                        current.local.evidence_hash(),
+                        source_evidence_hash,
                         work_only=True,
                         hydration=hydration.to_dict(),
                     )
@@ -251,7 +252,7 @@ def interactive_review(
                     repository.add(
                         current.scan.source,
                         DecisionType.REJECTED,
-                        current.local.evidence_hash(),
+                        source_evidence_hash,
                         candidate_key=selected.candidate.key,
                         candidate_data_hash=selected.candidate.data_hash(),
                         payload={"explicit": True},
@@ -265,7 +266,7 @@ def interactive_review(
                     repository.add(
                         current.scan.source,
                         DecisionType.UNRESOLVED if action == "U" else DecisionType.SKIPPED,
-                        current.local.evidence_hash(),
+                        source_evidence_hash,
                         payload={"explicit": True},
                     )
                     output.print("Decision saved.")
@@ -443,7 +444,17 @@ def _show_item(
         )
     else:
         console.print(f"Local title: {item.local.title}")
-        table = Table("", "Rank", "Candidate", "Type", "Score", "Margin", "Eligible")
+        table = Table(
+            "",
+            "Rank",
+            "Candidate",
+            "Author",
+            "Publication",
+            "Type",
+            "Score",
+            "Margin",
+            "Eligible",
+        )
     displayed = _displayed_scores(item)
     for score in displayed:
         marker = ">" if score.rank == selected_rank else ""
@@ -467,6 +478,8 @@ def _show_item(
             marker,
             str(score.rank),
             score.candidate.title,
+            _candidate_authors(score.candidate),
+            _candidate_book_publication(score.candidate),
             score.candidate.record_type.value,
             f"{score.score:.1f}",
             f"{score.runner_up_margin:.1f}",
@@ -481,6 +494,22 @@ def _show_item(
         )
     if item.generation.unavailable:
         console.print("Unavailable: " + "; ".join(item.generation.unavailable))
+
+
+def _candidate_authors(candidate: NormalizedCandidate) -> str:
+    names = [
+        item.name
+        for item in candidate.creators
+        if item.role == "author"
+    ]
+    return ", ".join(dict.fromkeys(names)) or "-"
+
+
+def _candidate_book_publication(candidate: NormalizedCandidate) -> str:
+    return (
+        f"{candidate.publication_date or '-'}\n"
+        f"{candidate.publisher or '-'}"
+    )
 
 
 def _candidate_writers(candidate: NormalizedCandidate) -> str:

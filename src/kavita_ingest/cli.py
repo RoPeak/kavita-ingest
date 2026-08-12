@@ -30,8 +30,39 @@ from .run_groups import RunGroupRepository
 from .scanner import scan as run_scan
 from .wizard import detect_resume_state, run_wizard
 
+ROOT_EPILOG = """Common commands:
+
+  kavita-ingest
+      Start or resume the guided workflow.
+
+  kavita-ingest doctor
+      Check configuration, tools, providers, paths, and recovery state.
+
+  kavita-ingest status --details
+      Show current workflow and plan state.
+
+  kavita-ingest audit ROOT --details --metrics
+      Inspect provider matching without accepting or modifying media.
+
+  kavita-ingest apply-status PLAN_ID --details
+      Show per-item apply/recovery evidence and failure details.
+
+  kavita-ingest recover PLAN_ID
+      Retry only safely recoverable actions from an interrupted apply.
+
+  kavita-ingest plan list
+      List immutable plans and their status.
+
+Use `kavita-ingest COMMAND --help` for command-specific arguments and options.
+"""
+
+
 app = typer.Typer(
-    help="Inspect, plan, and safely execute explicitly approved reading-media ingestion."
+    help=(
+        "Inspect, identify, review, plan, and safely publish ebooks and comics "
+        "into Kavita-friendly libraries."
+    ),
+    epilog=ROOT_EPILOG,
 )
 plan_app = typer.Typer(help="Create and approve immutable offline execution plans.")
 run_group_app = typer.Typer(help="Inspect and manage explicit comic run-group choices.")
@@ -192,7 +223,7 @@ def audit_command(
     ] = False,
     as_json: Annotated[bool, typer.Option("--json", help="Emit versioned JSON.")] = False,
 ) -> None:
-    """Match sources without accepting identities or modifying media."""
+    """Match sources without modifying media; use --details/--metrics for diagnostics."""
     settings = load_config(config)
     configure_logging(
         settings.log_level,
@@ -276,7 +307,7 @@ def status(
         bool, typer.Option("--details", help="Show additional plan-state detail.")
     ] = False,
 ) -> None:
-    """Show persisted matching and decision counts without network access."""
+    """Show persisted workflow state; use --details or --metrics for more information."""
     settings = load_config(config)
     if settings.database_path is None or not settings.database_path.exists():
         if as_json:
@@ -413,6 +444,47 @@ def recover_command(
         raise typer.Exit(2) from exc
 
 
+@app.command("abandon")
+def abandon_command(
+    plan_id: int,
+    reason: Annotated[
+        str,
+        typer.Option(
+            "--reason",
+            help="Audit reason for closing this apply run and invalidating its plan.",
+        ),
+    ] = "user chose to start over",
+    yes: Annotated[
+        bool,
+        typer.Option(
+            "--yes",
+            help="Confirm abandonment without an interactive prompt.",
+        ),
+    ] = False,
+    config: Annotated[Path | None, typer.Option("--config")] = None,
+) -> None:
+    """Close a safely abandonable apply run without modifying any media files."""
+    if not yes and not typer.confirm(
+        f"Abandon Plan {plan_id}? Its immutable plan will be invalidated.",
+        default=False,
+    ):
+        typer.echo("Abandonment cancelled.")
+        return
+
+    try:
+        summary = _apply_engine(config).abandon(
+            plan_id,
+            reason=reason,
+        )
+    except (ApplyRefused, LockUnavailable) as exc:
+        typer.echo(f"ABANDON REFUSED: {exc}", err=True)
+        raise typer.Exit(2) from exc
+
+    typer.echo(f"Abandoned Plan {summary.plan_id}.")
+    typer.echo(f"Apply run: {summary.run_id}")
+    typer.echo("Journal history preserved; no media files were modified.")
+
+
 @app.command("apply-status")
 def apply_status_command(
     plan_id: int,
@@ -422,7 +494,7 @@ def apply_status_command(
         bool, typer.Option("--details", help="Show per-item recovery evidence.")
     ] = False,
 ) -> None:
-    """Show durable apply/recovery state without touching media or providers."""
+    """Show apply/recovery state; use --details for per-item evidence and errors."""
     try:
         summary = _apply_engine(config).status(plan_id)
         inspections = _apply_engine(config).inspect_recovery(plan_id) if summary else ()
@@ -447,7 +519,11 @@ def apply_status_command(
     if summary is None:
         typer.echo(f"Plan {plan_id} has no apply run.")
     else:
-        typer.echo(f"Plan: {summary.plan_id}\nApply run: {summary.run_id}\n")
+        typer.echo(
+            f"Plan: {summary.plan_id}\n"
+            f"Apply run: {summary.run_id}\n"
+            f"Status: {summary.status.value}\n"
+        )
         for label, count in _friendly_counts(summary.counts).items():
             typer.echo(f"{label:22} {count}")
         if not details:

@@ -430,7 +430,7 @@ def _score(local: LocalIdentity, candidate: NormalizedCandidate) -> CandidateSco
         if not exact and local.kind is MediaKind.COMIC:
             contradictions.append(reason)
 
-    candidate_year = _candidate_year(candidate)
+    candidate_year = _candidate_year(candidate, local)
     if local.year and candidate_year:
         difference = abs(local.year - candidate_year)
         if difference == 0:
@@ -584,7 +584,26 @@ def _normalize(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", value.casefold()).strip()
 
 
-def _candidate_year(candidate: NormalizedCandidate) -> int | None:
+def _candidate_year(
+    candidate: NormalizedCandidate,
+    local: LocalIdentity | None = None,
+) -> int | None:
+    if (
+        candidate.media_kind is MediaKind.BOOK
+        and local is not None
+        and local.year is not None
+    ):
+        title_year = re.search(
+            r"\b((?:19|20)\d{2})\s*$",
+            candidate.title,
+        )
+        if title_year:
+            title_without_year = candidate.title[: title_year.start()].rstrip(
+                " -_:"
+            )
+            if _similarity(local.title, title_without_year) >= 0.82:
+                return int(title_year.group(1))
+
     value = (
         candidate.cover_date
         if candidate.media_kind is MediaKind.COMIC

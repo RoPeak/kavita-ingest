@@ -102,6 +102,17 @@ def test_exact_detail_unions_contributors_and_identifiers_without_duplicates() -
     assert result.candidate.identifiers[-1] == Identifier("legacy", "issue-14")
 
 
+def test_exact_publisher_change_is_metadata_not_identity_conflict() -> None:
+    discovery = _candidate(publisher="Independently Published")
+    exact = _candidate(publisher="Amazon Digital Services LLC KDP")
+
+    result = merge_exact_candidate(discovery, exact)
+
+    assert result.status == "hydrated"
+    assert result.candidate.publisher == "Amazon Digital Services LLC KDP"
+    assert "publisher" in result.changes
+
+
 def test_material_exact_identity_conflict_never_overwrites_selection() -> None:
     discovery = _candidate()
     exact = _candidate(sequence=SequenceNumber.parse("15"), title="Different Issue")

@@ -96,7 +96,25 @@ class PlanBuilder:
                     PlanningExclusion(str(source.path), "rejected", "latest candidate was rejected")
                 )
                 continue
-            current = inspect_source(source.path)
+            try:
+                current = inspect_source(source.path)
+            except OSError as exc:
+                missing = not source.path.exists()
+                if not missing:
+                    blocked += 1
+                exclusions.append(
+                    PlanningExclusion(
+                        str(source.path),
+                        "historical_missing" if missing else "unreadable_source",
+                        (
+                            "historical reviewed source no longer exists; "
+                            "ignored for this plan"
+                            if missing
+                            else f"reviewed source could not be inspected: {exc}"
+                        ),
+                    )
+                )
+                continue
             if (
                 current.sha256 != source.sha256
                 or current.size != source.size

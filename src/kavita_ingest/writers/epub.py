@@ -63,6 +63,7 @@ def write_epub(
                 capture_output=True,
                 text=True,
             )
+            _retain_only_opf_changes(source, staged)
         if exact_date is not None or contributor_roles or native_fields:
             _patch_opf(
                 staged,
@@ -154,6 +155,48 @@ def _ebook_meta_command(executable: str, epub: Path, fields: Mapping[str, object
         for key, value in identifiers.items():
             command.extend(["--identifier", f"{key}:{value}"])
     return command
+
+
+def _retain_only_opf_changes(source: Path, candidate: Path) -> None:
+    """Keep an external editor's OPF changes but restore every publication resource."""
+    _, source_opf = _read_opf(source)
+    _, candidate_opf = _read_opf(candidate)
+
+    if candidate_opf != source_opf:
+        raise ValueError(
+            "external EPUB metadata editor changed the OPF package location"
+        )
+
+    with zipfile.ZipFile(source) as original:
+        infos = original.infolist()
+        payloads = {
+            info.filename: original.read(info.filename)
+            for info in infos
+        }
+
+    with zipfile.ZipFile(candidate) as changed:
+        candidate_opf_payload = changed.read(candidate_opf)
+
+    payloads[source_opf] = candidate_opf_payload
+
+    fd, name = tempfile.mkstemp(
+        prefix=f".{candidate.name}.",
+        suffix=".opf-only.tmp",
+        dir=candidate.parent,
+    )
+    os.close(fd)
+    temporary = Path(name)
+
+    try:
+        with zipfile.ZipFile(temporary, "w") as target:
+            for info in infos:
+                target.writestr(
+                    info,
+                    payloads[info.filename],
+                )
+        os.replace(temporary, candidate)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def _read_opf(epub: Path) -> tuple[etree._Element, str]:
@@ -265,7 +308,74 @@ def _patch_native_work_fields(metadata: etree._Element, fields: Mapping[str, obj
     authors = fields["authors"]
     if not isinstance(authors, Sequence) or isinstance(authors, str):
         raise ValueError("native authors must be a sequence")
-    _patch_roles(metadata, {"aut": tuple(str(author) for author in authors)})
+    _replace_work_authors(
+        metadata,
+        tuple(str(author) for author in authors),
+    )
+
+
+def _creator_role(
+    metadata: etree._Element,
+    creator: etree._Element,
+) -> str:
+    resolved = creator.get(f"{{{NS['opf']}}}role")
+    creator_id = creator.get("id")
+
+    if not resolved and creator_id:
+        resolved = str(
+            metadata.xpath(
+                "string(opf:meta[@refines=$ref and @property='role'][1])",
+                namespaces=NS,
+                ref=f"#{creator_id}",
+            )
+        )
+
+    return str(resolved or "aut")
+
+
+def _replace_work_authors(
+    metadata: etree._Element,
+    authors: Sequence[str],
+) -> None:
+    existing = [
+        creator
+        for creator in metadata.findall("dc:creator", NS)
+        if _creator_role(metadata, creator) == "aut"
+    ]
+
+    if len(existing) > len(authors):
+        raise ValueError(
+            "work-only author replacement would remove existing author "
+            "metadata; manual review is required"
+        )
+
+    creators = {
+        node.get("id"): node
+        for node in metadata.findall("dc:creator", NS)
+        if node.get("id")
+    }
+
+    for position, name in enumerate(authors, 1):
+        if position <= len(existing):
+            existing[position - 1].text = name
+            continue
+
+        creator_id = _new_id(creators, "aut", position)
+        creator = etree.Element(
+            f"{{{NS['dc']}}}creator",
+            id=creator_id,
+        )
+        creator.text = name
+        role_node = etree.Element(
+            f"{{{NS['opf']}}}meta",
+            refines=f"#{creator_id}",
+            property="role",
+            scheme="marc:relators",
+        )
+        role_node.text = "aut"
+
+        metadata.extend((creator, role_node))
+        creators[creator_id] = creator
 
 
 def _verify_fields(

@@ -395,13 +395,16 @@ def _apply_database_checks(path: Path | None) -> list[Check]:
                 "('preflighting', 'running', 'recovery_required')"
             ).fetchone()[0]
             attention = connection.execute(
-                "SELECT count(*) FROM apply_items WHERE state NOT IN ('complete', 'stale')"
+                "SELECT count(*) FROM apply_items i "
+                "JOIN apply_runs r ON r.id=i.run_id "
+                "WHERE r.status IN ('preflighting', 'running', 'recovery_required') "
+                "AND i.state NOT IN ('complete', 'stale')"
             ).fetchone()[0]
         return [
             Check(
                 "application",
                 "apply-state",
-                "BLOCKED" if attention else "OK",
+                "BLOCKED" if active else "OK",
                 f"{active} active/recoverable run(s); {attention} item(s) require attention",
             )
         ]

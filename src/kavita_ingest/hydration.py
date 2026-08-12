@@ -135,7 +135,6 @@ def _identity_conflicts(
         ("item type", selected.item_type, exact.item_type),
         ("release date", selected.release_date, exact.release_date),
         ("cover date", selected.cover_date, exact.cover_date),
-        ("publisher", _normalized(selected.publisher), _normalized(exact.publisher)),
     ):
         if left is not None and right is not None and left != right:
             conflicts.append(f"{label} differs: discovery={left!s}; exact={right!s}")

@@ -93,10 +93,6 @@ def test_init_is_secret_free_and_refuses_overwrite(tmp_path: Path) -> None:
         ),
         ('[archive]\nmax_entries=0\n', "archive limits must be positive"),
         ('[matching]\neligible_score=101\n', "eligible_score must be between"),
-        (
-            '[providers.comic_vine]\nenabled=true\n',
-            "explicitly enabled but COMIC_VINE_API_KEY",
-        ),
     ],
 )
 def test_configuration_errors_are_actionable(
@@ -109,6 +105,23 @@ def test_configuration_errors_are_actionable(
         load_config(config)
 
 
+def test_comic_vine_enabled_without_key_can_load_for_local_commands(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("COMIC_VINE_API_KEY", raising=False)
+    config = tmp_path / "config.toml"
+    config.write_text(
+        "[providers.comic_vine]\nenabled=true\n",
+        encoding="utf-8",
+    )
+
+    loaded = load_config(config)
+
+    assert loaded.providers.comic_vine_enabled is True
+    assert loaded.providers.comic_vine_api_key is None
+
+
 def test_version_help_bare_non_tty_help_and_versioned_json(tmp_path: Path) -> None:
     runner = CliRunner()
     version = runner.invoke(app, ["--version"])
@@ -116,6 +129,14 @@ def test_version_help_bare_non_tty_help_and_versioned_json(tmp_path: Path) -> No
     help_result = runner.invoke(app, ["--help"])
     assert help_result.exit_code == 0
     assert "apply" in help_result.output and "recover" in help_result.output
+    assert "Common commands:" in help_result.output
+    assert "apply-status PLAN_ID --details" in help_result.output
+    assert "COMMAND --help" in help_result.output
+
+    apply_status_help = runner.invoke(app, ["apply-status", "--help"])
+    assert apply_status_help.exit_code == 0
+    assert "--details" in apply_status_help.output
+    assert "--json" in apply_status_help.output
     bare = runner.invoke(app, [])
     assert bare.exit_code == 0
     assert "Usage:" in bare.output and "wizard" in bare.output

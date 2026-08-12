@@ -291,6 +291,45 @@ def _repository(tmp_path: Path) -> tuple[DecisionRepository, object]:
     return DecisionRepository(connection), connection
 
 
+def test_book_title_suffix_year_disambiguates_edition_label() -> None:
+    local = LocalIdentity(
+        MediaKind.BOOK,
+        "standalone-book",
+        0.92,
+        "The Official Raspberry Pi Handbook",
+        year=2023,
+    )
+
+    candidates = [
+        NormalizedCandidate(
+            ProviderName.GOOGLE_BOOKS,
+            "handbook-2024",
+            RecordType.BOOK_EDITION,
+            MediaKind.BOOK,
+            "The Official Raspberry Pi Handbook 2024",
+            publication_date="2024-05-07",
+        ),
+        NormalizedCandidate(
+            ProviderName.GOOGLE_BOOKS,
+            "handbook-2023",
+            RecordType.BOOK_EDITION,
+            MediaKind.BOOK,
+            "The Official Raspberry Pi Handbook 2023",
+            publication_date="2024-05-07",
+        ),
+    ]
+
+    scores = score_candidates(local, candidates, MatchingSettings())
+
+    assert scores[0].candidate.provider_id == "handbook-2023"
+    year = next(
+        comparison
+        for comparison in scores[0].comparisons
+        if comparison.field == "year"
+    )
+    assert year.kind.value == "exact"
+
+
 def test_query_strategy_uses_identifier_before_structured_search() -> None:
     provider = FakeProvider(ProviderName.GOOGLE_BOOKS, [_edition()])
     local = LocalIdentity(

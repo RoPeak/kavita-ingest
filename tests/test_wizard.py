@@ -9,6 +9,7 @@ import pytest
 from rich.console import Console
 from typer.testing import CliRunner
 
+from compatibility.helpers.pdf_factory import create_pdf
 from kavita_ingest.apply_engine import ApplyEngine, InjectedCrash
 from kavita_ingest.cli import app
 from kavita_ingest.completed_sources import assess_completed_sources
@@ -488,6 +489,70 @@ def test_explicit_reprocess_selection_returns_to_review_and_requires_new_decisio
             payload={"explicit": True},
         )
     assert _incomplete_review_items(settings, audit, required_newer_than=baseline) == ()
+
+
+def test_plan_builder_excludes_missing_historical_source_after_rename(
+    tmp_path: Path,
+) -> None:
+    incoming = tmp_path / "incoming"
+    books = tmp_path / "books"
+    comics = tmp_path / "comics"
+
+    for directory in (incoming, books, comics):
+        directory.mkdir()
+
+    old_path = create_pdf(incoming / "Old Book Name.pdf")
+
+    database = tmp_path / "state.sqlite3"
+    settings = AppConfig(
+        incoming_roots=(incoming,),
+        books_root=books,
+        comics_root=comics,
+        database_path=database,
+        source_lifecycle="preserve",
+    )
+    migrate(database)
+
+    old_scan = scan(incoming, settings, persist=True)[0]
+
+    with connect(database) as connection:
+        add_manual_identity(
+            DecisionRepository(connection),
+            old_scan.source,
+            "old-source-evidence",
+            {
+                "title": "Fixture Book",
+                "authors": "Fixture Author",
+            },
+        )
+
+    new_path = incoming / "New Book Name.pdf"
+    old_path.rename(new_path)
+
+    new_scan = scan(incoming, settings, persist=True)[0]
+
+    with connect(database) as connection:
+        add_manual_identity(
+            DecisionRepository(connection),
+            new_scan.source,
+            "new-source-evidence",
+            {
+                "title": "Fixture Book",
+                "authors": "Fixture Author",
+            },
+        )
+
+        result = PlanBuilder(connection, settings).build(incoming)
+
+    assert len(result.document.items) == 1
+    assert result.document.items[0].source.path == str(new_path.resolve())
+
+    assert any(
+        exclusion.path == str(old_path.resolve(strict=False))
+        and exclusion.category == "historical_missing"
+        for exclusion in result.exclusions
+    )
+    assert result.unresolved_blocked == 0
 
 
 def test_reprocess_plan_preserves_destination_no_clobber_conflict(tmp_path: Path) -> None:
