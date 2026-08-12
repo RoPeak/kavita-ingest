@@ -127,6 +127,7 @@ def patch_comicinfo(
         raise ComicInfoError(f"invalid ComicInfo XML: {exc}") from exc
     if etree.QName(root).localname != "ComicInfo":
         raise ComicInfoError("ComicInfo root element is required")
+    _canonicalize_legacy_known_field_case(root)
     _normalize_legacy_issue_alias(root, set_fields=set_fields)
     for field in OWNED_FIELDS:
         nodes = _field_nodes(root, field)
@@ -149,13 +150,45 @@ def patch_comicinfo(
     return cast(bytes, etree.tostring(root, encoding="utf-8", xml_declaration=True))
 
 
+def _canonicalize_legacy_known_field_case(
+    root: etree._Element,
+) -> None:
+    """Canonicalize casing of unnamespaced fields known to ComicInfo 2.1."""
+    canonical_by_casefold = {
+        field.casefold(): field
+        for field in SCHEMA_ORDER
+    }
+
+    for node in root:
+        name = _schema_name(node)
+
+        if name is None:
+            # Namespaced extensions remain completely untouched.
+            continue
+
+        canonical = canonical_by_casefold.get(name.casefold())
+
+        if canonical is None or canonical == name:
+            continue
+
+        # Changing the tag name preserves text, children and attributes.
+        node.tag = canonical
+
+
 def _normalize_legacy_issue_alias(
     root: etree._Element,
     *,
     set_fields: dict[str, Any],
 ) -> None:
     """Remove a redundant unnamespaced <Issue> alias when Number is authoritative."""
-    nodes = _field_nodes(root, "Issue")
+    nodes = [
+        node
+        for node in root
+        if (
+            (name := _schema_name(node)) is not None
+            and name.casefold() == "issue"
+        )
+    ]
 
     if not nodes:
         return

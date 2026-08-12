@@ -71,6 +71,66 @@ def test_comicinfo_rejects_conflicting_legacy_issue_alias() -> None:
         )
 
 
+def test_comicinfo_normalizes_legacy_known_field_case() -> None:
+    source = b"""<ComicInfo>
+      <writer>Legacy Writer</writer>
+      <pagecount>2</pagecount>
+    </ComicInfo>"""
+
+    output = patch_comicinfo(
+        source,
+        set_fields={
+            "Series": "Absolute Green Lantern (2025)",
+            "Number": "4",
+            "Writer": "Al Ewing",
+        },
+    )
+
+    document = read_comicinfo(output, require_schema=True)
+
+    assert document.metadata["Writer"] == "Al Ewing"
+    assert b"<writer>" not in output
+    assert b"<Writer>Al Ewing</Writer>" in output
+    assert b"<pagecount>" not in output
+    assert b"<PageCount>2</PageCount>" in output
+
+
+def test_comicinfo_case_normalization_exposes_duplicate_known_fields() -> None:
+    source = b"""<ComicInfo>
+      <Writer>Writer One</Writer>
+      <writer>Writer Two</writer>
+    </ComicInfo>"""
+
+    with pytest.raises(
+        ComicInfoError,
+        match="duplicate ComicInfo field: Writer",
+    ):
+        patch_comicinfo(
+            source,
+            set_fields={"Writer": "Al Ewing"},
+        )
+
+
+def test_comicinfo_lowercase_legacy_issue_alias_is_supported() -> None:
+    source = b"""<ComicInfo>
+      <Series>Absolute Green Lantern</Series>
+      <issue>004</issue>
+    </ComicInfo>"""
+
+    output = patch_comicinfo(
+        source,
+        set_fields={
+            "Series": "Absolute Green Lantern (2025)",
+            "Number": "4",
+        },
+    )
+
+    document = read_comicinfo(output, require_schema=True)
+
+    assert document.metadata["Number"] == "4"
+    assert b"<issue>" not in output
+
+
 def test_comicinfo_translator_is_owned_schema_ordered_and_read_back() -> None:
     output = patch_comicinfo(
         b"<ComicInfo><Publisher>Original</Publisher></ComicInfo>",
