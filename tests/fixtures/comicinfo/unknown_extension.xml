@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ComicInfo xmlns:vendor="https://example.invalid/comicinfo-extension">
+  <Series>Absolute Batman</Series>
+  <Number>018</Number>
+  <vendor:ReadingOrder source="vendor">7</vendor:ReadingOrder>
+</ComicInfo>

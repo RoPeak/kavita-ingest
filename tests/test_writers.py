@@ -42,6 +42,94 @@ def test_comicinfo_translator_is_owned_schema_ordered_and_read_back() -> None:
     assert output.index(b"<Writer>") < output.index(b"<Translator>") < output.index(b"<Publisher>")
 
 
+def test_comicinfo_reorders_existing_known_nodes_without_losing_pages() -> None:
+    source = Path("tests/fixtures/comicinfo/out_of_order.xml").read_bytes()
+
+    output = patch_comicinfo(
+        source,
+        set_fields={"Series": "Absolute Batman (2024)", "CoverArtist": "Peter Smith"},
+    )
+
+    document = read_comicinfo(output, require_schema=True)
+    assert document.metadata["Series"] == "Absolute Batman (2024)"
+    assert output.index(b"<Title>") < output.index(b"<Summary>") < output.index(b"<Notes>")
+    assert output.index(b"<Notes>") < output.index(b"<PageCount>") < output.index(b"<Pages>")
+    assert b'Bookmark="preserve-me"' in output
+    assert output.count(b"<Page ") == 2
+
+
+@pytest.mark.parametrize(
+    ("fixture", "reason"),
+    [
+        ("unknown_extension.xml", "ReadingOrder"),
+        ("unknown_attribute.xml", "attribute 'vendor' is not allowed"),
+        ("invalid_known_value.xml", "PageCount"),
+    ],
+)
+def test_comicinfo_incompatibility_reports_exact_xsd_reason(
+    fixture: str, reason: str
+) -> None:
+    source = Path("tests/fixtures/comicinfo") / fixture
+
+    with pytest.raises(ComicInfoError) as captured:
+        patch_comicinfo(source.read_bytes(), set_fields={"Series": "Absolute Batman (2024)"})
+
+    message = str(captured.value)
+    assert "schema validation failed" in message
+    assert "failed: None" not in message
+    assert reason in message
+    assert "line " in message and "SCHEMASV/" in message
+
+
+@pytest.mark.parametrize(
+    ("fixture", "preserved"),
+    [
+        ("unknown_extension.xml", b"vendor:ReadingOrder"),
+        ("unknown_attribute.xml", b'vendor="legacy-tool"'),
+        ("invalid_known_value.xml", b"<PageCount>many</PageCount>"),
+    ],
+)
+def test_non_strict_patch_preserves_incompatible_unowned_metadata(
+    fixture: str, preserved: bytes
+) -> None:
+    source = (Path("tests/fixtures/comicinfo") / fixture).read_bytes()
+
+    output = patch_comicinfo(
+        source,
+        set_fields={"Series": "Absolute Batman (2024)"},
+        require_schema=False,
+    )
+
+    assert preserved in output
+    assert read_comicinfo(output).schema_valid is False
+
+
+def test_comicinfo_reader_uses_same_schema_for_diagnostics() -> None:
+    source = Path("tests/fixtures/comicinfo/invalid_known_value.xml").read_bytes()
+
+    with pytest.raises(ComicInfoError) as captured:
+        read_comicinfo(source, require_schema=True)
+
+    assert "failed: None" not in str(captured.value)
+    assert "Manga" in str(captured.value) or "PageCount" in str(captured.value)
+
+
+def test_comicinfo_legacy_root_has_specific_diagnostic() -> None:
+    source = Path("tests/fixtures/comicinfo/legacy_structure.xml").read_bytes()
+
+    with pytest.raises(ComicInfoError, match="ComicInfo root element is required"):
+        patch_comicinfo(source, set_fields={"Series": "Absolute Batman (2024)"})
+
+
+def test_namespaced_extension_matching_owned_local_name_is_not_overwritten() -> None:
+    source = b"""<ComicInfo xmlns:vendor='https://example.invalid/vendor'>
+      <vendor:Series vendor:source='legacy'>Extension series</vendor:Series>
+    </ComicInfo>"""
+
+    with pytest.raises(ComicInfoError, match="vendor:Series|Series"):
+        patch_comicinfo(source, set_fields={"Series": "Owned series"})
+
+
 def test_comicinfo_rejects_duplicate_owned_fields() -> None:
     with pytest.raises(ComicInfoError, match="duplicate"):
         patch_comicinfo(
@@ -69,6 +157,51 @@ def test_cbz_writer_preserves_page_bytes_and_reads_back_metadata(tmp_path: Path)
             read_comicinfo(archive.read("ComicInfo.xml"), require_schema=True).metadata["Number"]
             == "1"
         )
+
+
+def test_cbz_writer_verifies_trimmed_cover_artist_round_trip(tmp_path: Path) -> None:
+    source = tmp_path / "source.cbz"
+    destination = tmp_path / "out.cbz"
+    with zipfile.ZipFile(source, "w") as archive:
+        archive.writestr("001.jpg", b"page-one")
+
+    result = write_cbz_metadata(
+        source,
+        destination,
+        set_fields={
+            "Series": "Absolute Batman (2024)",
+            "Number": "005",
+            "CoverArtist": "Peter Smith",
+        },
+    )
+
+    assert result.valid
+    with zipfile.ZipFile(destination) as archive:
+        metadata = read_comicinfo(archive.read("ComicInfo.xml"), require_schema=True).metadata
+    assert metadata["CoverArtist"] == "Peter Smith"
+
+
+@pytest.mark.parametrize("fixture", ["unknown_extension.xml", "invalid_known_value.xml"])
+def test_incompatible_existing_comicinfo_keeps_source_and_publishes_nothing(
+    fixture: str, tmp_path: Path
+) -> None:
+    source = tmp_path / "source.cbz"
+    destination = tmp_path / "out.cbz"
+    comicinfo = (Path("tests/fixtures/comicinfo") / fixture).read_bytes()
+    with zipfile.ZipFile(source, "w") as archive:
+        archive.writestr("001.jpg", b"page-one")
+        archive.writestr("ComicInfo.xml", comicinfo)
+    before = source.read_bytes()
+
+    with pytest.raises(ComicInfoError, match="schema validation failed"):
+        write_cbz_metadata(
+            source,
+            destination,
+            set_fields={"Series": "Absolute Batman (2024)", "Number": "017"},
+        )
+
+    assert source.read_bytes() == before
+    assert not destination.exists()
 
 
 @pytest.mark.parametrize(

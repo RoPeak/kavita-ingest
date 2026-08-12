@@ -97,15 +97,15 @@ def read_comicinfo(data: bytes, *, require_schema: bool = False) -> ComicInfoDoc
         raise ComicInfoError("ComicInfo root element is required")
     metadata: dict[str, Any] = {}
     for field in OWNED_FIELDS:
-        nodes = root.xpath(f"./*[local-name()='{field}']")
+        nodes = _field_nodes(root, field)
         if len(nodes) > 1:
             raise ComicInfoError(f"ambiguous duplicate ComicInfo field: {field}")
         if nodes and nodes[0].text is not None:
             metadata[field] = nodes[0].text.strip()
-    valid = _schema().validate(root)
+    schema = _schema()
+    valid = schema.validate(root)
     if require_schema and not valid:
-        error = _schema().error_log.last_error
-        raise ComicInfoError(f"ComicInfo 2.1 schema validation failed: {error}")
+        raise ComicInfoError(_validation_message(schema))
     return ComicInfoDocument(metadata, valid)
 
 
@@ -128,29 +128,69 @@ def patch_comicinfo(
     if etree.QName(root).localname != "ComicInfo":
         raise ComicInfoError("ComicInfo root element is required")
     for field in OWNED_FIELDS:
-        nodes = root.xpath(f"./*[local-name()='{field}']")
+        nodes = _field_nodes(root, field)
         if len(nodes) > 1:
             raise ComicInfoError(f"ambiguous duplicate ComicInfo field: {field}")
     for field in clear_fields:
-        for node in root.xpath(f"./*[local-name()='{field}']"):
+        for node in _field_nodes(root, field):
             root.remove(node)
-    positions = {name: index for index, name in enumerate(SCHEMA_ORDER)}
     for field, value in set_fields.items():
-        nodes = root.xpath(f"./*[local-name()='{field}']")
+        nodes = _field_nodes(root, field)
         node = nodes[0] if nodes else etree.Element(field)
         node.text = str(value)
         if not nodes:
-            insertion = len(root)
-            for index, sibling in enumerate(root):
-                sibling_position = positions.get(etree.QName(sibling).localname)
-                if sibling_position is not None and sibling_position > positions[field]:
-                    insertion = index
-                    break
-            root.insert(insertion, node)
-    if require_schema and not _schema().validate(root):
-        error = _schema().error_log.last_error
-        raise ComicInfoError(f"ComicInfo 2.1 schema validation failed: {error}")
+            root.append(node)
+    _order_known_elements(root)
+    if require_schema:
+        schema = _schema()
+        if not schema.validate(root):
+            raise ComicInfoError(_validation_message(schema))
     return cast(bytes, etree.tostring(root, encoding="utf-8", xml_declaration=True))
+
+
+def _field_nodes(root: etree._Element, field: str) -> list[etree._Element]:
+    return [child for child in root if _schema_name(child) == field]
+
+
+def _schema_name(node: etree._Element) -> str | None:
+    if not isinstance(node.tag, str):
+        return None
+    name = etree.QName(node)
+    return name.localname if name.namespace in {None, ""} else None
+
+
+def _order_known_elements(root: etree._Element) -> None:
+    positions = {name: index for index, name in enumerate(SCHEMA_ORDER)}
+    children = list(root)
+    ordered = sorted(
+        enumerate(children),
+        key=lambda item: (
+            0,
+            positions[cast(str, _schema_name(item[1]))],
+            item[0],
+        )
+        if _schema_name(item[1]) in positions
+        else (1, item[0], item[0]),
+    )
+    for child in children:
+        root.remove(child)
+    for _, child in ordered:
+        root.append(child)
+
+
+def _validation_message(schema: etree.XMLSchema) -> str:
+    errors = list(schema.error_log)
+    if not errors:
+        return "ComicInfo 2.1 schema validation failed without validator diagnostics"
+    details = []
+    for error in errors:
+        location = f"line {error.line}" if error.line else "line unavailable"
+        classification = "/".join(
+            value for value in (error.domain_name, error.type_name) if value
+        )
+        suffix = f", {classification}" if classification else ""
+        details.append(f"{error.message} ({location}{suffix})")
+    return "ComicInfo 2.1 schema validation failed: " + "; ".join(details)
 
 
 def _schema() -> etree.XMLSchema:

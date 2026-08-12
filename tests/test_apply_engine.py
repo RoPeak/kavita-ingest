@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import copy
+import json
 import os
+import shutil
 import sqlite3
 from dataclasses import replace
 from pathlib import Path
@@ -19,9 +22,11 @@ from kavita_ingest.apply_engine import (
     WriterDispatcher,
 )
 from kavita_ingest.apply_journal import JournalRepository, RunState
+from kavita_ingest.comicinfo import ComicInfoError
 from kavita_ingest.db import connect
 from kavita_ingest.filesystem import LinuxFilesystem, sha256_file
 from kavita_ingest.locking import LockUnavailable, ProcessLock, lock_path
+from kavita_ingest.plan_store import PlanStore
 from kavita_ingest.rollback import preview_rollback
 from kavita_ingest.writers.common import VerificationResult
 from tests.apply_helpers import make_apply_fixture
@@ -152,6 +157,27 @@ class FailingVerifier(WriterDispatcher):
         return VerificationResult(False, ("synthetic",), ("synthetic verification failure",))
 
 
+class SelectiveMetadataFailureWriter(WriterDispatcher):
+    def __init__(self, failures: set[str]) -> None:
+        self.failures = failures
+        self.staged: list[str] = []
+
+    def stage(self, item, destination):  # type: ignore[no-untyped-def]
+        self.staged.append(item.item_id)
+        if item.item_id in self.failures:
+            raise ComicInfoError("synthetic deterministic ComicInfo incompatibility")
+        return super().stage(item, destination)
+
+
+class RecordingWriter(WriterDispatcher):
+    def __init__(self) -> None:
+        self.staged: list[str] = []
+
+    def stage(self, item, destination):  # type: ignore[no-untyped-def]
+        self.staged.append(item.item_id)
+        return super().stage(item, destination)
+
+
 @pytest.mark.parametrize("writers", [FailingWriter(), FailingVerifier()])
 def test_writer_or_verifier_failure_keeps_source_and_never_publishes(
     writers: WriterDispatcher, tmp_path: Path
@@ -160,6 +186,63 @@ def test_writer_or_verifier_failure_keeps_source_and_never_publishes(
     summary = ApplyEngine(fixture.config, writers=writers).apply(fixture.plan_id)
     assert summary.status is RunState.RECOVERY_REQUIRED
     assert fixture.source.exists() and not fixture.destination.exists()
+
+
+def test_recovery_retries_only_four_failed_items_from_18_complete(tmp_path: Path) -> None:
+    fixture = make_apply_fixture(tmp_path, "cbz", plan_name="multi-recovery")
+    database = fixture.config.database_path
+    assert database is not None
+    with connect(database) as connection:
+        original = PlanStore(connection).get(fixture.plan_id)
+        document = json.loads(original.canonical_json)
+        template = document["items"][0]
+        items = []
+        for number in range(1, 23):
+            item = copy.deepcopy(template)
+            source = fixture.source.with_name(f"issue-{number:03}.cbz")
+            if source != fixture.source:
+                shutil.copy2(fixture.source, source)
+            destination = fixture.destination.with_name(f"issue-{number:03}.cbz")
+            item["item_id"] = f"issue-{number:03}"
+            item["source"]["path"] = str(source)
+            item["source"]["size"] = source.stat().st_size
+            item["source"]["mtime_ns"] = source.stat().st_mtime_ns
+            item["kavita_projection"]["destination"] = str(
+                destination.relative_to(fixture.config.comics_root)  # type: ignore[arg-type]
+            )
+            item["kavita_projection"]["absolute_destination"] = str(destination)
+            items.append(item)
+        document["plan_id"] = "multi-recovery-18-complete-4-failed"
+        document["items"] = items
+        payload = json.dumps(
+            document, ensure_ascii=True, sort_keys=True, separators=(",", ":")
+        ).encode()
+        plan = PlanStore(connection).import_bytes(payload)
+        PlanStore(connection).approve(plan.id, plan.sha256)
+
+    failed_ids = {"issue-005", "issue-017", "issue-018", "issue-020"}
+    initial_writer = SelectiveMetadataFailureWriter(failed_ids)
+    first = ApplyEngine(fixture.config, writers=initial_writer).apply(plan.id)
+    assert first.counts == {"complete": 18, "failed": 4}
+    completed_evidence = {
+        item_id: (
+            fixture.destination.with_name(f"{item_id}.cbz").stat().st_mtime_ns,
+            sha256_file(fixture.destination.with_name(f"{item_id}.cbz")),
+        )
+        for item_id in set(initial_writer.staged) - failed_ids
+    }
+    assert all(
+        fixture.source.with_name(f"{item_id}.cbz").exists() for item_id in failed_ids
+    )
+
+    recovery_writer = RecordingWriter()
+    recovered = ApplyEngine(fixture.config, writers=recovery_writer).recover(plan.id)
+
+    assert recovered.status is RunState.COMPLETE
+    assert set(recovery_writer.staged) == failed_ids
+    for item_id, evidence in completed_evidence.items():
+        destination = fixture.destination.with_name(f"{item_id}.cbz")
+        assert (destination.stat().st_mtime_ns, sha256_file(destination)) == evidence
 
 
 class RacingFilesystem(LinuxFilesystem):

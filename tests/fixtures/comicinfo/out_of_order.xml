@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ComicInfo>
+  <Pages>
+    <Page Image="0" Type="FrontCover" Bookmark="preserve-me"/>
+    <Page Image="1" Type="Story"/>
+  </Pages>
+  <PageCount>2</PageCount>
+  <Notes>Existing notes</Notes>
+  <Summary>Existing summary</Summary>
+  <Number>017</Number>
+  <Series>Absolute Batman</Series>
+  <Title>Existing title</Title>
+</ComicInfo>

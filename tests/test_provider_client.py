@@ -291,9 +291,9 @@ def test_comic_vine_cache_schema_upgrade_renormalizes_raw_without_network(
     assert candidate.cover_date_precision == "month"
     assert candidate.release_date == "2025-11-26"
     assert candidate.release_date_precision == "day"
-    assert candidate.provider_schema_version == 3
+    assert candidate.provider_schema_version == 4
     migrated = client.store.get_cache(cache_key, now=now + 1)
-    assert migrated is not None and migrated.schema_version == 3
+    assert migrated is not None and migrated.schema_version == 4
     row = connection.execute(
         "SELECT raw_json, fetched_at, expires_at FROM provider_cache WHERE cache_key = ?",
         (cache_key,),
@@ -460,5 +460,5 @@ def test_offline_exact_detail_cache_migrates_compound_roles_without_network(
     ]
     assert client.activity.exact_detail_hydrations == 1
     assert client.activity.cache_schema_migrations == 1
-    assert client.store.get_cache(cache_key).schema_version == 3  # type: ignore[union-attr]
+    assert client.store.get_cache(cache_key).schema_version == 4  # type: ignore[union-attr]
     connection.close()

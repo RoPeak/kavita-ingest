@@ -221,6 +221,13 @@ the canonical issue/annual/one-shot/collection/omnibus/graphic-novel vocabulary;
 unknown non-empty formats block planning for review instead of masquerading as
 ordinary issues.
 
+Existing ComicInfo is preserved conservatively. Schema-known elements are
+emitted in deterministic ComicInfo 2.1 order, including pre-existing fields and
+`Pages`. Unknown extensions, attributes, and invalid unowned known values are
+never deleted or silently rewritten to force compliance. When preserved content
+prevents strict validation, publication stops with the exact XSD message, line,
+and validation classification while the source remains untouched.
+
 ### Plans and approval
 
 SQLite stores the sole authoritative canonical JSON bytes for each immutable

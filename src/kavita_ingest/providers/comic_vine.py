@@ -16,7 +16,7 @@ from .models import (
     SearchQuery,
 )
 
-NORMALIZATION_SCHEMA_VERSION = 3
+NORMALIZATION_SCHEMA_VERSION = 4
 
 
 class ComicVineProvider:
@@ -290,20 +290,18 @@ def _credits(value: object) -> tuple[Contributor, ...]:
     output = []
     seen: set[tuple[str, str]] = set()
     for item in value:
-        if isinstance(item, dict) and item.get("name"):
+        if isinstance(item, dict):
+            name = str(item.get("name") or "").strip()
+            if not name:
+                continue
             raw_role = str(item.get("role") or "creator").strip()
             for token in raw_role.split(","):
                 normalized = _normalized_label(token)
                 role = _CREDIT_ROLES.get(normalized) or f"unknown:{normalized or 'creator'}"
-                key = (str(item["name"]).casefold(), role)
+                key = (name.casefold(), role)
                 if key not in seen:
                     seen.add(key)
-                    output.append(
-                        Contributor(
-                            str(item["name"]),
-                            role,
-                        )
-                    )
+                    output.append(Contributor(name, role))
     return tuple(output)
 
 

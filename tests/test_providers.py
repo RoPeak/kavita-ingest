@@ -114,7 +114,7 @@ def test_comic_vine_exact_detail_splits_compound_roles_and_preserves_generic_art
         ("Frank Martin", "cover-artist"),
         ("Clayton Cowles", "letterer"),
     ]
-    assert candidate.provider_schema_version == 3
+    assert candidate.provider_schema_version == 4
 
 
 def test_comic_vine_compound_roles_keep_known_and_unknown_tokens_independently() -> None:
@@ -137,6 +137,34 @@ def test_comic_vine_compound_roles_keep_known_and_unknown_tokens_independently()
         ("Person", "writer"),
         ("Person", "unknown:story architect"),
     ]
+
+
+def test_comic_vine_trims_deduplicates_and_skips_empty_contributor_names() -> None:
+    client = FixtureClient(
+        {
+            "results": {
+                "id": 1,
+                "resource_type": "issue",
+                "name": "Issue",
+                "issue_number": "5",
+                "volume": {"id": 2, "name": "Series"},
+                "person_credits": [
+                    {"name": "Peter Smith ", "role": "cover"},
+                    {"name": " Peter Smith", "role": "cover"},
+                    {"name": "  Peter Smith  ", "role": "cover"},
+                    {"name": "   ", "role": "writer"},
+                    {"name": "", "role": "editor"},
+                ],
+            }
+        }
+    )
+
+    candidate = ComicVineProvider(client, "secret").fetch("4000-1")[0]  # type: ignore[arg-type]
+
+    assert [(item.name, item.role) for item in candidate.creators] == [
+        ("Peter Smith", "cover-artist")
+    ]
+    assert candidate.provider_schema_version == 4
 
 
 def test_comic_vine_resolves_runs_then_filters_issues_by_run_and_sequence() -> None:
