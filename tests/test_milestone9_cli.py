@@ -156,6 +156,36 @@ def test_bare_tty_launches_the_same_wizard_as_explicit_command(
     assert calls == [settings]
 
 
+def test_root_config_and_wizard_config_launch_with_equivalent_settings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config_path = tmp_path / "selected.toml"
+    settings = AppConfig(database_path=tmp_path / "selected.sqlite3")
+    loaded: list[Path | None] = []
+    launched: list[tuple[AppConfig, Path | None]] = []
+
+    def fake_load(path: Path | None = None, *args: object) -> AppConfig:
+        del args
+        loaded.append(path)
+        return settings
+
+    monkeypatch.setattr(cli_module, "_interactive_terminal", lambda: True)
+    monkeypatch.setattr(cli_module, "load_config", fake_load)
+    monkeypatch.setattr(cli_module, "configure_logging", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        cli_module,
+        "run_wizard",
+        lambda config, **kwargs: launched.append((config, kwargs.get("config_path"))),
+    )
+
+    root = CliRunner().invoke(app, ["--config", str(config_path)])
+    explicit = CliRunner().invoke(app, ["wizard", "--config", str(config_path)])
+
+    assert root.exit_code == explicit.exit_code == 0
+    assert loaded == [config_path, config_path]
+    assert launched == [(settings, config_path), (settings, config_path)]
+
+
 @pytest.mark.parametrize(
     ("media_format", "lifecycle", "work_only"),
     [

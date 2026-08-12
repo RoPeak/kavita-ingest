@@ -23,6 +23,8 @@ The guided path is recommended for normal use:
 
 ```bash
 kavita-ingest
+# With an explicit configuration:
+kavita-ingest --config /path/to/config.toml
 ```
 
 Press Enter on the home screen to use the single configured incoming root. The
@@ -33,6 +35,16 @@ rerun it to resume the saved draft or approved plan. Accepted decisions saved
 before plan creation also resume without repeating provider searches.
 
 `kavita-ingest wizard` launches the same guided experience explicitly.
+
+Choose an explicit action for each compact-review item; Enter has no implicit
+Next or Accept behavior. The wizard will not continue to planning while an
+applicable item is undecided or unresolved.
+
+When `preserve` leaves a successfully ingested source in incoming, the next run
+should report it as already ingested only while both its source hash and verified
+destination evidence still match. Use explicit Reprocess for a deliberate new
+review. Reprocess does not overwrite an existing destination; change the plan
+target or otherwise resolve the destination conflict before approval.
 
 The equivalent granular path remains available:
 

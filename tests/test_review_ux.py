@@ -196,6 +196,61 @@ def test_wizard_review_uses_compact_primary_actions_and_more_reveals_advanced(
     assert "[E]dit" in advanced and "[G]roup-run" in advanced
 
 
+def test_compact_review_enter_has_no_next_default_and_reprompts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database = tmp_path / "state.sqlite3"
+    migrate(database)
+    audit = _audit(tmp_path, eligible=True)
+    answers = iter(["", "Q"])
+    prompts: list[dict[str, object]] = []
+
+    def prompt(*args: object, **kwargs: object) -> str:
+        del args
+        prompts.append(kwargs)
+        return next(answers)
+
+    monkeypatch.setattr("kavita_ingest.review.typer.prompt", prompt)
+    output = io.StringIO()
+
+    interactive_review(
+        tmp_path,
+        AppConfig(database_path=database, providers=ProviderSettings(offline=True)),
+        Console(file=output, force_terminal=False),
+        audit_result=audit,
+        wizard_mode=True,
+    )
+
+    assert len(prompts) == 2
+    assert all(call.get("default") is None for call in prompts)
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("SELECT count(*) FROM decisions").fetchone() == (0,)
+
+
+def test_granular_review_retains_next_as_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database = tmp_path / "state.sqlite3"
+    migrate(database)
+    audit = _audit(tmp_path, eligible=True)
+    defaults: list[object] = []
+
+    def prompt(*args: object, **kwargs: object) -> str:
+        del args
+        defaults.append(kwargs.get("default"))
+        return "N"
+
+    monkeypatch.setattr("kavita_ingest.review.typer.prompt", prompt)
+    interactive_review(
+        tmp_path,
+        AppConfig(database_path=database, providers=ProviderSettings(offline=True)),
+        Console(file=io.StringIO(), force_terminal=False),
+        audit_result=audit,
+    )
+
+    assert defaults == ["N"]
+
+
 def test_wizard_review_labels_local_run_evidence_without_confusing_provider_data(
     tmp_path: Path,
 ) -> None:

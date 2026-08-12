@@ -51,10 +51,11 @@ def run_audit(
     *,
     mode: str = "audit",
     providers_override: tuple[Provider, ...] | None = None,
+    scans_override: tuple[ScanResult, ...] | None = None,
 ) -> AuditResult:
     if config.database_path is None:
         raise ValueError("audit requires a database path for cache and match evidence")
-    scans = scan(root, config, persist=True)
+    scans = list(scans_override) if scans_override is not None else scan(root, config, persist=True)
     migrate(config.database_path)
     connection = connect(config.database_path)
     try:

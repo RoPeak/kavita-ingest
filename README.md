@@ -146,6 +146,8 @@ For normal interactive use, start with:
 
 ```bash
 kavita-ingest
+# Or select a configuration explicitly:
+kavita-ingest --config /path/to/config.toml
 ```
 
 The state-aware home screen shows configured paths and lifecycle. With one valid
@@ -155,12 +157,26 @@ offers human metadata and technical immutable-plan views, binds approval to the
 exact persisted digest, and asks separately before apply. It finishes with
 verified publication and source-lifecycle results.
 
+Compact review has no implicit action: Enter alone does not skip or accept an
+item. Planning begins only after every applicable item has an explicit completed
+review decision; unresolved or undecided work returns to Review or can be saved
+for later.
+
 `kavita-ingest wizard` is the explicit equivalent. Draft plans, approved
 unapplied plans, unresolved review, accepted decisions awaiting a plan, and
 interrupted apply state are detected from SQLite on restart. Accepted reviewed
 state resumes directly into offline planning without repeating provider work.
 Recovery-required state takes priority over starting new work. Bare invocation
 in a pipe or other non-interactive session prints deterministic help.
+
+With the `preserve` lifecycle, a later wizard run recognizes an unchanged source
+only when a durable COMPLETE apply record, source path and SHA-256, and the
+current destination SHA-256 all agree. It reports and excludes that source from
+ordinary review. Changed source bytes, a missing destination, or a destination
+whose bytes no longer match remain visible as current work with an appropriate
+warning. Explicit Reprocess returns the item through review, immutable planning,
+digest-bound approval, and normal no-overwrite apply checks; it never grants an
+overwrite exception.
 
 Every operation remains available as a scriptable subcommand:
 

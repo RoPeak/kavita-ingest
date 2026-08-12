@@ -1,18 +1,29 @@
 from __future__ import annotations
 
+import io
 import zipfile
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from rich.console import Console
 from typer.testing import CliRunner
 
 from kavita_ingest.apply_engine import ApplyEngine, InjectedCrash
 from kavita_ingest.cli import app
-from kavita_ingest.config import load_config
-from kavita_ingest.db import connect
+from kavita_ingest.completed_sources import assess_completed_sources
+from kavita_ingest.config import AppConfig, load_config
+from kavita_ingest.db import connect, migrate
+from kavita_ingest.decisions import DecisionRepository, DecisionType, add_manual_identity
 from kavita_ingest.plan_store import PlanStore
-from kavita_ingest.wizard import detect_resume_state
+from kavita_ingest.planning_service import PlanBuilder
+from kavita_ingest.scanner import scan
+from kavita_ingest.wizard import (
+    DiscoverySelection,
+    _incomplete_review_items,
+    _select_discovered_sources,
+    detect_resume_state,
+)
 from tests.apply_helpers import ApplyFixture, make_apply_fixture
 
 
@@ -145,13 +156,13 @@ enabled = false
     )
 
     result = CliRunner().invoke(
-        app, ["wizard", "--config", str(config)], input="\nu\n"
+        app, ["wizard", "--config", str(config)], input="\nu\nq\n"
     )
 
     assert result.exit_code == 0, result.output
     assert "Provider problems" in result.output
-    assert "No plan was created" in result.output
-    assert "Review remains saved" in result.output
+    assert "Review is incomplete" in result.output
+    assert "Review decisions saved" in result.output
 
 
 def test_reviewed_decision_without_plan_resumes_directly_to_offline_planning(
@@ -234,6 +245,7 @@ def test_fresh_wizard_has_one_start_action_and_full_human_review_flow(
     monkeypatch.setattr("kavita_ingest.wizard._preflight", lambda *args: None)
     monkeypatch.setattr("kavita_ingest.wizard.run_audit", lambda *args, **kwargs: audit)
     monkeypatch.setattr("kavita_ingest.wizard.interactive_review", lambda *args, **kwargs: audit)
+    monkeypatch.setattr("kavita_ingest.wizard._incomplete_review_items", lambda *args, **kwargs: ())
     monkeypatch.setattr("kavita_ingest.wizard._create_plan", lambda *args: (stored, build))
 
     result = CliRunner().invoke(
@@ -315,3 +327,171 @@ enabled = false
     assert "Metadata and output" in result.output and "Ingest complete" in result.output
     assert source.exists() and destination.exists()
     assert destination.stat().st_mode & 0o777 == 0o644
+
+    second = CliRunner().invoke(
+        app,
+        ["wizard", "--config", str(config)],
+        input="\nq\n",
+    )
+    assert second.exit_code == 0, second.output
+    assert "Already ingested    1" in second.output
+    assert "Nothing new to ingest" in second.output
+    assert "[N] New/change source" in second.output
+    assert "[3/7] Review" not in second.output
+
+    reprocess = CliRunner().invoke(
+        app,
+        ["wizard", "--config", str(config)],
+        input="\nr\nq\nq\n",
+    )
+    assert reprocess.exit_code == 0, reprocess.output
+    assert "[3/7] Review" in reprocess.output
+    assert "Review is incomplete" in reprocess.output
+    assert destination.exists()
+
+
+def test_review_completion_gate_blocks_missing_and_unresolved_decisions(tmp_path: Path) -> None:
+    from tests.test_review_ux import _audit
+
+    database = tmp_path / "state.sqlite3"
+    migrate(database)
+    audit = _audit(tmp_path, eligible=True)
+    settings = AppConfig(database_path=database)
+    assert len(_incomplete_review_items(settings, audit)) == 1
+
+    with connect(database) as connection:
+        DecisionRepository(connection).add(
+            audit.items[0].scan.source,
+            DecisionType.UNRESOLVED,
+            audit.items[0].local.evidence_hash(),
+            payload={"explicit": True},
+        )
+    assert len(_incomplete_review_items(settings, audit)) == 1
+
+    with connect(database) as connection:
+        DecisionRepository(connection).add(
+            audit.items[0].scan.source,
+            DecisionType.SKIPPED,
+            audit.items[0].local.evidence_hash(),
+            payload={"explicit": True},
+        )
+    assert _incomplete_review_items(settings, audit) == ()
+
+
+def test_completed_preserved_source_is_suppressed_only_with_matching_destination(
+    tmp_path: Path,
+) -> None:
+    fixture = make_apply_fixture(tmp_path, "cbz", lifecycle="preserve")
+    ApplyEngine(fixture.config).apply(fixture.plan_id)
+    scans = scan(fixture.source.parent, fixture.config, persist=True)
+    with connect(fixture.config.database_path) as connection:  # type: ignore[arg-type]
+        assessment = assess_completed_sources(connection, scans)
+
+    assert not assessment.current
+    assert len(assessment.completed) == 1
+    assert assessment.completed[0].destination == fixture.destination
+
+
+def test_changed_completed_source_is_current_work(tmp_path: Path) -> None:
+    fixture = make_apply_fixture(tmp_path, "cbz", lifecycle="preserve")
+    ApplyEngine(fixture.config).apply(fixture.plan_id)
+    with zipfile.ZipFile(fixture.source, "a") as archive:
+        archive.writestr("003.jpg", b"changed-page")
+    scans = scan(fixture.source.parent, fixture.config, persist=True)
+    with connect(fixture.config.database_path) as connection:  # type: ignore[arg-type]
+        assessment = assess_completed_sources(connection, scans)
+
+    assert len(assessment.current) == 1
+    assert not assessment.completed and not assessment.warnings
+
+
+@pytest.mark.parametrize("condition", ["missing", "mismatch"])
+def test_completed_source_with_invalid_destination_returns_to_current_work(
+    condition: str, tmp_path: Path
+) -> None:
+    fixture = make_apply_fixture(tmp_path, "cbz", lifecycle="preserve")
+    ApplyEngine(fixture.config).apply(fixture.plan_id)
+    if condition == "missing":
+        fixture.destination.unlink()
+    else:
+        fixture.destination.write_bytes(b"changed destination")
+    scans = scan(fixture.source.parent, fixture.config, persist=True)
+    with connect(fixture.config.database_path) as connection:  # type: ignore[arg-type]
+        assessment = assess_completed_sources(connection, scans)
+
+    assert len(assessment.current) == 1 and not assessment.completed
+    assert assessment.warnings[0].condition == f"destination_{condition}"
+
+
+@pytest.mark.parametrize("lifecycle", ["move_after_verify", "archive_after_verify"])
+def test_completed_moved_or_archived_source_is_not_rediscovered(
+    lifecycle: str, tmp_path: Path
+) -> None:
+    fixture = make_apply_fixture(tmp_path, "cbz", lifecycle=lifecycle)
+    ApplyEngine(fixture.config).apply(fixture.plan_id)
+
+    assert scan(fixture.source.parent, fixture.config, persist=True) == []
+
+
+def test_explicit_reprocess_selection_returns_to_review_and_requires_new_decision(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from tests.test_review_ux import _audit
+
+    audit = _audit(tmp_path, eligible=True)
+    completed = SimpleNamespace(
+        current=(),
+        completed=(SimpleNamespace(scan=audit.items[0].scan, destination=tmp_path / "out.cbz"),),
+        warnings=(),
+    )
+    monkeypatch.setattr("kavita_ingest.wizard._choice", lambda default: "R")
+
+    selection = _select_discovered_sources(completed, Console(file=io.StringIO()))
+
+    assert selection == DiscoverySelection((audit.items[0].scan,), reprocess=True)
+
+    database = tmp_path / "state.sqlite3"
+    migrate(database)
+    settings = AppConfig(database_path=database)
+    with connect(database) as connection:
+        first = DecisionRepository(connection).add(
+            audit.items[0].scan.source,
+            DecisionType.SKIPPED,
+            audit.items[0].local.evidence_hash(),
+            payload={"explicit": True},
+        )
+    baseline = {audit.items[0].scan.source.sha256: first.id}
+    assert len(_incomplete_review_items(settings, audit, required_newer_than=baseline)) == 1
+
+    with connect(database) as connection:
+        DecisionRepository(connection).add(
+            audit.items[0].scan.source,
+            DecisionType.SKIPPED,
+            audit.items[0].local.evidence_hash(),
+            payload={"explicit": True},
+        )
+    assert _incomplete_review_items(settings, audit, required_newer_than=baseline) == ()
+
+
+def test_reprocess_plan_preserves_destination_no_clobber_conflict(tmp_path: Path) -> None:
+    fixture = make_apply_fixture(tmp_path, "cbz", lifecycle="preserve")
+    ApplyEngine(fixture.config).apply(fixture.plan_id)
+    scanned = scan(fixture.source.parent, fixture.config, persist=True)[0]
+    with connect(fixture.config.database_path) as connection:  # type: ignore[arg-type]
+        add_manual_identity(
+            DecisionRepository(connection),
+            scanned.source,
+            "explicit-reprocess-evidence",
+            {
+                "series_title": "Watchmen",
+                "title": "At Midnight",
+                "item_type": "issue",
+                "sequence": "1",
+                "run_start_year": "1986",
+            },
+        )
+        result = PlanBuilder(connection, fixture.config).build(fixture.source.parent)
+
+    assert result.conflicts == 1
+    assert result.document.items[0].conflicts[0].code == "destination_exists"
+    assert fixture.destination.exists()

@@ -15,8 +15,10 @@ from rich.text import Text
 
 from .apply_engine import ApplyEngine, ApplyRefused, ApplySummary
 from .audit import AuditResult, run_audit
+from .completed_sources import CompletedSourceAssessment, assess_completed_sources
 from .config import AppConfig
 from .db import connect, migrate
+from .decisions import DecisionRepository, DecisionType
 from .doctor import Check, checks
 from .paths import AppPaths
 from .plan_store import PlanStore, StoredPlan
@@ -30,6 +32,7 @@ from .presentation import (
     render_technical_plan,
 )
 from .review import interactive_review
+from .scanner import ScanResult, scan
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,6 +52,12 @@ class ResumeState:
             "approved": "Apply approved plan",
             "recovery": "Recover interrupted ingest",
         }.get(self.kind, "Resume previous work")
+
+
+@dataclass(frozen=True, slots=True)
+class DiscoverySelection:
+    scans: tuple[ScanResult, ...]
+    reprocess: bool = False
 
 
 def run_wizard(
@@ -192,16 +201,150 @@ def _run_new(
     _preflight(config, config_path, output)
     _stage(output, 1, "Preflight", "complete")
     _stage(output, 2, "Discover", "current")
-    audit = run_audit(root, config, mode="wizard")
+    assessment = _completed_source_assessment(config, scan(root, config, persist=True))
+    selection = _select_discovered_sources(assessment, output)
+    if isinstance(selection, str):
+        _stage(output, 2, "Discover", "complete")
+        return "new"
+    if selection is None:
+        _stage(output, 2, "Discover", "complete")
+        return None
+    audit = run_audit(root, config, mode="wizard", scans_override=selection.scans)
     _render_audit(audit, output)
     _stage(output, 2, "Discover", "complete")
     if not audit.items:
         output.print("No supported reading media was found. No changes made.")
         return None
     _stage(output, 3, "Review", "current")
-    interactive_review(root, config, output, audit_result=audit, wizard_mode=True)
+    decision_heads = _decision_heads(config, audit) if selection.reprocess else {}
+    while True:
+        interactive_review(root, config, output, audit_result=audit, wizard_mode=True)
+        incomplete = _incomplete_review_items(config, audit, required_newer_than=decision_heads)
+        if not incomplete:
+            break
+        output.print("\nReview is incomplete.\n")
+        count = len(incomplete)
+        verb = "need" if count != 1 else "needs"
+        output.print(f"{count} item{'s' if count != 1 else ''} still {verb} a decision.\n")
+        output.print("[R] Return to review   [Q] Save and quit")
+        if _choice("Q") != "R":
+            output.print("Review decisions saved. Resume later to finish review.")
+            return None
     _stage(output, 3, "Review", "saved")
     return _plan_reviewed(config, root, output)
+
+
+def _completed_source_assessment(
+    config: AppConfig, scans: list[ScanResult]
+) -> CompletedSourceAssessment:
+    connection = _connection(config)
+    try:
+        return assess_completed_sources(connection, scans)
+    finally:
+        connection.close()
+
+
+def _select_discovered_sources(
+    assessment: CompletedSourceAssessment, output: Console
+) -> DiscoverySelection | str | None:
+    total = len(assessment.current) + len(assessment.completed)
+    output.print(f"Found {total} supported file{'s' if total != 1 else ''}\n")
+    output.print(f"New                 {len(assessment.current)}")
+    output.print(f"Already ingested    {len(assessment.completed)}")
+    for warning in assessment.warnings:
+        label = (
+            "destination is missing"
+            if warning.condition == "destination_missing"
+            else "destination no longer matches the verified output"
+        )
+        output.print(f"Warning: {warning.scan.source.path.name}: previously ingested, but {label}.")
+    if not assessment.completed:
+        return DiscoverySelection(assessment.current)
+    if assessment.current:
+        output.print(
+            "\n[Enter] Continue with new/current work   "
+            "[R] Reprocess completed   [Q] Quit"
+        )
+        choice = _choice("")
+        if choice == "R":
+            return DiscoverySelection(
+                tuple(item.scan for item in assessment.completed), reprocess=True
+            )
+        if choice == "Q":
+            return None
+        return DiscoverySelection(assessment.current)
+    output.print(
+        "\nNothing new to ingest.\n\n"
+        f"{len(assessment.completed)} unchanged source"
+        f"{'s were' if len(assessment.completed) != 1 else ' was'} already successfully ingested."
+    )
+    while True:
+        output.print(
+            "[N] New/change source   [R] Reprocess completed item(s)   "
+            "[D] Details   [Q] Quit"
+        )
+        choice = _choice("Q")
+        if choice == "N":
+            return "new"
+        if choice == "R":
+            return DiscoverySelection(
+                tuple(item.scan for item in assessment.completed), reprocess=True
+            )
+        if choice == "D":
+            for item in assessment.completed:
+                output.print(f"{item.scan.source.path} -> {item.destination}")
+            continue
+        if choice in {"", "Q"}:
+            return None
+        output.print("Choose one of the displayed actions.")
+
+
+def _decision_heads(config: AppConfig, audit: AuditResult) -> dict[str, int | None]:
+    connection = _connection(config)
+    try:
+        decisions = DecisionRepository(connection)
+        return {
+            item.scan.source.sha256: decision.id if (decision := decisions.latest(
+                item.scan.source
+            )) else None
+            for item in audit.items
+        }
+    finally:
+        connection.close()
+
+
+def _incomplete_review_items(
+    config: AppConfig,
+    audit: AuditResult,
+    *,
+    required_newer_than: dict[str, int | None] | None = None,
+) -> tuple[ScanResult, ...]:
+    connection = _connection(config)
+    try:
+        decisions = DecisionRepository(connection)
+        complete = {
+            DecisionType.ACCEPTED,
+            DecisionType.WORK_ACCEPTED,
+            DecisionType.MANUAL_IDENTITY,
+            DecisionType.REJECTED,
+            DecisionType.SKIPPED,
+        }
+        incomplete = []
+        for item in audit.items:
+            decision = decisions.latest(item.scan.source)
+            previous = (required_newer_than or {}).get(item.scan.source.sha256)
+            if (
+                decision is None
+                or decision.decision_type not in complete
+                or (
+                    item.scan.source.sha256 in (required_newer_than or {})
+                    and decision.id == previous
+                )
+            ):
+                incomplete.append(item.scan)
+        return tuple(incomplete)
+    finally:
+        connection.close()
 
 
 def _plan_reviewed(config: AppConfig, root: Path, output: Console) -> str | None:
@@ -455,8 +598,6 @@ def _confirm_lifecycle(document: dict[str, Any]) -> None:
 def _render_audit(audit: AuditResult, output: Console) -> None:
     summary = audit.summary
     problems = summary["provider_unavailable"] + summary["partial_provider_unavailable"]
-    count = summary["sources"]
-    output.print(f"Found {count} supported file{'s' if count != 1 else ''}\n")
     output.print(f"Ready to confirm     {summary['eligible_high_confidence']}")
     output.print(f"Ambiguous            {summary['review_required']}")
     output.print(f"Unresolved           {summary['unresolved']}")

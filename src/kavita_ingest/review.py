@@ -65,7 +65,12 @@ def interactive_review(
             while True:
                 _show_item(output, current, selected_rank, compact=wizard_mode and not advanced)
                 prompt = _action_prompt(current, audit, wizard_mode=wizard_mode and not advanced)
-                action = typer.prompt(prompt, default="N").strip().upper()
+                if wizard_mode and not advanced:
+                    action = str(
+                        typer.prompt(prompt, default=None, show_default=False)
+                    ).strip().upper()
+                else:
+                    action = str(typer.prompt(prompt, default="N")).strip().upper()
                 displayed = _displayed_scores(current)
                 selected = next((score for score in displayed if score.rank == selected_rank), None)
                 if action == "M" and wizard_mode:

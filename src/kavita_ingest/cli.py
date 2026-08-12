@@ -54,6 +54,9 @@ def _interactive_terminal() -> bool:
 @app.callback(invoke_without_command=True)
 def main(
     context: typer.Context,
+    config: Annotated[
+        Path | None, typer.Option("--config", help="TOML configuration path.")
+    ] = None,
     version: Annotated[
         bool,
         typer.Option(
@@ -77,13 +80,7 @@ def main(
         if not _interactive_terminal():
             typer.echo(context.get_help())
             return
-        settings = load_config()
-        configure_logging(
-            settings.log_level,
-            _log_file(settings),
-            secrets=provider_secrets(settings),
-        )
-        run_wizard(settings)
+        _launch_wizard(config)
 
 
 @app.command()
@@ -93,6 +90,10 @@ def wizard(
     ] = None,
 ) -> None:
     """Run the resumable guided ingest workflow."""
+    _launch_wizard(config)
+
+
+def _launch_wizard(config: Path | None) -> None:
     settings = load_config(config)
     configure_logging(
         settings.log_level,
