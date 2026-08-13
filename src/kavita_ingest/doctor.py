@@ -14,6 +14,7 @@ import pikepdf
 import rarfile
 
 from . import __version__
+from .calibre import MIN_SAFE_CALIBRE_TEXT, require_safe_calibre_executable
 from .config import AppConfig
 from .filesystem import LinuxFilesystem
 from .locking import LockUnavailable, ProcessLock, lock_path
@@ -219,9 +220,31 @@ def _path_check(category: str, name: str, path: Path, archive_limit: int) -> Che
     )
 
 
+def _calibre_status() -> tuple[bool, str]:
+    executable = shutil.which("ebook-meta")
+
+    if executable is None:
+        return (
+            False,
+            "not found; Calibre "
+            f">= {MIN_SAFE_CALIBRE_TEXT} is required for EPUB/PDF metadata writes",
+        )
+
+    try:
+        version = require_safe_calibre_executable(executable)
+    except ValueError as exc:
+        return False, str(exc)
+
+    return (
+        True,
+        f"ebook-meta (calibre {version}); safe floor >= {MIN_SAFE_CALIBRE_TEXT}",
+    )
+
+
 def _helper_checks() -> list[Check]:
     unrar = shutil.which("unrar")
-    calibre = shutil.which("ebook-meta")
+    calibre_ok, calibre_detail = _calibre_status()
+
     return [
         Check(
             "helpers",
@@ -234,23 +257,22 @@ def _helper_checks() -> list[Check]:
         Check(
             "helpers",
             "ebook-meta",
-            "OK" if calibre else "BLOCKED",
-            _tool_version(calibre, version_hint="ebook-meta (calibre")
-            if calibre
-            else "not found; Calibre-owned EPUB metadata writes are unavailable",
+            "OK" if calibre_ok else "BLOCKED",
+            calibre_detail,
         ),
     ]
 
 
 def _format_checks() -> list[Check]:
-    calibre = shutil.which("ebook-meta") is not None
+    calibre_ok, _ = _calibre_status()
     unrar = shutil.which("unrar") is not None
+
     return [
         Check(
             "formats",
             "EPUB",
-            "OK" if calibre else "BLOCKED",
-            "inspect/write; contributor roles use verified narrow OPF patching",
+            "OK" if calibre_ok else "BLOCKED",
+            "inspect/write with safe Calibre; contributor roles use verified narrow OPF patching",
         ),
         Check("formats", "CBZ", "OK", "inspect/write ComicInfo 2.1"),
         Check(
@@ -268,8 +290,8 @@ def _format_checks() -> list[Check]:
         Check(
             "formats",
             "PDF",
-            "OK",
-            "inspect/write unsigned and unencrypted PDFs; encrypted/signed writes blocked",
+            "OK" if calibre_ok else "BLOCKED",
+            "inspect/write verified Calibre XMP metadata; encrypted/signed writes blocked",
         ),
     ]
 

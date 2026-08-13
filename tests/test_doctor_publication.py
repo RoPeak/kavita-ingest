@@ -106,3 +106,88 @@ def test_apply_preflight_blocks_before_staging_when_hard_links_are_unavailable(
         ApplyEngine(fixture.config).apply(fixture.plan_id)
     assert fixture.source.exists()
     assert not fixture.destination.exists()
+
+
+def test_doctor_blocks_missing_calibre_for_epub_and_pdf(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "kavita_ingest.doctor.shutil.which",
+        lambda _: None,
+    )
+
+    from kavita_ingest.doctor import (
+        _format_checks,
+        _helper_checks,
+    )
+
+    helpers = {check.name: check for check in _helper_checks()}
+    formats = {check.name: check for check in _format_checks()}
+
+    assert helpers["ebook-meta"].status == "BLOCKED"
+    assert "not found" in helpers["ebook-meta"].detail
+    assert formats["EPUB"].status == "BLOCKED"
+    assert formats["PDF"].status == "BLOCKED"
+
+
+def test_doctor_blocks_unsafe_calibre_for_epub_and_pdf(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "kavita_ingest.doctor.shutil.which",
+        lambda executable: "/opt/calibre/ebook-meta" if executable == "ebook-meta" else None,
+    )
+
+    def unsafe(_: str) -> str:
+        raise ValueError(
+            "unsafe Calibre version: 9.11.0; "
+            "kavita-ingest requires calibre >= 9.12.0 "
+            "for untrusted EPUB/PDF metadata"
+        )
+
+    monkeypatch.setattr(
+        "kavita_ingest.doctor.require_safe_calibre_executable",
+        unsafe,
+    )
+
+    from kavita_ingest.doctor import (
+        _format_checks,
+        _helper_checks,
+    )
+
+    helpers = {check.name: check for check in _helper_checks()}
+    formats = {check.name: check for check in _format_checks()}
+
+    assert helpers["ebook-meta"].status == "BLOCKED"
+    assert "9.11.0" in helpers["ebook-meta"].detail
+    assert formats["EPUB"].status == "BLOCKED"
+    assert formats["PDF"].status == "BLOCKED"
+
+
+def test_doctor_accepts_safe_calibre_for_epub_and_pdf(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "kavita_ingest.doctor.shutil.which",
+        lambda executable: "/opt/calibre/ebook-meta" if executable == "ebook-meta" else None,
+    )
+
+    monkeypatch.setattr(
+        "kavita_ingest.doctor.require_safe_calibre_executable",
+        lambda _: "9.13",
+    )
+
+    from kavita_ingest.doctor import (
+        _format_checks,
+        _helper_checks,
+    )
+
+    helpers = {check.name: check for check in _helper_checks()}
+    formats = {check.name: check for check in _format_checks()}
+
+    assert helpers["ebook-meta"].status == "OK"
+    assert "9.13" in helpers["ebook-meta"].detail
+    assert "9.12.0" in helpers["ebook-meta"].detail
+    assert formats["EPUB"].status == "OK"
+    assert formats["PDF"].status == "OK"
+    assert "verified Calibre XMP" in formats["PDF"].detail

@@ -22,7 +22,6 @@ from ..calibre import (
 )
 from .common import VerificationResult
 
-
 PDF_CALIBRE_FIELDS = frozenset(
     {
         "title",
@@ -68,13 +67,9 @@ def write_pdf_metadata(
     unsupported = set(fields) - PDF_CALIBRE_FIELDS
 
     if unsupported:
-        raise ValueError(
-            f"unsupported PDF metadata fields: {sorted(unsupported)}"
-        )
+        raise ValueError(f"unsupported PDF metadata fields: {sorted(unsupported)}")
 
-    require_safe_calibre_executable(
-        ebook_meta
-    )
+    require_safe_calibre_executable(ebook_meta)
 
     with pikepdf.open(source) as pdf:
         _require_writable(pdf)
@@ -128,9 +123,7 @@ def write_pdf_metadata(
         return result
 
     finally:
-        staged.unlink(
-            missing_ok=True
-        )
+        staged.unlink(missing_ok=True)
 
 
 def verify_pdf(
@@ -143,9 +136,7 @@ def verify_pdf(
     unsupported = set(fields) - PDF_CALIBRE_FIELDS
 
     if unsupported:
-        errors.append(
-            f"unsupported PDF metadata fields: {sorted(unsupported)}"
-        )
+        errors.append(f"unsupported PDF metadata fields: {sorted(unsupported)}")
 
     try:
         with (
@@ -155,9 +146,7 @@ def verify_pdf(
             _require_writable(before)
 
             if _fingerprint(before) != _fingerprint(after):
-                errors.append(
-                    "PDF page/content/resource semantic fingerprint changed"
-                )
+                errors.append("PDF page/content/resource semantic fingerprint changed")
 
             if fields:
                 root = _read_xmp(after)
@@ -196,9 +185,7 @@ def _ebook_meta_command(
     unsupported = set(fields) - PDF_CALIBRE_FIELDS
 
     if unsupported:
-        raise ValueError(
-            f"unsupported PDF metadata fields: {sorted(unsupported)}"
-        )
+        raise ValueError(f"unsupported PDF metadata fields: {sorted(unsupported)}")
 
     command = [
         executable,
@@ -226,75 +213,45 @@ def _ebook_meta_command(
                 ]
             )
 
-    authors = fields.get(
-        "authors"
-    )
+    authors = fields.get("authors")
 
     if authors is not None:
-        if (
-            not isinstance(authors, Sequence)
-            or isinstance(authors, (str, bytes))
-        ):
-            raise ValueError(
-                "PDF authors must be a sequence of names"
-            )
+        if not isinstance(authors, Sequence) or isinstance(authors, (str, bytes)):
+            raise ValueError("PDF authors must be a sequence of names")
 
         command.extend(
             [
                 "--authors",
-                " & ".join(
-                    str(author)
-                    for author in authors
-                ),
+                " & ".join(str(author) for author in authors),
             ]
         )
 
-    subjects = fields.get(
-        "subjects"
-    )
+    subjects = fields.get("subjects")
 
     if subjects is not None:
-        if (
-            not isinstance(subjects, Sequence)
-            or isinstance(subjects, (str, bytes))
-        ):
-            raise ValueError(
-                "PDF subjects must be a sequence"
-            )
+        if not isinstance(subjects, Sequence) or isinstance(subjects, (str, bytes)):
+            raise ValueError("PDF subjects must be a sequence")
 
         if subjects:
             command.extend(
                 [
                     "--tags",
-                    ", ".join(
-                        str(subject)
-                        for subject in subjects
-                    ),
+                    ", ".join(str(subject) for subject in subjects),
                 ]
             )
 
-    identifiers = fields.get(
-        "identifiers"
-    )
+    identifiers = fields.get("identifiers")
 
     if identifiers is not None:
         if not isinstance(
             identifiers,
             Mapping,
         ):
-            raise ValueError(
-                "PDF identifiers must be a mapping"
-            )
+            raise ValueError("PDF identifiers must be a mapping")
 
-        rendered = {
-            str(key).casefold(): str(value)
-            for key, value
-            in identifiers.items()
-        }
+        rendered = {str(key).casefold(): str(value) for key, value in identifiers.items()}
 
-        for key, value in sorted(
-            rendered.items()
-        ):
+        for key, value in sorted(rendered.items()):
             command.extend(
                 [
                     "--identifier",
@@ -302,9 +259,7 @@ def _ebook_meta_command(
                 ]
             )
 
-        isbn = _preferred_isbn(
-            rendered
-        )
+        isbn = _preferred_isbn(rendered)
 
         if isbn is not None:
             command.extend(
@@ -338,14 +293,10 @@ def _preferred_isbn(
 def _read_xmp(
     pdf: pikepdf.Pdf,
 ) -> etree._Element:
-    stream = pdf.Root.get(
-        "/Metadata"
-    )
+    stream = pdf.Root.get("/Metadata")
 
     if stream is None:
-        raise ValueError(
-            "PDF metadata write produced no XMP metadata stream"
-        )
+        raise ValueError("PDF metadata write produced no XMP metadata stream")
 
     parser = etree.XMLParser(
         resolve_entities=False,
@@ -354,10 +305,7 @@ def _read_xmp(
     )
 
     return etree.fromstring(
-        cast(
-            bytes,
-            stream.read_bytes(),
-        ),
+        stream.read_bytes(),
         parser,
     )
 
@@ -368,45 +316,29 @@ def _verify_xmp_fields(
     errors: list[str],
 ) -> None:
     if "title" in fields:
-        actual = _xmp_alt(
+        title_actual = _xmp_alt(
             root,
             "dc:title",
         )
 
-        if actual != str(
-            fields["title"]
-        ):
-            errors.append(
-                "PDF title XMP read-back mismatch"
-            )
+        if title_actual != str(fields["title"]):
+            errors.append("PDF title XMP read-back mismatch")
 
-    authors = fields.get(
-        "authors"
-    )
+    authors = fields.get("authors")
 
     if authors is not None:
-        if (
-            not isinstance(authors, Sequence)
-            or isinstance(authors, (str, bytes))
-        ):
-            errors.append(
-                "PDF authors expectation is invalid"
-            )
+        if not isinstance(authors, Sequence) or isinstance(authors, (str, bytes)):
+            errors.append("PDF authors expectation is invalid")
         else:
-            expected = tuple(
-                str(author)
-                for author in authors
-            )
+            authors_expected = tuple(str(author) for author in authors)
 
-            actual = _xmp_sequence(
+            authors_actual = _xmp_sequence(
                 root,
                 "dc:creator",
             )
 
-            if actual != expected:
-                errors.append(
-                    "PDF authors XMP read-back mismatch"
-                )
+            if authors_actual != authors_expected:
+                errors.append("PDF authors XMP read-back mismatch")
 
     if "publisher" in fields:
         publishers = _xmp_sequence(
@@ -414,61 +346,37 @@ def _verify_xmp_fields(
             "dc:publisher",
         )
 
-        actual = (
-            publishers[0]
-            if publishers
-            else ""
-        )
+        publisher_actual = publishers[0] if publishers else ""
 
-        if actual != str(
-            fields["publisher"]
-        ):
-            errors.append(
-                "PDF publisher XMP read-back mismatch"
-            )
+        if publisher_actual != str(fields["publisher"]):
+            errors.append("PDF publisher XMP read-back mismatch")
 
     if "description" in fields:
-        actual = _xmp_alt(
+        description_actual = _xmp_alt(
             root,
             "dc:description",
         )
 
-        if actual != str(
-            fields["description"]
-        ):
-            errors.append(
-                "PDF description XMP read-back mismatch"
-            )
+        if description_actual != str(fields["description"]):
+            errors.append("PDF description XMP read-back mismatch")
 
-    subjects = fields.get(
-        "subjects"
-    )
+    subjects = fields.get("subjects")
 
     if subjects is not None:
-        if (
-            not isinstance(subjects, Sequence)
-            or isinstance(subjects, (str, bytes))
-        ):
-            errors.append(
-                "PDF subjects expectation is invalid"
-            )
+        if not isinstance(subjects, Sequence) or isinstance(subjects, (str, bytes)):
+            errors.append("PDF subjects expectation is invalid")
         else:
-            expected = {
-                str(subject)
-                for subject in subjects
-            }
+            subjects_expected = {str(subject) for subject in subjects}
 
-            actual = set(
+            subjects_actual = set(
                 _xmp_sequence(
                     root,
                     "dc:subject",
                 )
             )
 
-            if actual != expected:
-                errors.append(
-                    "PDF subjects XMP read-back mismatch"
-                )
+            if subjects_actual != subjects_expected:
+                errors.append("PDF subjects XMP read-back mismatch")
 
     if "language" in fields:
         languages = _xmp_sequence(
@@ -476,19 +384,13 @@ def _verify_xmp_fields(
             "dc:language",
         )
 
-        actual = (
-            languages[0]
-            if languages
-            else ""
-        )
+        language_actual = languages[0] if languages else ""
 
         if not _same_language(
             str(fields["language"]),
-            actual,
+            language_actual,
         ):
-            errors.append(
-                "PDF language XMP read-back mismatch"
-            )
+            errors.append("PDF language XMP read-back mismatch")
 
     if "date" in fields:
         dates = _xmp_sequence(
@@ -496,105 +398,69 @@ def _verify_xmp_fields(
             "dc:date",
         )
 
-        actual = (
-            dates[0]
-            if dates
-            else ""
-        )
+        date_actual = dates[0] if dates else ""
 
         if not _same_date(
             str(fields["date"]),
-            actual,
+            date_actual,
         ):
-            errors.append(
-                "PDF date XMP read-back mismatch"
-            )
+            errors.append("PDF date XMP read-back mismatch")
 
     if "series" in fields:
-        actual = str(
+        series_actual = str(
             root.xpath(
-                "string("
-                ".//calibre:series/"
-                "rdf:value[1]"
-                ")",
+                "string(.//calibre:series/rdf:value[1])",
                 namespaces=PDF_XMP_NS,
             )
         )
 
-        if actual != str(
-            fields["series"]
-        ):
-            errors.append(
-                "PDF series XMP read-back mismatch"
-            )
+        if series_actual != str(fields["series"]):
+            errors.append("PDF series XMP read-back mismatch")
 
     if "series_index" in fields:
-        actual = str(
+        series_index_actual = str(
             root.xpath(
-                "string("
-                ".//calibre:series/"
-                "calibreSI:series_index[1]"
-                ")",
+                "string(.//calibre:series/calibreSI:series_index[1])",
                 namespaces=PDF_XMP_NS,
             )
         )
 
         if not _same_number(
             str(fields["series_index"]),
-            actual,
+            series_index_actual,
         ):
-            errors.append(
-                "PDF series index XMP read-back mismatch"
-            )
+            errors.append("PDF series index XMP read-back mismatch")
 
-    identifiers = fields.get(
-        "identifiers"
-    )
+    identifiers = fields.get("identifiers")
 
     if identifiers is not None:
         if not isinstance(
             identifiers,
             Mapping,
         ):
-            errors.append(
-                "PDF identifiers expectation is invalid"
-            )
+            errors.append("PDF identifiers expectation is invalid")
         else:
-            expected = {
-                str(key).casefold(): str(value)
-                for key, value
-                in identifiers.items()
+            identifiers_expected = {
+                str(key).casefold(): str(value) for key, value in identifiers.items()
             }
 
-            actual = _xmp_identifiers(
-                root
-            )
+            identifiers_actual = _xmp_identifiers(root)
 
             if any(
-                actual.get(key) != value
-                for key, value
-                in expected.items()
+                identifiers_actual.get(key) != value for key, value in identifiers_expected.items()
             ):
-                errors.append(
-                    "PDF identifiers XMP read-back mismatch"
-                )
+                errors.append("PDF identifiers XMP read-back mismatch")
 
-            isbn = _preferred_isbn(
-                expected
-            )
+            isbn = _preferred_isbn(identifiers_expected)
 
             if isbn is not None:
-                visible = _kavita_isbn(
-                    root
-                )
+                visible = _kavita_isbn(root)
 
                 if not _same_isbn(
                     isbn,
                     visible,
                 ):
-                    errors.append(
-                        "PDF Kavita ISBN read-back mismatch"
-                    )
+                    errors.append("PDF Kavita ISBN read-back mismatch")
 
 
 def _xmp_alt(
@@ -614,15 +480,11 @@ def _xmp_sequence(
     tag: str,
 ) -> tuple[str, ...]:
     values = root.xpath(
-        f".//{tag}/rdf:Seq/rdf:li/text()"
-        f" | .//{tag}/rdf:Bag/rdf:li/text()",
+        f".//{tag}/rdf:Seq/rdf:li/text() | .//{tag}/rdf:Bag/rdf:li/text()",
         namespaces=PDF_XMP_NS,
     )
 
-    return tuple(
-        str(value)
-        for value in values
-    )
+    return tuple(str(value) for value in values)
 
 
 def _xmp_identifiers(
@@ -638,26 +500,20 @@ def _xmp_identifiers(
     for item in values:
         scheme = str(
             item.xpath(
-                "string("
-                ".//xmpidq:Scheme[1]"
-                ")",
+                "string(.//xmpidq:Scheme[1])",
                 namespaces=PDF_XMP_NS,
             )
         ).strip()
 
         value = str(
             item.xpath(
-                "string("
-                ".//rdf:value[1]"
-                ")",
+                "string(.//rdf:value[1])",
                 namespaces=PDF_XMP_NS,
             )
         ).strip()
 
         if scheme and value:
-            output[
-                scheme.casefold()
-            ] = value
+            output[scheme.casefold()] = value
 
     return output
 
@@ -687,17 +543,9 @@ def _same_language(
     expected: str,
     actual: str,
 ) -> bool:
-    expected_value = (
-        expected.strip()
-        .replace("_", "-")
-        .casefold()
-    )
+    expected_value = expected.strip().replace("_", "-").casefold()
 
-    actual_value = (
-        actual.strip()
-        .replace("_", "-")
-        .casefold()
-    )
+    actual_value = actual.strip().replace("_", "-").casefold()
 
     if not actual_value:
         return False
@@ -705,10 +553,7 @@ def _same_language(
     if expected_value == actual_value:
         return True
 
-    return (
-        expected_value.split("-", 1)[0]
-        == actual_value.split("-", 1)[0]
-    )
+    return expected_value.split("-", 1)[0] == actual_value.split("-", 1)[0]
 
 
 def _same_date(
@@ -744,10 +589,7 @@ def _same_number(
     actual: str,
 ) -> bool:
     try:
-        return (
-            Decimal(expected)
-            == Decimal(actual)
-        )
+        return Decimal(expected) == Decimal(actual)
     except InvalidOperation:
         return expected == actual
 
@@ -765,24 +607,16 @@ def _same_isbn(
             value,
         ).upper()
 
-    return (
-        bool(actual.strip())
-        and normalized(expected)
-        == normalized(actual)
-    )
+    return bool(actual.strip()) and normalized(expected) == normalized(actual)
 
 
 def _require_writable(
     pdf: pikepdf.Pdf,
 ) -> None:
     if pdf.is_encrypted:
-        raise ValueError(
-            "encrypted PDFs are ineligible for metadata writes"
-        )
+        raise ValueError("encrypted PDFs are ineligible for metadata writes")
 
-    acroform = pdf.Root.get(
-        "/AcroForm"
-    )
+    acroform = pdf.Root.get("/AcroForm")
 
     signature_fields: Any = (
         acroform.get(
@@ -793,14 +627,8 @@ def _require_writable(
         else []
     )
 
-    if any(
-        field.get("/FT") == Name.Sig
-        for field in signature_fields
-    ):
-        raise ValueError(
-            "signature-bearing PDFs are ineligible "
-            "for metadata writes"
-        )
+    if any(field.get("/FT") == Name.Sig for field in signature_fields):
+        raise ValueError("signature-bearing PDFs are ineligible for metadata writes")
 
 
 def require_pdf_write_eligible(
@@ -814,12 +642,9 @@ def _stream_payload(
     stream: Any,
 ) -> bytes:
     try:
-        return (
-            b"decoded\0"
-            + cast(
-                bytes,
-                stream.read_bytes(),
-            )
+        return b"decoded\0" + cast(
+            bytes,
+            stream.read_bytes(),
         )
 
     except (
@@ -850,29 +675,16 @@ def _stream_payload(
 def _fingerprint(
     pdf: pikepdf.Pdf,
 ) -> PdfSemanticFingerprint:
-    boxes: list[
-        tuple[float, ...]
-    ] = []
+    boxes: list[tuple[float, ...]] = []
 
     content: list[str] = []
 
-    resources: list[
-        tuple[str, str]
-    ] = []
+    resources: list[tuple[str, str]] = []
 
-    for page_index, page in enumerate(
-        pdf.pages
-    ):
-        boxes.append(
-            tuple(
-                float(value)
-                for value in page.MediaBox
-            )
-        )
+    for page_index, page in enumerate(pdf.pages):
+        boxes.append(tuple(float(value) for value in page.MediaBox))
 
-        streams = page.get(
-            "/Contents"
-        )
+        streams = page.get("/Contents")
 
         values = (
             list(streams)
@@ -883,32 +695,18 @@ def _fingerprint(
             else [streams]
         )
 
-        payload = b"".join(
-            _stream_payload(stream)
-            for stream in values
-            if stream is not None
-        )
+        payload = b"".join(_stream_payload(stream) for stream in values if stream is not None)
 
-        content.append(
-            hashlib.sha256(
-                payload
-            ).hexdigest()
-        )
+        content.append(hashlib.sha256(payload).hexdigest())
 
-        for key, stream in (
-            page.Resources.get(
-                "/XObject",
-                {},
-            ).items()
-        ):
+        for key, stream in page.Resources.get(
+            "/XObject",
+            {},
+        ).items():
             resources.append(
                 (
                     f"{page_index}:{key}",
-                    hashlib.sha256(
-                        _stream_payload(
-                            stream
-                        )
-                    ).hexdigest(),
+                    hashlib.sha256(_stream_payload(stream)).hexdigest(),
                 )
             )
 

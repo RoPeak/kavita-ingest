@@ -14,14 +14,9 @@ def calibre_version_tuple(value: str) -> tuple[int, ...]:
     match = re.search(r"\d+(?:\.\d+)+", value)
 
     if match is None:
-        raise ValueError(
-            f"could not determine Calibre version from: {value!r}"
-        )
+        raise ValueError(f"could not determine Calibre version from: {value!r}")
 
-    parts = tuple(
-        int(part)
-        for part in match.group().split(".")
-    )
+    parts = tuple(int(part) for part in match.group().split("."))
 
     return parts + (0,) * max(
         0,
@@ -30,10 +25,7 @@ def calibre_version_tuple(value: str) -> tuple[int, ...]:
 
 
 def calibre_version_is_safe(value: str) -> bool:
-    return (
-        calibre_version_tuple(value)
-        >= MIN_SAFE_CALIBRE
-    )
+    return calibre_version_tuple(value) >= MIN_SAFE_CALIBRE
 
 
 def require_safe_calibre_version(value: str) -> str:
@@ -61,19 +53,14 @@ def require_safe_calibre_executable(
             check=False,
         )
     except OSError as exc:
-        raise ValueError(
-            f"required Calibre helper is unavailable: {executable}"
-        ) from exc
+        raise ValueError(f"required Calibre helper is unavailable: {executable}") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise ValueError(f"timed out querying Calibre helper version: {executable}") from exc
 
-    output = (
-        f"{result.stdout}\n{result.stderr}"
-    ).strip()
+    output = (f"{result.stdout}\n{result.stderr}").strip()
 
     if result.returncode != 0:
-        raise ValueError(
-            "failed to query Calibre version: "
-            f"{output or executable}"
-        )
+        raise ValueError(f"failed to query Calibre version: {output or executable}")
 
     match = re.search(
         r"\d+(?:\.\d+)+",
@@ -81,23 +68,15 @@ def require_safe_calibre_executable(
     )
 
     if match is None:
-        raise ValueError(
-            f"could not determine Calibre version from: {output!r}"
-        )
+        raise ValueError(f"could not determine Calibre version from: {output!r}")
 
-    return require_safe_calibre_version(
-        match.group()
-    )
+    return require_safe_calibre_version(match.group())
 
 
 def safe_calibre_environment(
     base: Mapping[str, str] | None = None,
 ) -> dict[str, str]:
-    environment = dict(
-        os.environ
-        if base is None
-        else base
-    )
+    environment = dict(os.environ if base is None else base)
 
     # Defence in depth in addition to requiring a patched Calibre.
     # Older vulnerable versions enabled Python templates by default.
