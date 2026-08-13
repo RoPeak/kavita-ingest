@@ -37,8 +37,10 @@ before plan creation also resume without repeating provider searches.
 `kavita-ingest wizard` launches the same guided experience explicitly.
 
 Choose an explicit action for each compact-review item; Enter has no implicit
-Next or Accept behavior. The wizard will not continue to planning while an
-applicable item is undecided or unresolved.
+Next or Accept behavior. Every discovered item needs an explicit review outcome
+before the guided wizard leaves Review. Accepted/work-only/manual identities can
+enter a partial plan while explicit rejected, unresolved and skipped items remain
+saved and excluded. A missing decision is still incomplete review.
 
 When `preserve` leaves a successfully ingested source in incoming, the next run
 should report it as already ingested only while both its source hash and verified
@@ -53,12 +55,26 @@ kavita-ingest plan create /path/to/trial-incoming
 kavita-ingest plan show PLAN_ID
 kavita-ingest plan approve PLAN_ID --digest DISPLAYED_SHA256
 kavita-ingest apply PLAN_ID
-kavita-ingest apply-status PLAN_ID
+kavita-ingest apply-status PLAN_ID --details
+kavita-ingest recover PLAN_ID
+kavita-ingest abandon PLAN_ID --reason "start over after reviewing durable state"
 ```
 
-Use `apply-status PLAN_ID --details` when diagnosing an interrupted item. If the
-wizard reports recovery-required state, review its durable status before
-confirming recovery; do not start a new plan to bypass that state.
+Use `apply-status PLAN_ID --details` when diagnosing an interrupted item. Prefer
+`recover PLAN_ID` when the journal proves a safe continuation. Use `abandon
+PLAN_ID` only when you deliberately want to start over and the engine confirms the
+run is safely abandonable. Abandonment preserves journal history, invalidates the
+old plan and modifies no media; uncertain commit/cleanup states are refused. Do
+not create a new plan merely to bypass recovery-required state.
+
+An invalidated or abandoned plan remains auditable history. Its wizard notice is
+retired only after all unfinished work has been replaced by a later completed
+plan; items that were already complete do not need pointless reprocessing.
+
+EPUB and PDF metadata writes require Calibre 9.12.0 or newer. PDF writes are
+performed on staged copies, preserve verified page/content/resource semantics and
+independently read back owned XMP fields. Encrypted and signature-bearing PDFs are
+not metadata-write candidates.
 
 Historical plans that report planning-policy version 1 must be regenerated
 before approval or application. They remain inspectable history, but lack the

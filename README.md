@@ -15,7 +15,7 @@ Supported inputs and transformations:
 | Input | Inspection | Metadata output | Notes |
 | --- | --- | --- | --- |
 | EPUB | Yes | EPUB/OPF | Calibre plus narrow contributor-role OPF patching |
-| PDF | Yes | PDF metadata | Unsigned, unencrypted PDFs only |
+| PDF | Yes | Calibre XMP | Unsigned, unencrypted, non-signature-bearing PDFs only; semantic payload verified |
 | CBZ | Yes | CBZ + rich ComicInfo 2.1 | Existing publication payloads preserved |
 | CBR/RAR3 | Yes | Repacked CBZ + ComicInfo | Single-volume ordinary archives |
 | CBR/RAR5 | Yes | Repacked CBZ + ComicInfo | Single-volume ordinary archives |
@@ -23,6 +23,12 @@ Supported inputs and transformations:
 Book output targets a Kavita **Books** library. Comics target Kavita **Comic
 (Flexible)**; projected ComicInfo `Series` includes a run-start year when needed
 to distinguish same-named runs.
+
+Kavita does not require an Author directory layer for books. Its scanner uses
+internal metadata and filenames and requires each book/series to live below the
+library root, so the default `Title/Title.ext` and `Series/...` layouts are
+intentional. See Kavita's current [file-structure guidance](https://wiki.kavitareader.com/guides/scanner/managefiles/)
+and [EPUB scanner guidance](https://wiki.kavitareader.com/guides/scanner/epub/).
 
 Kavita Ingest does not download media, manipulate Kavita's database, watch
 directories as a daemon, silently accept matches, provide a GUI, or reconstruct
@@ -32,22 +38,28 @@ a deleted original through rollback.
 
 - Linux and Python 3.12 or newer.
 - A destination filesystem supporting hard links.
-- Calibre's `ebook-meta` for EPUB metadata writes.
+- Calibre 9.12.0 or newer, including `ebook-meta`, for EPUB and PDF metadata
+  writes. Kavita Ingest enforces this floor and disables Calibre Python templates
+  for its metadata subprocesses.
 - `unrar` for CBR/RAR inspection and repacking.
 
-Milestone 0 validated Calibre/`ebook-meta` 7.6.0 and `unrar` 7.0.7. These are
-known-good versions, not claimed universal minimum versions. `kavita-ingest
-doctor` reports the actual local capabilities before use. Docker is not
-required.
+On Linux, install Calibre using its current official binary distribution rather
+than relying on a distribution package that may be outdated. `kavita-ingest
+doctor` reports the installed version and blocks EPUB/PDF metadata writes when
+the safe floor is not met. Docker is not required.
 
 ## Installation
 
 For an isolated command-line installation, use `pipx` from a local clone:
 
 ```bash
-sudo apt install calibre unrar pipx
+sudo apt install unrar pipx
+# Install the current official Calibre Linux binary from:
+# https://calibre-ebook.com/download_linux
+ebook-meta --version
 pipx install '/path/to/kavita-ingest'
 kavita-ingest --version
+kavita-ingest doctor
 ```
 
 For development:
@@ -67,6 +79,22 @@ The `compatibility-test` extra is only for rerunning Milestone 0 experiments. It
 includes `comicinfoxml`, which those experiments found unsuitable for production
 round-trip preservation; production ComicInfo writing uses the hardened `lxml`
 implementation included in the normal package.
+
+### Safe source bundles
+
+Do not ZIP the working directory directly: local clones may contain ignored
+credentials, Git internals, caches, build output, virtual environments and state.
+For a review/source archive, first commit the intended changes and use:
+
+```bash
+scripts/create-source-bundle.sh
+```
+
+The command requires a clean Git worktree and builds from `git archive`, making
+Git's committed `HEAD` the allow-list. The default output is written below
+ignored `dist/`; an explicit output path may be supplied as the first argument.
+The script validates the ZIP and refuses to publish it if local-only material
+such as `.env`, `.git`, caches, build output, SQLite state or logs appears.
 
 ## Configuration
 
@@ -158,9 +186,12 @@ exact persisted digest, and asks separately before apply. It finishes with
 verified publication and source-lifecycle results.
 
 Compact review has no implicit action: Enter alone does not skip or accept an
-item. Planning begins only after every applicable item has an explicit completed
-review decision; unresolved or undecided work returns to Review or can be saved
-for later.
+item. Before the guided wizard leaves Review, every discovered item needs an
+explicit outcome. Accepted/work-only/manual identities are eligible for planning;
+explicit rejected, unresolved and skipped items remain recorded but are excluded.
+This allows a partial plan for approved work without inventing a decision for the
+items deliberately left unresolved. A genuinely missing decision remains
+incomplete review.
 
 `kavita-ingest wizard` is the explicit equivalent. Draft plans, approved
 unapplied plans, unresolved review, accepted decisions awaiting a plan, and
@@ -191,6 +222,9 @@ kavita-ingest plan create /path/to/incoming
 kavita-ingest plan show 1
 kavita-ingest plan approve 1 --digest DISPLAYED_SHA256
 kavita-ingest apply 1
+kavita-ingest apply-status 1 --details
+kavita-ingest recover 1
+kavita-ingest abandon 1 --reason "start over after reviewing durable state"
 kavita-ingest status
 ```
 
@@ -242,7 +276,8 @@ resolves canonical identity from the accepted decision snapshot, projects the
 configured Kavita destination, freezes all effective policy, and stores a draft.
 It performs no provider lookup. Unapproved, rejected, unresolved, skipped,
 stale, unsupported, or conflicting items are reported rather than inferred into
-the plan.
+the plan. A plan may therefore be deliberately partial: accepted items can be
+included while explicit non-acceptance outcomes remain durable exclusions.
 
 `plan show --summary` displays a human-readable source, identity, destination,
 lifecycle, conflict, and policy summary; omit `--summary` for the authoritative
@@ -315,6 +350,14 @@ inspect per-item recovery evidence, and use
 immutable plan, journal, source, stage, destination, and recorded hashes. It
 never rematches metadata, queries providers, invents a destination, or repairs a
 published file through a surviving hard link.
+
+If a failed/recovery-required run is safely abandonable and you deliberately want
+to start over, use `kavita-ingest abandon PLAN_ID` after inspecting
+`apply-status PLAN_ID --details`. Abandonment preserves the journal, invalidates
+the immutable plan and modifies no media files. It is refused for completed runs
+and for states whose filesystem outcome is uncertain. Historical invalidation
+remains auditable; the wizard retires its replacement warning only when all
+unfinished work from that plan has a later completed replacement.
 
 `kavita-ingest rollback PLAN_ID` is preview-only. It may identify a reversible
 case when an unchanged destination and a proven preserved/archived original

@@ -50,6 +50,9 @@ ROOT_EPILOG = """Common commands:
   kavita-ingest recover PLAN_ID
       Retry only safely recoverable actions from an interrupted apply.
 
+  kavita-ingest abandon PLAN_ID
+      Close a safely abandonable run, preserving journal history and media.
+
   kavita-ingest plan list
       List immutable plans and their status.
 
@@ -343,9 +346,7 @@ def status(
         else:
             state = detect_resume_state(settings)
             next_action = state.action_label if state else "Start a new guided ingest"
-            render_human_status(
-                connection, Console(), next_action=next_action, details=details
-            )
+            render_human_status(connection, Console(), next_action=next_action, details=details)
     finally:
         connection.close()
 

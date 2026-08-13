@@ -9,7 +9,7 @@ Run the harness with:
 
 ```bash
 python3 -m venv .venv
-.venv/bin/pip install -e '.[compatibility]'
+.venv/bin/pip install -e '.[compatibility-test]'
 CALIBRE_CONFIG_DIRECTORY=/tmp/kavita-ingest-calibre .venv/bin/pytest -v
 ```
 

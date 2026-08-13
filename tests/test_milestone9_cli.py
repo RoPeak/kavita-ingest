@@ -22,7 +22,7 @@ def _runtime_config(path: Path, fixture: ApplyFixture) -> Path:
     config = path / "runtime.toml"
     config.write_text(
         f'''[paths]
-database = "{path / 'workflow.sqlite3'}"
+database = "{path / "workflow.sqlite3"}"
 books = "{fixture.config.books_root}"
 comics = "{fixture.config.comics_root}"
 incoming = ["{fixture.source.parent}"]
@@ -91,8 +91,8 @@ def test_init_is_secret_free_and_refuses_overwrite(tmp_path: Path) -> None:
             '[source]\nlifecycle="archive_after_verify"\n',
             "requires source.archive_root",
         ),
-        ('[archive]\nmax_entries=0\n', "archive limits must be positive"),
-        ('[matching]\neligible_score=101\n', "eligible_score must be between"),
+        ("[archive]\nmax_entries=0\n", "archive limits must be positive"),
+        ("[matching]\neligible_score=101\n", "eligible_score must be between"),
     ],
 )
 def test_configuration_errors_are_actionable(
@@ -131,6 +131,7 @@ def test_version_help_bare_non_tty_help_and_versioned_json(tmp_path: Path) -> No
     assert "apply" in help_result.output and "recover" in help_result.output
     assert "Common commands:" in help_result.output
     assert "apply-status PLAN_ID --details" in help_result.output
+    assert "abandon PLAN_ID" in help_result.output
     assert "COMMAND --help" in help_result.output
 
     apply_status_help = runner.invoke(app, ["apply-status", "--help"])
@@ -155,9 +156,7 @@ def test_version_help_bare_non_tty_help_and_versioned_json(tmp_path: Path) -> No
         ["scan", str(incoming), "--json", "--no-persist", "--config", str(config)],
     )
     assert json.loads(scanned.stdout)["command"] == "scan"
-    audited = runner.invoke(
-        app, ["audit", str(incoming), "--json", "--config", str(config)]
-    )
+    audited = runner.invoke(app, ["audit", str(incoming), "--json", "--config", str(config)])
     assert json.loads(audited.stdout)["command"] == "audit"
 
 
