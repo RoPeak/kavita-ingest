@@ -144,14 +144,20 @@ def latest_invalidation_notice(config: AppConfig) -> str | None:
     database = config.database_path
     if database is None or not database.exists():
         return None
+
     migrate(database)
+
     with connect(database) as connection:
         row = connection.execute(
             "SELECT x.plan_id, x.reason FROM plan_invalidations x "
             "ORDER BY x.invalidated_at DESC LIMIT 1"
         ).fetchone()
-    if row is None:
-        return None
+
+        if row is None:
+            return None
+
+        if _invalidation_replaced(connection, int(row["plan_id"])):
+            return None
 
     reason = str(row["reason"])
 
@@ -159,10 +165,87 @@ def latest_invalidation_notice(config: AppConfig) -> str | None:
         detail = reason.removeprefix("abandoned by user:").strip()
         return (
             f"A previous ingest was abandoned ({detail}). "
-            "A new plan is required."
+            "A replacement plan is still required."
         )
 
-    return f"A previous plan became stale ({reason}). A new plan is required."
+    return (
+        f"A previous plan became stale ({reason}). "
+        "A replacement plan is still required."
+    )
+
+
+def _invalidation_replaced(
+    connection: sqlite3.Connection,
+    plan_id: int,
+) -> bool:
+    """Return whether all unfinished work has a later completed replacement."""
+    planned = connection.execute(
+        "SELECT item_id, source_fingerprint "
+        "FROM plan_items_index WHERE plan_id=?",
+        (plan_id,),
+    ).fetchall()
+
+    if not planned:
+        return True
+
+    latest_run = connection.execute(
+        "SELECT id FROM apply_runs WHERE plan_id=? "
+        "ORDER BY started_at DESC, id DESC LIMIT 1",
+        (plan_id,),
+    ).fetchone()
+
+    if latest_run is None:
+        required = {
+            str(row["source_fingerprint"])
+            for row in planned
+        }
+    else:
+        states = {
+            str(row["item_id"]): (
+                str(row["state"])
+                if row["state"] is not None
+                else None
+            )
+            for row in connection.execute(
+                "SELECT pi.item_id, ai.state "
+                "FROM plan_items_index pi "
+                "LEFT JOIN apply_items ai "
+                "ON ai.run_id=? AND ai.item_id=pi.item_id "
+                "WHERE pi.plan_id=?",
+                (str(latest_run["id"]), plan_id),
+            ).fetchall()
+        }
+
+        required = {
+            str(row["source_fingerprint"])
+            for row in planned
+            if states.get(str(row["item_id"])) != "complete"
+        }
+
+    # A plan whose affected items all completed needs no replacement banner.
+    if not required:
+        return True
+
+    placeholders = ",".join("?" for _ in required)
+
+    rows = connection.execute(
+        f"""
+        SELECT DISTINCT pi.source_fingerprint
+        FROM plan_items_index pi
+        JOIN apply_runs ar ON ar.plan_id=pi.plan_id
+        WHERE pi.plan_id>?
+          AND ar.status='complete'
+          AND pi.source_fingerprint IN ({placeholders})
+        """,
+        (plan_id, *sorted(required)),
+    ).fetchall()
+
+    replaced = {
+        str(row["source_fingerprint"])
+        for row in rows
+    }
+
+    return required.issubset(replaced)
 
 
 def _home(
@@ -703,15 +786,48 @@ def _render_audit(audit: AuditResult, output: Console) -> None:
 
 
 def _render_build_result(result: PlanBuildResult, output: Console) -> None:
-    unresolved = sum(1 for item in result.exclusions if item.category == "unresolved")
-    skipped = sum(1 for item in result.exclusions if item.category == "skipped")
-    output.print(
-        f"Prepared {result.accepted_included} item{'s' if result.accepted_included != 1 else ''}; "
-        f"left out {result.unapproved_excluded} unapproved, {unresolved} unresolved, "
-        f"{result.unresolved_blocked} blocked and {skipped} skipped."
+    unresolved = sum(
+        1
+        for item in result.exclusions
+        if item.category == "unresolved"
     )
-    for exclusion in result.exclusions:
-        output.print(f"  {Path(exclusion.path).name}: {exclusion.explanation}")
+    skipped = sum(
+        1
+        for item in result.exclusions
+        if item.category == "skipped"
+    )
+    historical = tuple(
+        item
+        for item in result.exclusions
+        if item.category == "historical_missing"
+    )
+    actionable = tuple(
+        item
+        for item in result.exclusions
+        if item.category != "historical_missing"
+    )
+
+    output.print(
+        f"Prepared {result.accepted_included} "
+        f"item{'s' if result.accepted_included != 1 else ''}; "
+        f"left out {result.unapproved_excluded} unapproved, "
+        f"{unresolved} unresolved, "
+        f"{result.unresolved_blocked} blocked and "
+        f"{skipped} skipped."
+    )
+
+    if historical:
+        noun = "record" if len(historical) == 1 else "records"
+        output.print(
+            f"Ignored {len(historical)} historical source {noun} "
+            "no longer present."
+        )
+
+    for exclusion in actionable:
+        output.print(
+            f"  {Path(exclusion.path).name}: "
+            f"{exclusion.explanation}"
+        )
 
 
 def _configuration_summary(config: AppConfig) -> str:
@@ -732,13 +848,47 @@ def _reviewed_without_plan(
     config: AppConfig,
 ) -> tuple[Path, int] | None:
     rows = connection.execute(
-        "SELECT DISTINCT s.path FROM sources s JOIN decisions d ON d.source_fingerprint=s.sha256 "
-        "WHERE d.id=(SELECT max(d2.id) FROM decisions d2 "
-        "WHERE d2.source_fingerprint=d.source_fingerprint "
-        "AND d2.media_signature=d.media_signature) "
-        "AND d.decision_type IN ('accepted', 'work_accepted', 'manual_identity') "
-        "AND NOT EXISTS (SELECT 1 FROM plan_items_index pi JOIN apply_runs a "
-        "ON a.plan_id=pi.plan_id WHERE pi.source_fingerprint=s.sha256)"
+        """
+        SELECT DISTINCT s.path
+        FROM sources s
+        JOIN decisions d
+          ON d.source_fingerprint=s.sha256
+         AND d.media_signature=(s.format || ':' || s.size)
+        WHERE d.id=(
+            SELECT max(d2.id)
+            FROM decisions d2
+            WHERE d2.source_fingerprint=d.source_fingerprint
+              AND d2.media_signature=d.media_signature
+        )
+          AND (
+              d.decision_type IN (
+                  'accepted',
+                  'work_accepted',
+                  'manual_identity'
+              )
+              OR (
+                  d.decision_type='manual_override'
+                  AND EXISTS (
+                      SELECT 1
+                      FROM decisions auth
+                      WHERE auth.source_fingerprint=d.source_fingerprint
+                        AND auth.media_signature=d.media_signature
+                        AND auth.id<=d.id
+                        AND auth.decision_type IN (
+                            'accepted',
+                            'work_accepted',
+                            'manual_identity'
+                        )
+                  )
+              )
+          )
+          AND NOT EXISTS (
+              SELECT 1
+              FROM plan_preconditions pp
+              JOIN apply_runs a ON a.plan_id=pp.plan_id
+              WHERE pp.decision_head_id=d.id
+          )
+        """
     ).fetchall()
     paths = [
         Path(str(row["path"])).expanduser().resolve(strict=False)
@@ -752,11 +902,20 @@ def _unresolved_review(
     config: AppConfig,
 ) -> tuple[Path, int] | None:
     rows = connection.execute(
-        "SELECT DISTINCT s.path FROM sources s JOIN decisions d ON d.source_fingerprint=s.sha256 "
-        "WHERE d.id=(SELECT max(d2.id) FROM decisions d2 "
-        "WHERE d2.source_fingerprint=d.source_fingerprint "
-        "AND d2.media_signature=d.media_signature) "
-        "AND d.decision_type='unresolved'"
+        """
+        SELECT DISTINCT s.path
+        FROM sources s
+        JOIN decisions d
+          ON d.source_fingerprint=s.sha256
+         AND d.media_signature=(s.format || ':' || s.size)
+        WHERE d.id=(
+            SELECT max(d2.id)
+            FROM decisions d2
+            WHERE d2.source_fingerprint=d.source_fingerprint
+              AND d2.media_signature=d.media_signature
+        )
+          AND d.decision_type='unresolved'
+        """
     ).fetchall()
     paths = [
         Path(str(row["path"])).expanduser().resolve(strict=False)

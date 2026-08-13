@@ -24,6 +24,7 @@ from .apply_journal import (
     RunState,
 )
 from .archive_safety import ArchiveLimits, validate_inventory
+from .calibre import require_safe_calibre_executable
 from .config import AppConfig
 from .db import connect, migrate
 from .filesystem import DestinationExists, LinuxFilesystem, NoClobberFilesystem, sha256_file
@@ -172,7 +173,17 @@ class WriterDispatcher:
                 limits=_archive_limits(item),
             )
         if item.source_format == "pdf":
-            return write_pdf_metadata(item.source, destination, fields=_pdf_fields(set_fields))
+            if clear_fields:
+                raise ApplyRefused(
+                    "PDF metadata clearing is not supported by "
+                    "the current immutable writer contract"
+                )
+
+            return write_pdf_metadata(
+                item.source,
+                destination,
+                fields=set_fields,
+            )
         raise ApplyRefused(f"unsupported planned source format: {item.source_format}")
 
     def verify(self, item: PreparedItem, candidate: Path) -> VerificationResult:
@@ -191,7 +202,21 @@ class WriterDispatcher:
                 return _verify_repacked_cbr(source, candidate, set_fields, clear_fields)
             return verify_cbz(source, candidate, set_fields, clear_fields)
         if item.source_format == "pdf":
-            return verify_pdf(item.source, candidate, _pdf_fields(set_fields))
+            if clear_fields:
+                return VerificationResult(
+                    False,
+                    (),
+                    (
+                        "PDF metadata clearing is unsupported by "
+                        "the current writer contract",
+                    ),
+                )
+
+            return verify_pdf(
+                item.source,
+                candidate,
+                set_fields,
+            )
         return VerificationResult(False, (), ("unsupported source format",))
 
 
@@ -624,7 +649,7 @@ class ApplyEngine:
             "epub": {"ebook-meta", "opf_patcher"},
             "cbz": {"comicinfo_schema"},
             "cbr": {"comicinfo_schema", "rarfile", "unrar"},
-            "pdf": {"pikepdf"},
+            "pdf": {"ebook-meta", "pikepdf"},
         }.get(item.source_format)
         if required_keys is None:
             raise ApplyRefused(f"unsupported planned source format: {item.source_format}")
@@ -633,7 +658,14 @@ class ApplyEngine:
             raise ApplyRefused(f"plan lacks required writer versions: {sorted(missing)}")
         for key, expected in requirements.items():
             if key == "ebook-meta":
-                actual = _tool_version("ebook-meta", "ebook-meta (calibre")
+                try:
+                    actual = require_safe_calibre_executable(
+                        "ebook-meta"
+                    )
+                except ValueError as exc:
+                    raise ApplyRefused(
+                        str(exc)
+                    ) from exc
             elif key == "unrar":
                 actual = _tool_version("unrar", "UNRAR")
             elif key in supported:
@@ -1240,30 +1272,6 @@ def _epub_roles(item: dict[str, Any]) -> dict[str, Sequence[str]]:
         for field, role in mapping.items()
         if field in contributors
     }
-
-
-def _pdf_fields(values: Mapping[str, Any]) -> dict[str, str]:
-    output: dict[str, str] = {}
-    for source, target in {
-        "title": "title",
-        "description": "subject",
-        "language": "language",
-        "date": "date",
-    }.items():
-        if values.get(source) is not None:
-            output[target] = str(values[source])
-    authors = values.get("authors")
-    if isinstance(authors, list) and authors:
-        output["author"] = ", ".join(str(author) for author in authors)
-    identifiers = values.get("identifiers")
-    if isinstance(identifiers, dict) and identifiers:
-        output["identifier"] = ";".join(
-            f"{key}:{value}" for key, value in sorted(identifiers.items())
-        )
-    subjects = values.get("subjects")
-    if isinstance(subjects, list) and subjects:
-        output["keywords"] = ", ".join(str(subject) for subject in subjects)
-    return output
 
 
 def _verify_repacked_cbr(

@@ -12,6 +12,7 @@ from typing import Any
 import pikepdf
 import rarfile
 
+from .calibre import require_safe_calibre_executable
 from .canonical import ResolutionLevel
 from .config import AppConfig
 from .decisions import DecisionRepository, DecisionType
@@ -373,11 +374,19 @@ def _verification_requirements(source_format: SourceFormat) -> tuple[str, ...]:
 def _writer_versions(source_format: SourceFormat) -> dict[str, str]:
     if source_format is SourceFormat.EPUB:
         return {
-            "ebook-meta": _tool_version("ebook-meta", "ebook-meta (calibre"),
+            "ebook-meta": require_safe_calibre_executable(
+                "ebook-meta"
+            ),
             "opf_patcher": "1",
         }
+
     if source_format is SourceFormat.PDF:
-        return {"pikepdf": pikepdf.__version__}
+        return {
+            "ebook-meta": require_safe_calibre_executable(
+                "ebook-meta"
+            ),
+            "pikepdf": pikepdf.__version__,
+        }
     if source_format is SourceFormat.CBZ:
         return {"comicinfo_schema": "2.1"}
     if source_format is SourceFormat.CBR:

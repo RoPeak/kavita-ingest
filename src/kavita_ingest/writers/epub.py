@@ -11,6 +11,10 @@ from pathlib import Path
 
 from lxml import etree
 
+from ..calibre import (
+    require_safe_calibre_executable,
+    safe_calibre_environment,
+)
 from .common import VerificationResult
 
 CONTAINER = "META-INF/container.xml"
@@ -57,13 +61,24 @@ def write_epub(
     try:
         shutil.copy2(source, staged)
         if calibre_fields:
+            require_safe_calibre_executable(ebook_meta)
+
             subprocess.run(
-                _ebook_meta_command(ebook_meta, staged, calibre_fields),
+                _ebook_meta_command(
+                    ebook_meta,
+                    staged,
+                    calibre_fields,
+                ),
                 check=True,
                 capture_output=True,
                 text=True,
+                env=safe_calibre_environment(),
             )
-            _retain_only_opf_changes(source, staged)
+
+            _retain_only_opf_changes(
+                source,
+                staged,
+            )
         if exact_date is not None or contributor_roles or native_fields:
             _patch_opf(
                 staged,

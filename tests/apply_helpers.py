@@ -8,6 +8,7 @@ from pathlib import Path
 from compatibility.helpers.epub_factory import create_epub
 from compatibility.helpers.pdf_factory import create_pdf
 from kavita_ingest.archive_safety import ArchiveLimits
+from kavita_ingest.calibre import require_safe_calibre_executable
 from kavita_ingest.canonical import CanonicalIdentity, ResolutionLevel, work_only_identity
 from kavita_ingest.config import AppConfig
 from kavita_ingest.db import connect, migrate
@@ -171,9 +172,20 @@ def _source(
 
 def _versions(media_format: str) -> dict[str, str]:
     if media_format == "epub":
-        return {"ebook-meta": "7.6.0", "opf_patcher": "1"}
+        return {
+            "ebook-meta": require_safe_calibre_executable(
+                "ebook-meta"
+            ),
+            "opf_patcher": "1",
+        }
+
     if media_format == "pdf":
-        return {"pikepdf": "10.11.0"}
+        return {
+            "ebook-meta": require_safe_calibre_executable(
+                "ebook-meta"
+            ),
+            "pikepdf": "10.11.0",
+        }
     if media_format == "cbz":
         return {"comicinfo_schema": "2.1"}
     return {"comicinfo_schema": "2.1", "rarfile": "4.5", "unrar": "7.00"}

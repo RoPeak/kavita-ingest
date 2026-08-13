@@ -16,7 +16,12 @@ from kavita_ingest.domain import MediaKind, SequenceNumber
 from kavita_ingest.projection import project_comic
 from kavita_ingest.writers.comic import write_cbz_metadata
 from kavita_ingest.writers.epub import write_epub
-from kavita_ingest.writers.pdf import write_pdf_metadata
+from kavita_ingest.writers.pdf import (
+    _ebook_meta_command,
+    _stream_payload,
+    verify_pdf,
+    write_pdf_metadata,
+)
 from kavita_ingest.writers.repack import repack_cbr_to_cbz
 
 
@@ -404,24 +409,307 @@ def test_epub_writer_reads_back_every_calibre_owned_field(tmp_path: Path) -> Non
     }
 
 
-def test_pdf_writer_preserves_semantic_page_payloads_and_blocks_unsafe_states(
+class _SyntheticPdfStream:
+    def __init__(
+        self,
+        *,
+        decoded: bytes = b"",
+        raw: bytes = b"",
+        filter_value: object = "",
+        read_error: Exception | None = None,
+    ) -> None:
+        self.decoded = decoded
+        self.raw = raw
+        self.filter_value = filter_value
+        self.read_error = read_error
+        self.decoded_reads = 0
+        self.raw_reads = 0
+
+    def read_bytes(self) -> bytes:
+        self.decoded_reads += 1
+        if self.read_error is not None:
+            raise self.read_error
+        return self.decoded
+
+    def read_raw_bytes(self) -> bytes:
+        self.raw_reads += 1
+        return self.raw
+
+    def get(
+        self,
+        key: str,
+        default: object = "",
+    ) -> object:
+        assert key == "/Filter"
+        return self.filter_value if self.filter_value != "" else default
+
+
+def test_pdf_stream_payload_prefers_decoded_semantics() -> None:
+    first = _SyntheticPdfStream(
+        decoded=b"same decoded pixels/content",
+        raw=b"compressed representation one",
+        filter_value="/FlateDecode",
+    )
+    second = _SyntheticPdfStream(
+        decoded=b"same decoded pixels/content",
+        raw=b"different compressed representation",
+        filter_value="/DifferentDecode",
+    )
+
+    first_payload = _stream_payload(first)
+    second_payload = _stream_payload(second)
+
+    assert first_payload == (
+        b"decoded\0same decoded pixels/content"
+    )
+    assert second_payload == first_payload
+
+    # If decoding succeeds, compression representation is deliberately
+    # irrelevant to the semantic fingerprint.
+    assert first.raw_reads == 0
+    assert second.raw_reads == 0
+    assert first.decoded_reads == 1
+    assert second.decoded_reads == 1
+
+
+@pytest.mark.parametrize(
+    "error_kind",
+    ["value_error", "pikepdf_error"],
+)
+def test_pdf_stream_payload_falls_back_to_raw_unfilterable_stream(
+    error_kind: str,
+) -> None:
+    error: Exception
+    if error_kind == "value_error":
+        error = ValueError("synthetic unfilterable stream")
+    else:
+        error = pikepdf.PdfError(
+            "synthetic unfilterable stream"
+        )
+
+    stream = _SyntheticPdfStream(
+        raw=b"\x00\x01encoded-payload\xff",
+        filter_value="/JBIG2Decode",
+        read_error=error,
+    )
+
+    payload = _stream_payload(stream)
+
+    assert payload == (
+        b"raw\0"
+        b"/JBIG2Decode"
+        b"\0"
+        b"\x00\x01encoded-payload\xff"
+    )
+    assert stream.decoded_reads == 1
+    assert stream.raw_reads == 1
+
+
+def test_pdf_raw_stream_fingerprint_includes_filter_identity() -> None:
+    raw = b"same encoded bytes"
+
+    first = _SyntheticPdfStream(
+        raw=raw,
+        filter_value="/JBIG2Decode",
+        read_error=ValueError("unfilterable"),
+    )
+    second = _SyntheticPdfStream(
+        raw=raw,
+        filter_value="/JPXDecode",
+        read_error=ValueError("unfilterable"),
+    )
+
+    first_hash = hashlib.sha256(
+        _stream_payload(first)
+    ).hexdigest()
+    second_hash = hashlib.sha256(
+        _stream_payload(second)
+    ).hexdigest()
+
+    # Identical encoded bytes interpreted through different filters are
+    # not semantically interchangeable.
+    assert first_hash != second_hash
+
+
+def test_pdf_raw_stream_fingerprint_detects_encoded_mutation() -> None:
+    original = _SyntheticPdfStream(
+        raw=b"\x00\x01\x02\x03",
+        filter_value="/JBIG2Decode",
+        read_error=ValueError("unfilterable"),
+    )
+    mutated = _SyntheticPdfStream(
+        raw=b"\x00\x01\x02\x04",
+        filter_value="/JBIG2Decode",
+        read_error=ValueError("unfilterable"),
+    )
+
+    original_hash = hashlib.sha256(
+        _stream_payload(original)
+    ).hexdigest()
+    mutated_hash = hashlib.sha256(
+        _stream_payload(mutated)
+    ).hexdigest()
+
+    assert original_hash != mutated_hash
+
+
+@pytest.mark.skipif(
+    shutil.which("ebook-meta") is None,
+    reason="Calibre ebook-meta unavailable",
+)
+def test_pdf_writer_preserves_semantics_and_reads_back_full_kavita_metadata(
     tmp_path: Path,
 ) -> None:
-    source = create_pdf(tmp_path / "source.pdf")
-    destination = tmp_path / "out.pdf"
-    before = hashlib.sha256(source.read_bytes()).hexdigest()
-    assert write_pdf_metadata(
+    source = create_pdf(
+        tmp_path / "source.pdf"
+    )
+
+    destination = (
+        tmp_path / "out.pdf"
+    )
+
+    fields = {
+        "title": "Resolved PDF",
+        "authors": (
+            "First Author",
+            "Second Author",
+        ),
+        "publisher": "Resolved Press",
+        "series": "Resolved Series",
+        "series_index": "2.5",
+        "description": "Resolved description",
+        "subjects": (
+            "Testing",
+            "Reference",
+        ),
+        "language": "en",
+        "date": "2024-01-02",
+        "identifiers": {
+            "google": "volume-123",
+            "isbn_13": "9780131103627",
+        },
+    }
+
+    before = hashlib.sha256(
+        source.read_bytes()
+    ).hexdigest()
+
+    result = write_pdf_metadata(
         source,
         destination,
-        fields={"title": "New", "author": "Writer", "language": "en-GB", "date": "2024-01-02"},
+        fields=fields,
+    )
+
+    assert result.valid
+
+    assert set(result.checks) == {
+        "page_tree",
+        "decoded_content_hashes",
+        "resource_hashes",
+        "calibre_xmp_readback",
+    }
+
+    assert hashlib.sha256(
+        source.read_bytes()
+    ).hexdigest() == before
+
+    assert verify_pdf(
+        source,
+        destination,
+        fields,
     ).valid
-    assert hashlib.sha256(source.read_bytes()).hexdigest() == before
-    encrypted = create_pdf(tmp_path / "encrypted.pdf", encrypted=True)
-    with pytest.raises(pikepdf.PasswordError):
-        write_pdf_metadata(encrypted, tmp_path / "encrypted-out.pdf", fields={"title": "No"})
-    signed = create_pdf(tmp_path / "signed.pdf", signed_marker=True)
-    with pytest.raises(ValueError, match="signature-bearing"):
-        write_pdf_metadata(signed, tmp_path / "signed-out.pdf", fields={"title": "No"})
+
+    encrypted = create_pdf(
+        tmp_path / "encrypted.pdf",
+        encrypted=True,
+    )
+
+    with pytest.raises(
+        pikepdf.PasswordError
+    ):
+        write_pdf_metadata(
+            encrypted,
+            tmp_path / "encrypted-out.pdf",
+            fields={"title": "No"},
+        )
+
+    signed = create_pdf(
+        tmp_path / "signed.pdf",
+        signed_marker=True,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="signature-bearing",
+    ):
+        write_pdf_metadata(
+            signed,
+            tmp_path / "signed-out.pdf",
+            fields={"title": "No"},
+        )
+
+
+def test_pdf_ebook_meta_command_carries_every_owned_field() -> None:
+    command = _ebook_meta_command(
+        "ebook-meta",
+        Path("/tmp/book.pdf"),
+        {
+            "title": "Book",
+            "authors": (
+                "One Author",
+                "Two Author",
+            ),
+            "publisher": "Press",
+            "series": "Series",
+            "series_index": "7.5",
+            "description": "Description",
+            "subjects": (
+                "One",
+                "Two",
+            ),
+            "language": "en",
+            "date": "2024-05-07",
+            "identifiers": {
+                "google": "volume-1",
+                "isbn_13": "9780131103627",
+            },
+        },
+    )
+
+    for option in (
+        "--title",
+        "--authors",
+        "--publisher",
+        "--series",
+        "--index",
+        "--comments",
+        "--tags",
+        "--language",
+        "--date",
+        "--identifier",
+        "--isbn",
+    ):
+        assert option in command
+
+    assert (
+        "One Author & Two Author"
+        in command
+    )
+
+    assert (
+        "google:volume-1"
+        in command
+    )
+
+    assert (
+        "isbn_13:9780131103627"
+        in command
+    )
+
+    assert (
+        "9780131103627"
+        in command
+    )
 
 
 @pytest.mark.parametrize("fixture", ["rar3-subdirs.rar", "rar5-subdirs.rar"])

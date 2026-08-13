@@ -21,7 +21,7 @@ from kavita_ingest.apply_engine import (
     StalePlan,
     WriterDispatcher,
 )
-from kavita_ingest.apply_journal import JournalRepository, RunState
+from kavita_ingest.apply_journal import ItemState, JournalRepository, RunState
 from kavita_ingest.comicinfo import ComicInfoError
 from kavita_ingest.db import connect
 from kavita_ingest.filesystem import LinuxFilesystem, sha256_file
@@ -474,6 +474,271 @@ def test_db_failure_after_filesystem_commit_recovers_from_committing_state(
     assert fixture.destination.exists() and fixture.source.exists()
     monkeypatch.setattr(JournalRepository, "transition", original)
     assert ApplyEngine(fixture.config).recover(fixture.plan_id).status is RunState.COMPLETE
+
+
+def test_abandon_mixed_complete_and_failed_run_preserves_media_and_history(
+    tmp_path: Path,
+) -> None:
+    fixture = make_apply_fixture(
+        tmp_path,
+        "cbz",
+        plan_name="abandon-mixed",
+    )
+    database = fixture.config.database_path
+    assert database is not None
+
+    with connect(database) as connection:
+        original = PlanStore(connection).get(fixture.plan_id)
+        document = json.loads(original.canonical_json)
+        first = document["items"][0]
+        second = copy.deepcopy(first)
+
+        second_source = fixture.source.with_name("second.cbz")
+        shutil.copy2(fixture.source, second_source)
+        second_destination = fixture.destination.with_name("second.cbz")
+
+        second["item_id"] = "item-2"
+        second["source"]["path"] = str(second_source)
+        second["source"]["sha256"] = sha256_file(second_source)
+        second["source"]["size"] = second_source.stat().st_size
+        second["source"]["mtime_ns"] = second_source.stat().st_mtime_ns
+        second["kavita_projection"]["destination"] = str(
+            second_destination.relative_to(
+                fixture.config.comics_root  # type: ignore[arg-type]
+            )
+        )
+        second["kavita_projection"]["absolute_destination"] = str(
+            second_destination
+        )
+
+        document["plan_id"] = "abandon-mixed-two-items"
+        document["items"] = [first, second]
+
+        payload = json.dumps(
+            document,
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+
+        plan = PlanStore(connection).import_bytes(payload)
+        PlanStore(connection).approve(plan.id, plan.sha256)
+
+    first_summary = ApplyEngine(
+        fixture.config,
+        writers=SelectiveMetadataFailureWriter({"item-2"}),
+    ).apply(plan.id)
+
+    assert first_summary.status is RunState.RECOVERY_REQUIRED
+    assert first_summary.counts == {
+        "complete": 1,
+        "failed": 1,
+    }
+
+    def media_snapshot() -> dict[str, str]:
+        roots = (
+            fixture.source.parent,
+            fixture.config.books_root,
+            fixture.config.comics_root,
+        )
+        return {
+            str(candidate): sha256_file(candidate)
+            for root in roots
+            if root is not None and root.exists()
+            for candidate in root.rglob("*")
+            if candidate.is_file()
+        }
+
+    before = media_snapshot()
+
+    with connect(database) as connection:
+        journal = JournalRepository(connection)
+        run = journal.latest_for_plan(plan.id)
+        assert run is not None
+
+        event_count = connection.execute(
+            "SELECT count(*) FROM apply_journal_events WHERE run_id=?",
+            (run.id,),
+        ).fetchone()[0]
+
+        item_states = {
+            item.item_id: item.state
+            for item in journal.items(run.id)
+        }
+
+    assert item_states == {
+        "item-1": ItemState.COMPLETE,
+        "item-2": ItemState.FAILED,
+    }
+
+    abandoned = ApplyEngine(fixture.config).abandon(
+        plan.id,
+        reason="user requested a clean restart",
+    )
+
+    assert abandoned.status is RunState.FAILED
+
+    # Abandonment is journal/database-only. Absolutely no media may change.
+    assert media_snapshot() == before
+
+    with connect(database) as connection:
+        journal = JournalRepository(connection)
+        closed = journal.latest_for_plan(plan.id)
+        assert closed is not None
+
+        assert closed.status is RunState.FAILED
+        assert (
+            closed.error
+            == "abandoned by user: user requested a clean restart"
+        )
+
+        invalidation = connection.execute(
+            "SELECT reason FROM plan_invalidations WHERE plan_id=?",
+            (plan.id,),
+        ).fetchone()
+
+        assert invalidation is not None
+        assert invalidation["reason"] == closed.error
+
+        assert {
+            item.item_id: item.state
+            for item in journal.items(closed.id)
+        } == item_states
+
+        # Existing history remains and one new run-state audit event is appended.
+        assert connection.execute(
+            "SELECT count(*) FROM apply_journal_events WHERE run_id=?",
+            (closed.id,),
+        ).fetchone()[0] == event_count + 1
+
+    inspection = ApplyEngine(
+        fixture.config
+    ).inspect_recovery(plan.id)
+
+    assert all(
+        "plan is invalidated" in item.proposed_action
+        for item in inspection
+    )
+
+
+@pytest.mark.parametrize(
+    ("checkpoint", "expected_state"),
+    [
+        ("after_staged", ItemState.STAGED),
+        ("after_verified_journal", ItemState.VERIFIED),
+        ("after_destination_commit", ItemState.COMMITTING),
+        ("after_committed", ItemState.COMMITTED),
+        ("before_cleanup", ItemState.CLEANUP_PENDING),
+    ],
+)
+def test_abandon_refuses_uncertain_filesystem_states(
+    checkpoint: str,
+    expected_state: ItemState,
+    tmp_path: Path,
+) -> None:
+    fixture = make_apply_fixture(
+        tmp_path,
+        "cbz",
+        plan_name=f"abandon-refuse-{expected_state.value}",
+    )
+
+    def crash(name: str, item_id: str) -> None:
+        del item_id
+        if name == checkpoint:
+            raise InjectedCrash(name)
+
+    with pytest.raises(InjectedCrash):
+        ApplyEngine(
+            fixture.config,
+            fault=crash,
+        ).apply(fixture.plan_id)
+
+    inspection = ApplyEngine(
+        fixture.config
+    ).inspect_recovery(fixture.plan_id)
+
+    assert inspection[0].state is expected_state
+
+    with pytest.raises(
+        ApplyRefused,
+        match="cannot be abandoned",
+    ):
+        ApplyEngine(fixture.config).abandon(
+            fixture.plan_id,
+            reason="unsafe synthetic abandonment",
+        )
+
+    with connect(
+        fixture.config.database_path  # type: ignore[arg-type]
+    ) as connection:
+        assert connection.execute(
+            "SELECT 1 FROM plan_invalidations WHERE plan_id=?",
+            (fixture.plan_id,),
+        ).fetchone() is None
+
+
+def test_abandon_accepts_prepublication_safe_state(
+    tmp_path: Path,
+) -> None:
+    fixture = make_apply_fixture(
+        tmp_path,
+        "cbz",
+        plan_name="abandon-preflight-ok",
+    )
+
+    def crash(name: str, item_id: str) -> None:
+        del item_id
+        if name == "before_staging":
+            raise InjectedCrash(name)
+
+    with pytest.raises(InjectedCrash):
+        ApplyEngine(
+            fixture.config,
+            fault=crash,
+        ).apply(fixture.plan_id)
+
+    inspection = ApplyEngine(
+        fixture.config
+    ).inspect_recovery(fixture.plan_id)
+
+    assert inspection[0].state is ItemState.PREFLIGHT_OK
+    assert fixture.source.exists()
+    assert not fixture.destination.exists()
+
+    summary = ApplyEngine(fixture.config).abandon(
+        fixture.plan_id,
+        reason="restart before staging",
+    )
+
+    assert summary.status is RunState.FAILED
+    assert fixture.source.exists()
+    assert not fixture.destination.exists()
+
+
+def test_abandon_refuses_already_complete_run(
+    tmp_path: Path,
+) -> None:
+    fixture = make_apply_fixture(
+        tmp_path,
+        "cbz",
+        lifecycle="preserve",
+    )
+
+    assert (
+        ApplyEngine(fixture.config)
+        .apply(fixture.plan_id)
+        .status
+        is RunState.COMPLETE
+    )
+
+    with pytest.raises(
+        ApplyRefused,
+        match="already complete",
+    ):
+        ApplyEngine(fixture.config).abandon(
+            fixture.plan_id,
+            reason="should not be possible",
+        )
 
 
 def test_invalidated_plan_and_incompatible_writer_are_refused(tmp_path: Path) -> None:
