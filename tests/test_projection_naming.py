@@ -77,6 +77,28 @@ def test_special_formats_have_filename_identity_and_no_implicit_volume(
     assert "1A - Deluxe" in projection.filename
 
 
+def test_v1_comic_flexible_target_keeps_run_year_in_series_not_volume() -> None:
+    identity = CanonicalIdentity(
+        MediaKind.COMIC,
+        "Abomination, Conclusion",
+        (),
+        series_title="Absolute Batman",
+        sequence=SequenceNumber.parse("14"),
+        run_start_year=2024,
+        item_type="issue",
+    )
+
+    projection = project_comic(identity)
+
+    assert identity.series_title == "Absolute Batman"
+    assert identity.run_start_year == 2024
+    assert projection.metadata["Series"] == "Absolute Batman (2024)"
+    assert projection.metadata["Volume"] == ""
+    assert "Volume" in projection.ownership.clear_fields
+    assert projection.destination_folder == PurePosixPath("Absolute Batman (2024)")
+    assert projection.filename.startswith("Absolute Batman (2024) - 014")
+
+
 def test_integer_collection_volume_is_explicit_and_separate_from_run_year() -> None:
     identity = CanonicalIdentity(
         MediaKind.COMIC,

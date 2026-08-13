@@ -9,6 +9,7 @@ both originals with the `preserve` lifecycle.
 - [ ] Back up the Kavita library and Kavita Ingest state database.
 - [ ] Run `kavita-ingest doctor`; resolve every relevant `BLOCKED` result.
 - [ ] Confirm Books and Comics destination roots point at the intended libraries.
+- [ ] Confirm the Kavita comics library type is **Comic (Flexible)**, not **Comic**.
 - [ ] Confirm the source lifecycle is `preserve`.
 - [ ] Scan and audit only the two trial files.
 - [ ] Explicitly review and accept each identity; do not rely on score alone.
@@ -83,6 +84,8 @@ immutable publication-permission policy required by current apply safety.
 - [ ] Confirm both original incoming files still exist unchanged.
 - [ ] Open the resulting EPUB and CBZ independently.
 - [ ] Inspect EPUB metadata and CBZ `ComicInfo.xml`.
+- [ ] For regular comics, confirm the run year is part of projected `Series` and
+      is not being invented as `Volume`.
 - [ ] Confirm filenames and folders are personally acceptable.
 - [ ] Confirm output files are `0644` (or the configured safe mode) and newly
       created library directories are `0755` (or the configured safe mode).

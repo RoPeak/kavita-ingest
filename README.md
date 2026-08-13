@@ -24,6 +24,36 @@ Book output targets a Kavita **Books** library. Comics target Kavita **Comic
 (Flexible)**; projected ComicInfo `Series` includes a run-start year when needed
 to distinguish same-named runs.
 
+### Kavita comic library target
+
+The v1 comic projection contract deliberately targets **Comic (Flexible)**, not
+Kavita's stricter **Comic** library type. For a regular issue whose canonical
+identity is `series_title = "Absolute Batman"` and `run_start_year = 2024`, the
+v1 projection is:
+
+```text
+ComicInfo.Series = Absolute Batman (2024)
+ComicInfo.Volume = omitted/cleared unless it is a real collection volume
+folder           = Absolute Batman (2024)/
+```
+
+This keeps the provider run-start year separate from ComicInfo's collection
+`Volume` meaning while giving Comic (Flexible) the run disambiguation it needs.
+Kavita's current library guidance explicitly notes that Comic (Flexible) cannot
+represent multiple same-named runs separately without user intervention such as
+attaching the year to the series name, while retaining flexible Volume, TPB and
+Special grouping.
+
+The stricter Comic model uses a different contract: when both `Series` and
+`Volume` are present it constructs `Series (Volume)`, with the volume expected to
+identify the run (normally its starting year), and it follows ComicVine-style
+handling where trades and annuals are separate entities. Supporting that model
+would therefore require a deliberate alternate projection mode rather than a
+silent metadata rewrite. It is deferred beyond v1.
+
+Existing Comic (Flexible) libraries and already-published v1-style comics should
+not be migrated or retagged merely to adopt the stricter Comic model.
+
 Kavita does not require an Author directory layer for books. Its scanner uses
 internal metadata and filenames and requires each book/series to live below the
 library root, so the default `Title/Title.ext` and `Series/...` layouts are
