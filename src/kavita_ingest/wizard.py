@@ -11,6 +11,7 @@ from typing import Any
 import typer
 from rich.console import Console
 from rich.panel import Panel
+from rich.progress import BarColumn, MofNCompleteColumn, Progress, SpinnerColumn, TextColumn
 from rich.text import Text
 
 from .apply_engine import ApplyEngine, ApplyRefused, ApplySummary
@@ -356,6 +357,8 @@ def _run_new(
         output.print("Review decisions saved. Resume later to finish review.")
         return None
     _stage(output, 3, "Review", "saved")
+    if len(audit.items) >= 10:
+        _reader_pause(output, "Review complete. Press Enter to review the immutable plan")
     return _plan_reviewed(config, root, output)
 
 
@@ -585,7 +588,7 @@ def _resume(config: AppConfig, state: ResumeState, output: Console) -> str | Non
         plan = _get_plan(config, state.plan_id)
         document = plan_document(plan)
         if recovered.status.value == "complete":
-            render_completed_apply(recovered, document, output)
+            render_completed_apply(recovered, document, output, compact=True)
             return _finish_menu(document, output)
         render_apply_summary(recovered, output)
         return None
@@ -595,7 +598,12 @@ def _resume(config: AppConfig, state: ResumeState, output: Console) -> str | Non
 def _review_and_maybe_apply(
     config: AppConfig, plan: StoredPlan, output: Console
 ) -> str | None:
-    document = render_plan_summary(plan, output, technical_header=False)
+    document = render_plan_summary(
+        plan,
+        output,
+        technical_header=False,
+        pause_every=8 if output.is_terminal else None,
+    )
     if plan.status == "draft":
         outcome = _plan_approval_menu(config, plan, output)
         if outcome != "approved":
@@ -751,10 +759,31 @@ def _apply(
 ) -> ApplySummary | None:
     _stage(output, 6, "Apply", "current")
     try:
-        engine = ApplyEngine(config)
-        preview = engine.preview(plan_id)
+        preview = ApplyEngine(config).preview(plan_id)
         output.print(f"Applying {preview.item_count} item{'s' if preview.item_count != 1 else ''}")
-        summary = engine.apply(plan_id)
+        if output.is_terminal and preview.item_count:
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("{task.description}"),
+                BarColumn(),
+                MofNCompleteColumn(),
+                console=output,
+                transient=False,
+            ) as progress:
+                task = progress.add_task("Starting Apply", total=preview.item_count)
+
+                def update(completed: int, total: int, source_name: str) -> None:
+                    label = _short_progress_name(source_name)
+                    progress.update(
+                        task,
+                        completed=completed,
+                        total=total,
+                        description=f"Applying {label}" if label else "Applying",
+                    )
+
+                summary = ApplyEngine(config, progress=update).apply(plan_id)
+        else:
+            summary = ApplyEngine(config).apply(plan_id)
     except ApplyRefused as exc:
         output.print(f"Apply refused: {exc}")
         return None
@@ -765,8 +794,20 @@ def _apply(
     _stage(output, 7, "Finish", "complete")
     output.print("✓ Source verified\n✓ Metadata written\n✓ Staged output verified")
     output.print("✓ Published\n✓ Destination verified\n✓ Source lifecycle completed")
-    render_completed_apply(summary, document, output)
+    render_completed_apply(summary, document, output, compact=True)
     return summary
+
+
+def _short_progress_name(value: str, *, limit: int = 54) -> str:
+    if len(value) <= limit:
+        return value
+    return value[: limit - 1] + "…"
+
+
+def _reader_pause(output: Console, message: str) -> None:
+    if not output.is_terminal:
+        return
+    typer.prompt(message, default="", show_default=False)
 
 
 def _finish_menu(document: dict[str, Any], output: Console) -> str | None:

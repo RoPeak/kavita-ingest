@@ -4,13 +4,19 @@ All notable release-level changes to Kavita Ingest are recorded here.
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-08-14
+
 ### Fixed
 
-- Bind new immutable plans to the detected source content signature and re-check it at Apply, allowing ZIP-backed comic archives with a misleading `.cbr` suffix to be normalized safely to CBZ.
+- Bind new immutable plans to the detected source content signature and re-check it at Apply, replacing brittle filename-suffix trust and safely supporting archive/container normalization to CBZ.
 - Route comic PDFs through PDF-safe Calibre/XMP projection instead of sending ComicInfo fields and clear operations to the PDF writer.
 - Resolve collected editions through true book-edition records from edition-capable providers rather than guessing collection semantics from Comic Vine volumes; standalone collections no longer require an invented sequence number.
 - Replace issue-derived group-run selection with explicit Comic Vine run selection that requires a known start year, append-only invalidates incompatible prior issue decisions, and refreshes wizard review after the run changes.
 - Natural-sort numbered incoming filenames so issue runs review as `#1`, `#2`, ... `#10` rather than lexical `#1`, `#10`, ... `#2`.
+- Refuse normal acceptance of issue candidates whose Comic Vine run start year is unresolved and surface the group-run chooser directly in the wizard.
+- Use Open Library's documented edition-aware search response for collected editions, reject issue-shaped book results, preserve embedded ComicInfo creator/publisher evidence, and present edition date/provider/ISBN evidence during review.
+- Parse explicit `by Creator and Creator` credits from long unnumbered collected-edition filenames without treating ordinary one-word `by ...` titles as creator credits.
+- Add live wizard Apply progress, compact batch hydration output, natural plan/result display order, and deliberate pagination pauses for large interactive plans.
 
 ### Safety
 

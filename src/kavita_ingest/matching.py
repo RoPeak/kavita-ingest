@@ -108,6 +108,14 @@ def local_identity(classification: Classification, metadata: dict[str, Any]) -> 
     identifiers = _local_identifiers(metadata)
     publisher = _string(metadata.get("publisher"))
     language = _string(metadata.get("language"))
+    creators = hypothesis.creators
+    if classification.kind is MediaKind.COMIC:
+        comicinfo = metadata.get("comicinfo")
+        if isinstance(comicinfo, dict):
+            publisher = _string(comicinfo.get("Publisher")) or publisher
+            language = _string(comicinfo.get("LanguageISO")) or language
+            if not creators:
+                creators = _split_names(_string(comicinfo.get("Writer")))
     return LocalIdentity(
         classification.kind,
         hypothesis.subtype,
@@ -115,7 +123,7 @@ def local_identity(classification: Classification, metadata: dict[str, Any]) -> 
         (hypothesis.title or "")
         if classification.kind is MediaKind.COMIC
         else hypothesis.title or hypothesis.series or "",
-        hypothesis.creators,
+        creators,
         identifiers,
         hypothesis.series,
         hypothesis.sequence,
@@ -144,6 +152,7 @@ def score_candidates(
             and local.classification_confidence >= settings.classification_confidence
             and not item.hard_contradiction
             and item.identity_fields_high
+            and candidate_planning_context_ready(local, item.candidate)
         )
         output.append(
             CandidateScore(
@@ -420,6 +429,33 @@ def _score(local: LocalIdentity, candidate: NormalizedCandidate) -> CandidateSco
             )
         )
 
+    if collected and local.publisher and candidate.publisher:
+        publisher_similarity = _similarity(local.publisher, candidate.publisher)
+        if publisher_similarity >= 0.82:
+            comparisons.append(
+                _comparison(
+                    "publisher",
+                    local.publisher,
+                    candidate.publisher,
+                    ComparisonKind.SUPPORTING,
+                    8,
+                    publisher_similarity,
+                    "collection publishers agree",
+                )
+            )
+        elif publisher_similarity < 0.45:
+            comparisons.append(
+                _comparison(
+                    "publisher",
+                    local.publisher,
+                    candidate.publisher,
+                    ComparisonKind.CONFLICT,
+                    -8,
+                    1 - publisher_similarity,
+                    "collection publishers disagree",
+                )
+            )
+
     if local.sequence and candidate.sequence:
         exact = local.sequence.normalized == candidate.sequence.normalized
         local_collection_sequence = (
@@ -646,6 +682,34 @@ def _candidate_year(
     )
     match = re.match(r"(\d{4})", value or "")
     return int(match.group(1)) if match else None
+
+
+def candidate_planning_context_ready(
+    local: LocalIdentity,
+    candidate: NormalizedCandidate,
+) -> bool:
+    """Return whether a provider candidate can satisfy mandatory plan identity fields.
+
+    Normal comic issues/annuals/specials require a resolved run-start year in the
+    canonical identity. A high matching score must never advertise such a
+    candidate as plan-eligible when the planner is guaranteed to reject it.
+    """
+    if (
+        local.kind is MediaKind.COMIC
+        and local.subtype in {"issue", "annual", "special"}
+    ):
+        return candidate.run_start_year is not None
+    return True
+
+
+def _split_names(value: str | None) -> tuple[str, ...]:
+    if not value:
+        return ()
+    return tuple(
+        part.strip()
+        for part in re.split(r"\s*(?:,|;|\band\b|&)\s*", value)
+        if part.strip()
+    )
 
 
 def _string(value: object) -> str | None:

@@ -924,3 +924,18 @@ def test_mode_failure_never_completes_or_removes_source_and_can_recover(
     recovered = ApplyEngine(fixture.config).recover(fixture.plan_id)
     assert recovered.status is RunState.COMPLETE
     assert fixture.destination.stat().st_mode & 0o777 == 0o644
+
+
+def test_apply_progress_hook_reports_item_start_and_completion(tmp_path: Path) -> None:
+    fixture = make_apply_fixture(tmp_path, "cbz", lifecycle="preserve")
+    events: list[tuple[int, int, str]] = []
+
+    summary = ApplyEngine(fixture.config, progress=lambda *event: events.append(event)).apply(
+        fixture.plan_id
+    )
+
+    assert summary.status is RunState.COMPLETE
+    assert events == [
+        (0, 1, fixture.source.name),
+        (1, 1, fixture.source.name),
+    ]

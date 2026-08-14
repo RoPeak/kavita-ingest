@@ -9,7 +9,13 @@ import pytest
 from kavita_ingest.domain import MediaKind, SequenceNumber
 from kavita_ingest.providers.comic_vine import ComicVineProvider
 from kavita_ingest.providers.google_books import GoogleBooksProvider
-from kavita_ingest.providers.models import Identifier, NormalizedCandidate, RecordType, SearchQuery
+from kavita_ingest.providers.models import (
+    Contributor,
+    Identifier,
+    NormalizedCandidate,
+    RecordType,
+    SearchQuery,
+)
 from kavita_ingest.providers.open_library import OpenLibraryProvider
 
 FIXTURES = Path("tests/fixtures/providers")
@@ -59,6 +65,53 @@ def test_open_library_title_search_returns_work_not_synthetic_edition() -> None:
     provider = OpenLibraryProvider(FixtureClient(_fixture("open_library.json")), None)  # type: ignore[arg-type]
     candidates = provider.search(SearchQuery(MediaKind.BOOK, "Crime and Punishment"))
     assert [item.record_type for item in candidates] == [RecordType.BOOK_WORK]
+
+
+def test_open_library_collection_search_returns_documented_nested_edition() -> None:
+    payload = {
+        "docs": [
+            {
+                "key": "/works/OLWATCHW",
+                "title": "Mister Miracle",
+                "author_name": ["Tom King"],
+                "editions": {
+                    "docs": [
+                        {
+                            "key": "/books/OLWATCHM",
+                            "title": "Mister Miracle",
+                            "publisher": ["DC Comics"],
+                            "publish_date": ["2019"],
+                            "isbn": ["9781401283544"],
+                            "language": ["eng"],
+                        }
+                    ]
+                },
+            }
+        ]
+    }
+    client = FixtureClient(payload)
+    provider = OpenLibraryProvider(client, "contact@example.test")  # type: ignore[arg-type]
+
+    candidates = provider.search(
+        SearchQuery(
+            MediaKind.BOOK,
+            "Mister Miracle",
+            creators=("Tom King",),
+            item_type="collected-edition",
+        )
+    )
+
+    assert len(candidates) == 1
+    candidate = candidates[0]
+    assert candidate.record_type is RecordType.BOOK_EDITION
+    assert candidate.provider_id == "OLWATCHM"
+    assert candidate.work_id == "works/OLWATCHW"
+    assert candidate.creators == (Contributor("Tom King", "author"),)
+    assert candidate.publisher == "DC Comics"
+    assert candidate.publication_date == "2019"
+    assert candidate.identifiers == (Identifier("isbn", "9781401283544"),)
+    assert client.calls[0][0] == "search-collection"
+    assert "editions.publish_date" in client.calls[0][1]["fields"]
 
 
 def test_google_books_normalizes_edition_fields() -> None:

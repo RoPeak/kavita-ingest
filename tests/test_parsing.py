@@ -244,3 +244,38 @@ def test_long_unnumbered_comic_archive_is_not_confidently_called_a_one_shot() ->
         "collected-edition",
         "one-shot",
     ]
+
+
+def test_long_unnumbered_collection_extracts_safe_filename_creator_credit() -> None:
+    inspection = InspectionResult(
+        InspectionStatus.OK,
+        SourceFormat.CBR,
+        metadata={"page_count": 180, "entry_count": 180},
+    )
+
+    result = classify(
+        Path("Hawkeye by Matt Fraction and David Aja (2015) (Digital).cbr"),
+        SourceFormat.CBR,
+        inspection,
+    )
+
+    hypothesis = result.hypotheses[0]
+    assert hypothesis.subtype == "collected-edition"
+    assert hypothesis.series == "Hawkeye"
+    assert hypothesis.title == "Hawkeye"
+    assert hypothesis.creators == ("Matt Fraction", "David Aja")
+
+
+def test_long_unnumbered_collection_does_not_split_title_by_gaslight() -> None:
+    inspection = InspectionResult(
+        InspectionStatus.OK,
+        SourceFormat.CBR,
+        metadata={"page_count": 180, "entry_count": 180},
+    )
+
+    result = classify(Path("Batman by Gaslight (2019).cbr"), SourceFormat.CBR, inspection)
+
+    hypothesis = result.hypotheses[0]
+    assert hypothesis.subtype == "collected-edition"
+    assert hypothesis.series == "Batman by Gaslight"
+    assert hypothesis.creators == ()

@@ -69,12 +69,20 @@ class FaultHook(Protocol):
     def __call__(self, checkpoint: str, item_id: str) -> None: ...
 
 
+class ProgressHook(Protocol):
+    def __call__(self, completed: int, total: int, source_name: str) -> None: ...
+
+
 class DiskSpace(Protocol):
     free: int
 
 
 def _no_fault(checkpoint: str, item_id: str) -> None:
     del checkpoint, item_id
+
+
+def _no_progress(completed: int, total: int, source_name: str) -> None:
+    del completed, total, source_name
 
 
 def _disk_usage(path: Path) -> DiskSpace:
@@ -231,6 +239,7 @@ class ApplyEngine:
         filesystem: NoClobberFilesystem | None = None,
         writers: WriterDispatcher | None = None,
         fault: FaultHook = _no_fault,
+        progress: ProgressHook = _no_progress,
         disk_usage: Callable[[Path], DiskSpace] = _disk_usage,
     ) -> None:
         if config.database_path is None:
@@ -240,6 +249,7 @@ class ApplyEngine:
         self.filesystem = filesystem or LinuxFilesystem()
         self.writers = writers or WriterDispatcher()
         self.fault = fault
+        self.progress = progress
         self.disk_usage = disk_usage
 
     def apply(self, plan_id: int) -> ApplySummary:
@@ -308,7 +318,9 @@ class ApplyEngine:
             journal.transition(run.id, item.item_id, ItemState.PREFLIGHT_OK)
         journal.set_run_state(run.id, RunState.RUNNING)
         prepared = self._prepare_items(document, run_id=run.id)
-        for item in prepared:
+        total = len(prepared)
+        for index, item in enumerate(prepared, start=1):
+            self.progress(index - 1, total, item.source.name)
             try:
                 self._execute_item(journal, run.id, item)
             except DestinationExists as exc:
@@ -317,6 +329,8 @@ class ApplyEngine:
                 self._mark_stale(journal, run.id, item.item_id, str(exc))
             except (OSError, ValueError, ApplyRefused, subprocess.SubprocessError) as exc:
                 self._mark_failure(journal, run.id, item.item_id, exc)
+            finally:
+                self.progress(index, total, item.source.name)
         return self._finalize(journal, run.id)
 
     def recover(self, plan_id: int) -> ApplySummary:

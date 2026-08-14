@@ -75,13 +75,24 @@ def classify(path: Path, format_: SourceFormat, inspection: InspectionResult) ->
             and isinstance(page_count, int)
             and page_count >= 120
         ):
+            credited_series, credited_creators = _split_creator_credit(
+                hypothesis.series or hypothesis.title or ""
+            )
             collected = replace(
                 hypothesis,
                 subtype="collected-edition",
                 confidence=0.78,
+                title=credited_series or hypothesis.title,
+                series=credited_series or hypothesis.series,
+                creators=credited_creators or hypothesis.creators,
                 reasons=(
                     *hypothesis.reasons,
                     "long unnumbered archive may collect multiple issues",
+                    *(
+                        ("explicit filename creator credit retained as collection evidence",)
+                        if credited_creators
+                        else ()
+                    ),
                 ),
             )
             one_shot = replace(
@@ -316,3 +327,23 @@ def _normalize(value: str) -> str:
 def _trailing_year(value: str) -> int | None:
     match = re.search(r"\b((?:19|20)\d{2})$", value)
     return int(match.group(1)) if match else None
+
+
+def _split_creator_credit(value: str) -> tuple[str | None, tuple[str, ...]]:
+    """Split safe `Title by First Last [and First Last]` collection evidence.
+
+    Requiring every credited name to contain at least two words avoids treating
+    genuine titles such as `Batman by Gaslight` as creator credits.
+    """
+    match = re.match(r"^(.*?)\s+by\s+(.+)$", value, re.IGNORECASE)
+    if not match:
+        return None, ()
+    title, raw_creators = match.groups()
+    creators = tuple(
+        _clean_title(part)
+        for part in re.split(r"\s+(?:and|&)\s+", raw_creators, flags=re.IGNORECASE)
+        if part.strip()
+    )
+    if not creators or any(len(name.split()) < 2 for name in creators):
+        return None, ()
+    return _clean_title(title), creators

@@ -26,10 +26,10 @@ to distinguish same-named runs.
 
 ### Kavita comic library target
 
-The v1 comic projection contract deliberately targets **Comic (Flexible)**, not
+The current comic projection contract deliberately targets **Comic (Flexible)**, not
 Kavita's stricter **Comic** library type. For a regular issue whose canonical
 identity is `series_title = "Absolute Batman"` and `run_start_year = 2024`, the
-v1 projection is:
+projection is:
 
 ```text
 ComicInfo.Series = Absolute Batman (2024)
@@ -49,9 +49,9 @@ The stricter Comic model uses a different contract: when both `Series` and
 identify the run (normally its starting year), and it follows ComicVine-style
 handling where trades and annuals are separate entities. Supporting that model
 would therefore require a deliberate alternate projection mode rather than a
-silent metadata rewrite. It is deferred beyond v1.
+silent metadata rewrite. It remains a deliberate future projection mode rather than a silent metadata rewrite.
 
-Existing Comic (Flexible) libraries and already-published v1-style comics should
+Existing Comic (Flexible) libraries and already-published comics using this contract should
 not be migrated or retagged merely to adopt the stricter Comic model.
 
 Kavita does not require an Author directory layer for books. Its scanner uses
@@ -102,9 +102,8 @@ python3 -m venv .venv
 .venv/bin/mypy --strict src
 ```
 
-The package exposes the `kavita-ingest` console script. The latest supported
-release is `1.0.0`; development builds on `main` report `1.1.0.dev0` until the
-v1.1 release gate.
+The package exposes the `kavita-ingest` console script. The current supported
+release is `1.1.0`.
 
 The `compatibility-test` extra is only for rerunning Milestone 0 experiments. It
 includes `comicinfoxml`, which those experiments found unsuitable for production

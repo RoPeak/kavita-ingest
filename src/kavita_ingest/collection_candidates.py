@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import replace
 
 from .domain import MediaKind, SequenceNumber
@@ -23,6 +24,8 @@ def adapt_collection_candidate(
     physical/digital collected edition; local parsing supplies only the series
     grouping and collection sequence that were already explicit in the source.
     """
+    if _looks_like_single_issue(candidate.title):
+        return None
     if candidate.record_type is RecordType.COMIC_COLLECTION:
         return replace(
             candidate,
@@ -67,6 +70,11 @@ def adapt_collection_candidate(
             **({"collection_sequence_source": "local"} if sequence is not None else {}),
         },
     )
+
+
+def _looks_like_single_issue(title: str) -> bool:
+    """Reject book-catalog entries that are visibly individual comic issues."""
+    return bool(re.search(r"(?:^|\s)(?:#|issue\s+)\d+(?:\.\d+)?\b", title, re.IGNORECASE))
 
 
 def adapt_exact_collection_candidate(

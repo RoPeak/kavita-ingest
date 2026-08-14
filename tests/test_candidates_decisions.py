@@ -932,7 +932,7 @@ def test_collected_edition_uses_book_edition_provider_without_crossing_issue_bou
     result = generate_candidates(local, (google, comic_vine))
 
     assert comic_vine.operations == []
-    assert google.operations == ["search:standalone-book:False"]
+    assert google.operations == ["search:collected-edition:False"]
     assert len(result.candidates) == 1
     candidate = result.candidates[0]
     assert candidate.record_type is RecordType.COMIC_COLLECTION
@@ -990,6 +990,27 @@ def test_collected_edition_never_adapts_book_work_or_regular_comic_issue() -> No
             issue,
             series_title="Animal Man",
             sequence=SequenceNumber.parse("1"),
+        )
+        is None
+    )
+
+
+def test_collected_edition_rejects_issue_shaped_book_catalog_result() -> None:
+    issue_shaped_book = NormalizedCandidate(
+        ProviderName.GOOGLE_BOOKS,
+        "google-issue-7",
+        RecordType.BOOK_EDITION,
+        MediaKind.BOOK,
+        "Supergirl: Woman of Tomorrow (2021-) #7",
+        creators=(Contributor("Tom King", "author"),),
+        publisher="DC Comics",
+    )
+
+    assert (
+        adapt_collection_candidate(
+            issue_shaped_book,
+            series_title="Supergirl - Woman of Tomorrow",
+            sequence=None,
         )
         is None
     )

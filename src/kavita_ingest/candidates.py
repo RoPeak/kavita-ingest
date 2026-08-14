@@ -310,7 +310,7 @@ def _collection_book_query(local: LocalIdentity, *, relaxed: bool = False) -> Se
         title,
         creators=() if relaxed else local.creators,
         identifiers=local.identifiers,
-        item_type="standalone-book",
+        item_type="collected-edition",
         relaxed=relaxed,
     )
 

@@ -26,6 +26,7 @@ from .matching import (
     CandidateScore,
     LocalIdentity,
     Reconciliation,
+    candidate_planning_context_ready,
     reconcile,
     score_candidates,
     usable_identity_scores,
@@ -227,6 +228,14 @@ def interactive_review(
                     if selected.candidate.record_type is RecordType.COMIC_RUN:
                         output.print("A run provides context only; select an issue candidate.")
                         continue
+                    if not candidate_planning_context_ready(
+                        current.local, selected.candidate
+                    ):
+                        output.print(
+                            "This comic issue is missing a required run start year and cannot "
+                            "be accepted into a plan yet. Choose [G]roup-run first."
+                        )
+                        continue
                     if not selected.eligible and not typer.confirm(
                         _low_confidence_message(selected)
                     ):
@@ -311,7 +320,9 @@ def interactive_review(
                     ] = []
                     hydration_records: dict[str, dict[str, object]] = {}
                     for source, score, reconciliation, evidence_hash in eligible:
-                        hydrated = _hydrate_for_acceptance(score, providers, output)
+                        hydrated = _hydrate_for_acceptance(
+                            score, providers, output, show_metadata=False
+                        )
                         if hydrated is None:
                             output.print("Batch cancelled; no batch decisions were saved.")
                             hydrated_items = []
@@ -326,6 +337,12 @@ def interactive_review(
                             )
                         )
                         hydration_records[hydrated_score.candidate.key] = hydration.to_dict()
+                    if hydrated_items:
+                        output.print(
+                            f"Metadata enrichment complete for {len(hydrated_items)} item"
+                            f"{'s' if len(hydrated_items) != 1 else ''}. "
+                            "Use item/details views for full contributor metadata."
+                        )
                     if hydrated_items and typer.confirm(
                         f"Explicitly accept all {len(hydrated_items)} enriched items?"
                     ):
@@ -384,6 +401,8 @@ def _hydrate_for_acceptance(
     selected: CandidateScore,
     providers: tuple[Provider, ...],
     output: Console,
+    *,
+    show_metadata: bool = True,
 ) -> tuple[CandidateScore, HydrationResult] | None:
     result = hydrate_candidate(selected.candidate, providers)
     if result.status == "unavailable" and typer.confirm(
@@ -409,7 +428,7 @@ def _hydrate_for_acceptance(
             error=result.error,
         )
     hydrated_score = replace(selected, candidate=result.candidate)
-    if result.accepted_detail:
+    if result.accepted_detail and show_metadata:
         _show_hydrated_metadata(output, result)
     return hydrated_score, result
 
@@ -455,22 +474,40 @@ def _show_item(
             f"Series: {item.local.series_title or item.local.title}\n"
             f"Issue: {item.local.sequence.normalized if item.local.sequence else 'unresolved'}"
         )
-        if not compact:
+        if item.local.subtype == "collected-edition":
+            local_evidence += f"\nEdition year evidence: {item.local.year or 'none'}"
+            if item.local.creators:
+                local_evidence += "\nCreator evidence: " + ", ".join(item.local.creators)
+            if item.local.publisher:
+                local_evidence += f"\nPublisher evidence: {item.local.publisher}"
+        if not compact and item.local.subtype != "collected-edition":
             local_evidence += (
                 f"\nLocal publication-year evidence: {item.local.year or 'none'}\n"
                 f"Local run-start evidence: {item.local.run_start_year or 'none'}"
             )
         console.print(local_evidence)
-        table = Table(
-            "",
-            "Rank",
-            "Issue",
-            "Run context",
-            "Publication",
-            "Writer",
-            "Score",
-            "Eligible",
-        )
+        if item.local.subtype == "collected-edition":
+            table = Table(
+                "",
+                "Rank",
+                "Collection candidate",
+                "Provider",
+                "Edition",
+                "Writer",
+                "Score",
+                "Eligible",
+            )
+        else:
+            table = Table(
+                "",
+                "Rank",
+                "Issue",
+                "Run context",
+                "Publication",
+                "Writer",
+                "Score",
+                "Eligible",
+            )
     else:
         console.print(f"Local title: {item.local.title}")
         table = Table(
@@ -488,6 +525,18 @@ def _show_item(
     for score in displayed:
         marker = ">" if score.rank == selected_rank else ""
         if item.local.kind.value == "comic":
+            if item.local.subtype == "collected-edition":
+                table.add_row(
+                    marker,
+                    str(score.rank),
+                    score.candidate.title,
+                    f"{score.candidate.provider.value}\n{score.candidate.provider_id}",
+                    _collection_edition_summary(score.candidate),
+                    _candidate_writers(score.candidate),
+                    f"{score.score:.1f}",
+                    "yes" if score.eligible else "no",
+                )
+                continue
             table.add_row(
                 marker,
                 str(score.rank),
@@ -533,6 +582,21 @@ def _collection_search_text(local: LocalIdentity) -> str:
             return title
         return f"{series} {title}"
     return title or series
+
+
+def _collection_edition_summary(candidate: NormalizedCandidate) -> str:
+    identifiers = [
+        item.value
+        for item in candidate.identifiers
+        if item.scheme.casefold() in {"isbn", "isbn10", "isbn13"}
+    ]
+    lines = [
+        f"published {candidate.publication_date or '-'}",
+        candidate.publisher or "-",
+    ]
+    if identifiers:
+        lines.append("ISBN " + identifiers[0])
+    return "\n".join(lines)
 
 
 def _candidate_authors(candidate: NormalizedCandidate) -> str:
@@ -663,7 +727,15 @@ def _action_prompt(
     displayed = _displayed_scores(item)
     if wizard_mode:
         if displayed:
-            actions = ["[A] Accept", "[V] View why"]
+            actions = ["[V] View why"]
+            if candidate_planning_context_ready(item.local, displayed[0].candidate):
+                actions.insert(0, "[A] Accept")
+            if any(
+                score.candidate.run_id
+                and not candidate_planning_context_ready(item.local, score.candidate)
+                for score in displayed
+            ):
+                actions.append("[G] Choose run")
             if len(displayed) > 1 or not displayed[0].eligible:
                 actions.append("[C] Choose candidate")
             actions.extend(["[N] Next", "[M] More actions", "[Q] Save and quit"])

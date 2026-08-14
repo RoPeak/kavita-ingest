@@ -158,6 +158,72 @@ def test_comic_series_sequence_and_run_year_score_independently() -> None:
     assert issue.run_start_year == 2024
 
 
+def test_issue_candidate_without_run_start_year_is_never_plan_eligible() -> None:
+    local = LocalIdentity(
+        MediaKind.COMIC,
+        "issue",
+        0.98,
+        "Watchmen",
+        series_title="Watchmen",
+        sequence=SequenceNumber.parse("1"),
+    )
+    issue = NormalizedCandidate(
+        ProviderName.COMIC_VINE,
+        "4000-watchmen-1",
+        RecordType.COMIC_ISSUE,
+        MediaKind.COMIC,
+        "Watchmen",
+        series_title="Watchmen",
+        sequence=SequenceNumber.parse("1"),
+        run_id="4050-53871",
+        run_start_year=None,
+    )
+
+    score = score_candidates(
+        local,
+        [issue],
+        MatchingSettings(eligible_score=0, eligible_margin=0),
+    )[0]
+
+    assert score.score == 100
+    assert score.identity_fields_high
+    assert score.eligible is False
+
+
+def test_collected_local_identity_uses_embedded_writer_and_publisher_evidence() -> None:
+    classification = Classification(
+        MediaKind.COMIC,
+        "collected-edition",
+        0.78,
+        True,
+        (
+            ParseHypothesis(
+                MediaKind.COMIC,
+                "collected-edition",
+                0.78,
+                title="Mister Miracle",
+                series="Mister Miracle",
+                year=2019,
+            ),
+        ),
+    )
+
+    local = local_identity(
+        classification,
+        {
+            "comicinfo": {
+                "Writer": "Tom King",
+                "Publisher": "DC Comics",
+                "LanguageISO": "en",
+            }
+        },
+    )
+
+    assert local.creators == ("Tom King",)
+    assert local.publisher == "DC Comics"
+    assert local.language == "en"
+
+
 def test_missing_publication_date_never_falls_back_to_comic_run_year() -> None:
     local = LocalIdentity(
         MediaKind.COMIC,

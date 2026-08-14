@@ -7,6 +7,7 @@ from datetime import date
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+import typer
 from rich.console import Console
 from rich.panel import Panel
 from rich.text import Text
@@ -23,10 +24,14 @@ def plan_document(plan: StoredPlan) -> dict[str, Any]:
 
 
 def render_plan_summary(
-    plan: StoredPlan, console: Console, *, technical_header: bool = True
+    plan: StoredPlan,
+    console: Console,
+    *,
+    technical_header: bool = True,
+    pause_every: int | None = None,
 ) -> dict[str, Any]:
     document = plan_document(plan)
-    items = _items(document)
+    items = _display_items(document)
     lifecycle = Counter(_lifecycle(item) for item in items)
     if technical_header:
         console.print(
@@ -51,8 +56,14 @@ def render_plan_summary(
         console.print("Library root" + ("s" if len(roots) > 1 else "") + ":")
         for root in roots:
             console.print(Text(f"  {root}"))
-    for item in items:
+    for index, item in enumerate(items, start=1):
         console.print(_item_panel(item))
+        if pause_every and index < len(items) and index % pause_every == 0:
+            typer.prompt(
+                f"Reviewed {index} of {len(items)} plan items. Press Enter to continue",
+                default="",
+                show_default=False,
+            )
     policy = document.get("planning_policy", {})
     permissions = policy.get("permissions", {}) if isinstance(policy, dict) else {}
     if permissions:
@@ -71,7 +82,7 @@ def render_plan_summary(
 
 def render_plan_details(plan: StoredPlan, console: Console) -> dict[str, Any]:
     document = plan_document(plan)
-    for item in _items(document):
+    for item in _display_items(document):
         canonical = _mapping(item.get("canonical"))
         projection = _mapping(item.get("kavita_projection"))
         metadata = _mapping(projection.get("metadata"))
@@ -130,7 +141,11 @@ def render_apply_summary(summary: ApplySummary, console: Console) -> None:
 
 
 def render_completed_apply(
-    summary: ApplySummary, document: dict[str, Any], console: Console
+    summary: ApplySummary,
+    document: dict[str, Any],
+    console: Console,
+    *,
+    compact: bool = False,
 ) -> None:
     completed = summary.counts.get("complete", 0)
     total = sum(summary.counts.values())
@@ -149,7 +164,22 @@ def render_completed_apply(
         "",
         "Published",
     ]
-    progress.extend(_relative_destination(item) for item in _items(document))
+    items = _display_items(document)
+    if compact and len(items) > 12:
+        destinations = [
+            PurePosixPath(str(_mapping(item.get("kavita_projection")).get("destination", "-")))
+            for item in items
+        ]
+        groups = Counter(
+            path.parent.as_posix() if len(path.parts) > 1 else "." for path in destinations
+        )
+        progress.extend(
+            f"{count} item{'s' if count != 1 else ''} -> {folder}/"
+            for folder, count in sorted(groups.items())
+        )
+        progress.extend(["", "Use [D] Details to list every published path."])
+    else:
+        progress.extend(_relative_destination(item) for item in items)
     console.print(Panel(Text("\n".join(progress)), title="Ingest complete", expand=True))
 
 
@@ -290,6 +320,31 @@ def _human_lifecycle(value: str) -> str:
 def _items(document: dict[str, Any]) -> list[dict[str, Any]]:
     raw = document.get("items", [])
     return [item for item in raw if isinstance(item, dict)] if isinstance(raw, list) else []
+
+
+def _display_items(document: dict[str, Any]) -> list[dict[str, Any]]:
+    return sorted(_items(document), key=_display_sort_key)
+
+
+def _display_sort_key(item: dict[str, Any]) -> tuple[str, int, int, int, str, str]:
+    canonical = _mapping(item.get("canonical"))
+    series = str(canonical.get("series_title") or canonical.get("title") or "").casefold()
+    sequence = canonical.get("sequence")
+    if isinstance(sequence, dict) and isinstance(sequence.get("sort_key"), list):
+        raw_key = sequence["sort_key"]
+        if len(raw_key) == 3:
+            try:
+                return (
+                    series,
+                    0,
+                    int(raw_key[0]),
+                    int(raw_key[1]),
+                    str(raw_key[2]),
+                    _relative_destination(item).casefold(),
+                )
+            except (TypeError, ValueError):
+                pass
+    return (series, 1, 0, 0, "", _relative_destination(item).casefold())
 
 
 def _conflicts(document: dict[str, Any]) -> list[object]:

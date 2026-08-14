@@ -555,3 +555,23 @@ def test_conflicting_exact_identity_cannot_be_accepted(tmp_path: Path) -> None:
     assert result is None
     assert "issue number differs" in output.getvalue()
     assert "Not accepted" in output.getvalue()
+
+
+def test_wizard_surfaces_group_run_and_hides_accept_when_run_year_is_missing(
+    tmp_path: Path,
+) -> None:
+    audit = _audit(tmp_path, eligible=True)
+    item = audit.items[0]
+    missing_year = replace(item.scores[0].candidate, run_start_year=None)
+    rescored = score_candidates(
+        item.local,
+        [missing_year],
+        MatchingSettings(eligible_score=0, eligible_margin=0),
+    )
+    unresolved_item = replace(item, scores=tuple(rescored))
+
+    prompt = _action_prompt(unresolved_item, audit, wizard_mode=True)
+
+    assert "[G] Choose run" in prompt
+    assert "[A] Accept" not in prompt
+    assert rescored[0].eligible is False
