@@ -33,7 +33,7 @@ class GoogleBooksProvider:
         )
 
     def search(self, query: SearchQuery) -> list[NormalizedCandidate]:
-        parts = [f'intitle:"{query.title}"']
+        parts = [f'"{query.title}"'] if query.relaxed else [f'intitle:"{query.title}"']
         if query.creators:
             parts.append(f'inauthor:"{query.creators[0]}"')
         return self._request("search", {"q": " ".join(parts), "maxResults": "10"})

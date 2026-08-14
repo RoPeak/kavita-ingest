@@ -16,6 +16,7 @@ All notable release-level changes to Kavita Ingest are recorded here.
 - Refuse normal acceptance of issue candidates whose Comic Vine run start year is unresolved and surface the group-run chooser directly in the wizard.
 - Use Open Library's documented edition-aware search response for collected editions, reject issue-shaped book results, preserve embedded ComicInfo creator/publisher evidence, and present edition date/provider/ISBN evidence during review.
 - Parse explicit `by Creator and Creator` credits from long unnumbered collected-edition filenames without treating ordinary one-word `by ...` titles as creator credits.
+- Expand collected-edition provider recall with creator-inline and word-number title variants plus a bounded relaxed series/creator fallback; numbered collections now require independent provider-side Book/Volume number agreement, and common publisher suffixes such as `DC`/`DC Comics` are treated as equivalent evidence.
 - Add live wizard Apply progress, compact batch hydration output, natural plan/result display order, and deliberate pagination pauses for large interactive plans.
 
 ### Safety

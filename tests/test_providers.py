@@ -352,3 +352,43 @@ def test_provider_response_validation_rejects_malformed_shapes() -> None:
         ComicVineProvider(FixtureClient({}), "key").search(  # type: ignore[arg-type]
             SearchQuery(MediaKind.COMIC, "Comic")
         )
+
+
+def test_google_books_relaxed_search_broadens_title_scope_but_keeps_author_filter() -> None:
+    client = FixtureClient({"items": []})
+    provider = GoogleBooksProvider(client)  # type: ignore[arg-type]
+
+    provider.search(
+        SearchQuery(
+            MediaKind.BOOK,
+            "Animal Man",
+            creators=("Grant Morrison",),
+            item_type="collected-edition",
+            relaxed=True,
+        )
+    )
+
+    query = client.calls[0][1]["q"]
+    assert query.startswith('"Animal Man"')
+    assert 'intitle:' not in query
+    assert 'inauthor:"Grant Morrison"' in query
+
+
+def test_open_library_relaxed_collection_search_uses_general_query_plus_author() -> None:
+    client = FixtureClient({"docs": []})
+    provider = OpenLibraryProvider(client, "contact@example.test")  # type: ignore[arg-type]
+
+    provider.search(
+        SearchQuery(
+            MediaKind.BOOK,
+            "Animal Man",
+            creators=("Grant Morrison",),
+            item_type="collected-edition",
+            relaxed=True,
+        )
+    )
+
+    params = client.calls[0][1]
+    assert params["q"] == "Animal Man"
+    assert params["author"] == "Grant Morrison"
+    assert "title" not in params

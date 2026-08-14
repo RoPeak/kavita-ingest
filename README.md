@@ -283,9 +283,14 @@ ComicInfo projection includes resolved creator roles, publisher, conservative
 publication date components, and language. Ordinary comic issues and run context
 use Comic Vine. Collected editions are not guessed from same-titled Comic Vine
 volumes: edition-capable book providers may supply a true edition record, which
-is then adapted into the comic-collection domain while retaining explicit local
-series/collection-sequence evidence. Regular issue records still cannot satisfy
-a collected-edition identity.
+is then adapted into the comic-collection domain. Provider lookup uses a bounded
+query ladder for catalogue conventions that embed creator credits in the title
+and spell collection numbers as either digits or words, then falls back to a
+relaxed series/creator search only when the precise variants find nothing. A
+numbered local collection must still have independent provider title/sequence
+evidence for the same Book/Volume number before adaptation; the local number is
+never silently copied onto a sequence-less or contradictory edition. Regular
+issue records still cannot satisfy a collected-edition identity.
 
 PDF comics use a separate Calibre/XMP projection rather than ComicInfo fields.
 The canonical issue number remains in the filename for Comic (Flexible) parsing;

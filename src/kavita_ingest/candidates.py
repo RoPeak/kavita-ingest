@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from difflib import SequenceMatcher
 from typing import Self
 
-from .collection_candidates import adapt_collection_candidate
+from .collection_candidates import adapt_collection_candidate, collection_number_word
 from .domain import MediaKind, SequenceNumber
 from .matching import LocalIdentity
 from .providers.base import Provider, ProviderError
@@ -243,35 +243,38 @@ def generate_candidates(
                 values, comic_queries = session.search_comic_issue(local, provider)
                 queries.extend(comic_queries)
                 _merge(output, values)
+            elif collected:
+                for label, query in _collection_book_queries(local):
+                    queries.append(f"{status.provider.value}:collection:{label}")
+                    values = provider.search(query)
+                    _merge(output, _collection_candidates(local, values))
+                provider_found = any(
+                    item.provider is status.provider for item in output.values()
+                )
+                if not provider_found:
+                    relaxed = _collection_relaxed_query(local)
+                    queries.append(f"{status.provider.value}:collection:relaxed")
+                    values = provider.search(relaxed)
+                    _merge(output, _collection_candidates(local, values))
             else:
-                query = _collection_book_query(local) if collected else _structured_query(local)
+                query = _structured_query(local)
                 queries.append(f"{status.provider.value}:structured")
                 values = provider.search(query)
-                _merge(
-                    output,
-                    _collection_candidates(local, values) if collected else values,
-                )
+                _merge(output, values)
             available.append(status.provider)
             provider_found = any(item.provider is status.provider for item in output.values())
-            if not provider_found and (local.creators or local.series_title):
-                relaxed = (
-                    _collection_book_query(local, relaxed=True)
-                    if collected
-                    else SearchQuery(
-                        local.kind,
-                        local.title,
-                        series_title=local.series_title,
-                        sequence=local.sequence,
-                        item_type=local.subtype,
-                        relaxed=True,
-                    )
+            if not collected and not provider_found and (local.creators or local.series_title):
+                relaxed = SearchQuery(
+                    local.kind,
+                    local.title,
+                    series_title=local.series_title,
+                    sequence=local.sequence,
+                    item_type=local.subtype,
+                    relaxed=True,
                 )
                 queries.append(f"{status.provider.value}:relaxed")
                 values = provider.search(relaxed)
-                _merge(
-                    output,
-                    _collection_candidates(local, values) if collected else values,
-                )
+                _merge(output, values)
         except ProviderError as exc:
             unavailable.append(f"{status.provider.value}: {exc}")
     return CandidateGeneration(
@@ -298,7 +301,7 @@ def _collection_candidates(
     return output
 
 
-def _collection_book_query(local: LocalIdentity, *, relaxed: bool = False) -> SearchQuery:
+def _collection_book_query(local: LocalIdentity) -> SearchQuery:
     series = (local.series_title or "").strip()
     title = local.title.strip()
     if series and title and not title.casefold().startswith(series.casefold()):
@@ -308,10 +311,110 @@ def _collection_book_query(local: LocalIdentity, *, relaxed: bool = False) -> Se
     return SearchQuery(
         MediaKind.BOOK,
         title,
-        creators=() if relaxed else local.creators,
+        creators=local.creators,
         identifiers=local.identifiers,
         item_type="collected-edition",
-        relaxed=relaxed,
+    )
+
+
+def _collection_book_queries(local: LocalIdentity) -> tuple[tuple[str, SearchQuery], ...]:
+    """Build a small high-precision query ladder for provider title conventions.
+
+    Comic collections are frequently catalogued with creator credits embedded in
+    the title (``Animal Man by Grant Morrison Book One``) even when the local
+    release filename separates creator evidence from the title. Providers also
+    vary between numeric and word-spelled collection numbers. Search those
+    documented title forms without weakening identity scoring or silently
+    importing a collection number from local evidence.
+    """
+    primary = _collection_book_query(local)
+    variants: list[tuple[str, SearchQuery]] = [("structured", primary)]
+    seen = {(primary.title.casefold(), primary.creators, primary.relaxed)}
+
+    series = (local.series_title or "").strip()
+    creator = local.creators[0].strip() if local.creators else ""
+    if series and creator:
+        suffix = local.title.strip()
+        if suffix.casefold().startswith(series.casefold()):
+            suffix = suffix[len(series) :].strip(" :-")
+        if suffix.casefold() == series.casefold():
+            suffix = ""
+        inline_title = " ".join(
+            part for part in (series, f"by {creator}", suffix) if part
+        )
+        _append_collection_query(
+            variants,
+            seen,
+            "creator-inline",
+            inline_title,
+            local,
+        )
+        dashed_title = re.sub(
+            r"\b(Collection)\s+(Book|Volume)\b",
+            r"\1 - \2",
+            inline_title,
+            flags=re.IGNORECASE,
+        )
+        _append_collection_query(
+            variants,
+            seen,
+            "creator-inline-dashed",
+            dashed_title,
+            local,
+        )
+        sequence = local.sequence
+        word = collection_number_word(sequence)
+        if sequence is not None and word:
+            word_title = re.sub(
+                rf"\b(Book|Volume|Vol\.?)\s*0*{re.escape(sequence.normalized)}\b",
+                lambda match: f"{match.group(1)} {word.title()}",
+                inline_title,
+                flags=re.IGNORECASE,
+            )
+            _append_collection_query(
+                variants,
+                seen,
+                "creator-inline-word-number",
+                word_title,
+                local,
+            )
+    return tuple(variants)
+
+
+def _append_collection_query(
+    variants: list[tuple[str, SearchQuery]],
+    seen: set[tuple[str, tuple[str, ...], bool]],
+    label: str,
+    title: str,
+    local: LocalIdentity,
+) -> None:
+    key = (title.casefold(), local.creators, False)
+    if not title or key in seen:
+        return
+    seen.add(key)
+    variants.append(
+        (
+            label,
+            SearchQuery(
+                MediaKind.BOOK,
+                title,
+                creators=local.creators,
+                identifiers=local.identifiers,
+                item_type="collected-edition",
+            ),
+        )
+    )
+
+
+def _collection_relaxed_query(local: LocalIdentity) -> SearchQuery:
+    title = (local.series_title or local.title).strip()
+    return SearchQuery(
+        MediaKind.BOOK,
+        title,
+        creators=local.creators,
+        identifiers=local.identifiers,
+        item_type="collected-edition",
+        relaxed=True,
     )
 
 

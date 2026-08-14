@@ -9,6 +9,7 @@ from difflib import SequenceMatcher
 from enum import StrEnum
 from typing import Any
 
+from .collection_candidates import normalize_collection_title
 from .config import MatchingSettings
 from .domain import Classification, MediaKind, SequenceNumber
 from .providers.models import Identifier, NormalizedCandidate, RecordType
@@ -430,7 +431,7 @@ def _score(local: LocalIdentity, candidate: NormalizedCandidate) -> CandidateSco
         )
 
     if collected and local.publisher and candidate.publisher:
-        publisher_similarity = _similarity(local.publisher, candidate.publisher)
+        publisher_similarity = _publisher_similarity(local.publisher, candidate.publisher)
         if publisher_similarity >= 0.82:
             comparisons.append(
                 _comparison(
@@ -458,15 +459,18 @@ def _score(local: LocalIdentity, candidate: NormalizedCandidate) -> CandidateSco
 
     if local.sequence and candidate.sequence:
         exact = local.sequence.normalized == candidate.sequence.normalized
-        local_collection_sequence = (
-            collected
-            and candidate.provider_metadata.get("collection_sequence_source") == "local"
+        collection_sequence_source = (
+            candidate.provider_metadata.get("collection_sequence_source") if collected else None
         )
+        contextual_collection_sequence = collection_sequence_source in {
+            "local",
+            "provider_title",
+        }
         kind = ComparisonKind.EXACT if exact else ComparisonKind.HARD_CONTRADICTION
-        delta = 0 if local_collection_sequence and exact else (30 if exact else -100)
+        delta = 0 if contextual_collection_sequence and exact else (30 if exact else -100)
         reason = (
-            "collection sequence retained from explicit local filename evidence"
-            if local_collection_sequence and exact
+            "collection sequence agrees with explicit filename/provider-title evidence"
+            if contextual_collection_sequence and exact
             else ("sequence numbers agree" if exact else "sequence numbers conflict")
         )
         comparisons.append(
@@ -639,12 +643,47 @@ def _collection_title_similarity(
             values.append(
                 f"{local.series_title} by {local.creators[0]} {local.title}".strip()
             )
-    best = max(values, key=lambda value: _similarity(value, candidate_title))
-    return best, _similarity(best, candidate_title)
+    best = max(values, key=lambda value: _collection_similarity(value, candidate_title))
+    return best, _collection_similarity(best, candidate_title)
+
+
+def _collection_similarity(left: str, right: str) -> float:
+    return SequenceMatcher(
+        None,
+        normalize_collection_title(left),
+        normalize_collection_title(right),
+    ).ratio()
 
 
 def _similarity(left: str, right: str) -> float:
     return SequenceMatcher(None, _normalize(left), _normalize(right)).ratio()
+
+
+def _publisher_similarity(left: str, right: str) -> float:
+    left_key = _publisher_key(left)
+    right_key = _publisher_key(right)
+    if left_key and right_key and left_key == right_key:
+        return 1.0
+    return SequenceMatcher(None, left_key, right_key).ratio()
+
+
+def _publisher_key(value: str) -> str:
+    generic = {
+        "book",
+        "books",
+        "comic",
+        "comics",
+        "entertainment",
+        "inc",
+        "incorporated",
+        "llc",
+        "ltd",
+        "publisher",
+        "publishers",
+        "publishing",
+    }
+    tokens = [token for token in _normalize(value).split() if token not in generic]
+    return " ".join(tokens)
 
 
 def _normalize(value: str) -> str:

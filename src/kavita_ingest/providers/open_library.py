@@ -41,7 +41,7 @@ class OpenLibraryProvider:
             "fields": _COLLECTION_FIELDS if collection_search else _FIELDS,
         }
         if query.title:
-            params["title"] = query.title
+            params["q" if query.relaxed else "title"] = query.title
         if query.creators:
             params["author"] = query.creators[0]
         return self.client.get(

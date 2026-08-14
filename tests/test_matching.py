@@ -346,3 +346,38 @@ def test_runner_up_margin_prevents_automatic_eligibility() -> None:
     )
     assert scores[0].runner_up_margin < SETTINGS.eligible_margin
     assert scores[0].eligible is False
+
+
+def test_collection_publisher_shorthand_matches_common_imprint_suffixes() -> None:
+    local = LocalIdentity(
+        MediaKind.COMIC,
+        "collected-edition",
+        0.98,
+        "Book 1",
+        creators=("Grant Morrison",),
+        series_title="Animal Man",
+        sequence=SequenceNumber.parse("1"),
+        year=2020,
+        publisher="DC",
+    )
+    candidate = NormalizedCandidate(
+        ProviderName.GOOGLE_BOOKS,
+        "animal-man-book-one",
+        RecordType.COMIC_COLLECTION,
+        MediaKind.COMIC,
+        "Animal Man by Grant Morrison Book One",
+        creators=(Contributor("Grant Morrison", "writer"),),
+        publisher="DC Comics",
+        publication_date="2020",
+        series_title="Animal Man",
+        sequence=SequenceNumber.parse("1"),
+        item_type="collected-edition",
+        provider_metadata={"collection_sequence_source": "provider_title"},
+    )
+
+    score = score_candidates(local, [candidate], SETTINGS)[0]
+
+    publisher = next(item for item in score.comparisons if item.field == "publisher")
+    assert publisher.kind is ComparisonKind.SUPPORTING
+    assert publisher.confidence == 1.0
+    assert score.score == 100.0
