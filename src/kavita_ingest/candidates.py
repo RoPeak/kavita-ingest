@@ -244,18 +244,20 @@ def generate_candidates(
                 queries.extend(comic_queries)
                 _merge(output, values)
             elif collected:
-                for label, query in _collection_book_queries(local):
-                    queries.append(f"{status.provider.value}:collection:{label}")
-                    values = provider.search(query)
-                    _merge(output, _collection_candidates(local, values))
+                any_response, collection_errors = _search_collection_provider(
+                    local, provider, status.provider, output, queries
+                )
                 provider_found = any(
                     item.provider is status.provider for item in output.values()
                 )
-                if not provider_found:
-                    relaxed = _collection_relaxed_query(local)
-                    queries.append(f"{status.provider.value}:collection:relaxed")
-                    values = provider.search(relaxed)
-                    _merge(output, _collection_candidates(local, values))
+                if any_response:
+                    available.append(status.provider)
+                if collection_errors and not provider_found:
+                    unavailable.append(
+                        f"{status.provider.value}: partial collection search failure: "
+                        f"{collection_errors[-1]}"
+                    )
+                continue
             else:
                 query = _structured_query(local)
                 queries.append(f"{status.provider.value}:structured")
@@ -283,6 +285,47 @@ def generate_candidates(
         tuple(unavailable),
         tuple(available),
     )
+
+
+def _search_collection_provider(
+    local: LocalIdentity,
+    provider: Provider,
+    provider_name: ProviderName,
+    output: dict[str, NormalizedCandidate],
+    queries: list[str],
+) -> tuple[bool, list[str]]:
+    """Run collection query variants independently so one transient failure is not fatal.
+
+    Collection recall deliberately uses a bounded query ladder because catalogue
+    providers vary in how creator credits and volume numbers appear in titles. A
+    temporary HTTP failure for one spelling must not prevent later, more exact
+    variants from being attempted. The provider client already performs its own
+    per-request retry; this function isolates failures between distinct queries.
+    """
+    any_response = False
+    errors: list[str] = []
+    for label, query in _collection_book_queries(local):
+        queries.append(f"{provider_name.value}:collection:{label}")
+        try:
+            values = provider.search(query)
+        except ProviderError as exc:
+            errors.append(f"{label}: {exc}")
+            continue
+        any_response = True
+        _merge(output, _collection_candidates(local, values))
+
+    provider_found = any(item.provider is provider_name for item in output.values())
+    if not provider_found:
+        relaxed = _collection_relaxed_query(local)
+        queries.append(f"{provider_name.value}:collection:relaxed")
+        try:
+            values = provider.search(relaxed)
+        except ProviderError as exc:
+            errors.append(f"relaxed: {exc}")
+        else:
+            any_response = True
+            _merge(output, _collection_candidates(local, values))
+    return any_response, errors
 
 
 def _collection_candidates(

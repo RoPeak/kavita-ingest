@@ -14,10 +14,12 @@ from .models import (
     SearchQuery,
 )
 
+NORMALIZATION_SCHEMA_VERSION = 2
+
 
 class OpenLibraryProvider:
     name = ProviderName.OPEN_LIBRARY
-    normalization_schema_version = 2
+    normalization_schema_version = NORMALIZATION_SCHEMA_VERSION
     endpoint = "https://openlibrary.org/search.json"
 
     def __init__(self, client: CachedProviderClient, contact: str | None) -> None:
@@ -126,6 +128,7 @@ def _normalize_search(raw: object) -> list[NormalizedCandidate]:
             or _year_string(doc.get("first_publish_year")),
             "language": _first_string(doc.get("language")),
             "work_id": work_id,
+            "provider_schema_version": NORMALIZATION_SCHEMA_VERSION,
         }
         candidates.append(
             NormalizedCandidate(
@@ -197,6 +200,7 @@ def _normalize_nested_edition(
         language=_first_string(raw.get("language")),
         work_id=work_id,
         edition_id=edition_id,
+        provider_schema_version=NORMALIZATION_SCHEMA_VERSION,
     )
 
 
@@ -215,6 +219,7 @@ def _normalize_work(raw: object) -> list[NormalizedCandidate]:
             raw["title"],
             work_id=key,
             publication_date=_year_string(raw.get("first_publish_date")),
+            provider_schema_version=NORMALIZATION_SCHEMA_VERSION,
         )
     ]
 
@@ -251,6 +256,7 @@ def _normalize_edition(raw: object) -> list[NormalizedCandidate]:
             language=language,
             work_id=work_id,
             edition_id=edition_id,
+            provider_schema_version=NORMALIZATION_SCHEMA_VERSION,
         )
     ]
 

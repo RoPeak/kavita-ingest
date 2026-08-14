@@ -51,6 +51,7 @@ def test_open_library_normalizes_work_and_edition_and_isbn_lookup() -> None:
     assert candidates[0].work_id == "works/OL123W"
     assert candidates[0].edition_id == "OL456M"
     assert candidates[0].identifiers[-1] == Identifier("isbn", "9780140449136")
+    assert candidates[0].provider_schema_version == provider.normalization_schema_version == 2
     assert client.calls[0][0] == "isbn"
     assert provider.status().detail == "identified contact mode"
 
@@ -72,6 +73,7 @@ def test_open_library_exact_edition_preserves_collection_subtitle() -> None:
     assert candidate.record_type is RecordType.BOOK_EDITION
     assert candidate.title == "Animal Man by Grant Morrison"
     assert candidate.subtitle == "Book Two"
+    assert candidate.provider_schema_version == provider.normalization_schema_version == 2
 
 
 def test_open_library_unidentified_mode_is_available() -> None:
@@ -129,6 +131,7 @@ def test_open_library_collection_search_returns_documented_nested_edition() -> N
     assert candidate.publisher == "DC Comics"
     assert candidate.publication_date == "2019"
     assert candidate.identifiers == (Identifier("isbn", "9781401283544"),)
+    assert candidate.provider_schema_version == provider.normalization_schema_version == 2
     assert client.calls[0][0] == "search-collection"
     assert "editions.publish_date" in client.calls[0][1]["fields"]
 

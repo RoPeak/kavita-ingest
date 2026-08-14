@@ -28,7 +28,7 @@ from kavita_ingest.matching import (
     reconcile,
     score_candidates,
 )
-from kavita_ingest.providers.base import ProviderStatus
+from kavita_ingest.providers.base import ProviderError, ProviderStatus
 from kavita_ingest.providers.comic_vine import ComicVineProvider
 from kavita_ingest.providers.models import (
     Contributor,
@@ -111,6 +111,25 @@ class QuerySensitiveCollectionProvider:
     def lookup_identifier(self, identifier: Identifier) -> list[NormalizedCandidate]:
         del identifier
         return []
+
+
+class FlakyQueryCollectionProvider(QuerySensitiveCollectionProvider):
+    def __init__(
+        self,
+        name: ProviderName,
+        responses: dict[str, list[NormalizedCandidate]],
+        *,
+        fail_titles: set[str],
+    ) -> None:
+        super().__init__(name, responses)
+        self.fail_titles = fail_titles
+
+    def search(self, query: SearchQuery) -> list[NormalizedCandidate]:
+        self.queries.append(query)
+        if query.title in self.fail_titles:
+            raise ProviderError("provider HTTP 503")
+        key = f"relaxed:{query.title}" if query.relaxed else query.title
+        return self.responses.get(key, [])
 
 
 class RunReuseClient:
@@ -1066,6 +1085,47 @@ def test_collected_edition_query_ladder_recovers_creator_inline_catalog_title() 
     score = score_candidates(local, [candidate], MatchingSettings())[0]
     assert score.score >= 90.0
     assert not score.hard_contradiction
+
+
+def test_collected_edition_query_ladder_survives_one_transient_provider_failure() -> None:
+    edition = NormalizedCandidate(
+        ProviderName.GOOGLE_BOOKS,
+        "new-x-men-ultimate-3",
+        RecordType.BOOK_EDITION,
+        MediaKind.BOOK,
+        "New X-Men by Grant Morrison Ultimate Collection - Book 3",
+        creators=(Contributor("Grant Morrison", "author"),),
+        publisher="Marvel",
+        publication_date="2008",
+        edition_id="new-x-men-ultimate-3",
+    )
+    provider = FlakyQueryCollectionProvider(
+        ProviderName.GOOGLE_BOOKS,
+        {"New X-Men by Grant Morrison Ultimate Collection - Book 3": [edition]},
+        fail_titles={"New X-Men Ultimate Collection Book 3"},
+    )
+    local = LocalIdentity(
+        MediaKind.COMIC,
+        "collected-edition",
+        0.98,
+        "Ultimate Collection Book 3",
+        creators=("Grant Morrison",),
+        series_title="New X-Men",
+        sequence=SequenceNumber.parse("3"),
+        year=2019,
+        publisher="Marvel",
+    )
+
+    result = generate_candidates(local, (provider,))
+
+    assert len(result.candidates) == 1
+    assert result.candidates[0].title.endswith("Ultimate Collection - Book 3")
+    assert result.candidates[0].sequence == SequenceNumber.parse("3")
+    assert result.unavailable == ()
+    assert any(
+        query.title == "New X-Men by Grant Morrison Ultimate Collection - Book 3"
+        for query in provider.queries
+    )
 
 
 def test_numbered_collected_edition_rejects_wrong_or_missing_provider_sequence() -> None:
