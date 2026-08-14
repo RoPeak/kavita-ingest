@@ -221,13 +221,38 @@ def adapt_exact_collection_candidate(
     selected: NormalizedCandidate,
     exact: NormalizedCandidate,
 ) -> NormalizedCandidate:
-    """Re-apply collection semantics to an exact edition fetched for hydration."""
+    """Re-apply collection semantics to an exact edition fetched for hydration.
+
+    Search responses can carry edition-disambiguating title/subtitle evidence that
+    an exact provider response omits. The selected candidate has already crossed
+    the collection safety boundary using provider-derived evidence, so a sparse
+    exact response for the same provider identity must not erase that semantic
+    adaptation. An explicit contradictory collection number is still preserved so
+    hydration can reject it as an identity conflict.
+    """
     if selected.provider_metadata.get("collection_adapter") != _COLLECTION_ADAPTER:
         return exact
+    if exact.record_type is not RecordType.BOOK_EDITION:
+        return exact
+
+    exact_sequence = exact.sequence or collection_sequence_hint(exact.title, exact.subtitle)
+    if (
+        selected.sequence is not None
+        and exact_sequence is not None
+        and exact_sequence.normalized != selected.sequence.normalized
+    ):
+        contradictory = adapt_collection_candidate(
+            exact,
+            series_title=selected.series_title,
+            sequence=exact_sequence,
+            item_type=selected.item_type or "collected-edition",
+        )
+        return contradictory if contradictory is not None else exact
+
     adapted = adapt_collection_candidate(
         exact,
         series_title=selected.series_title,
-        sequence=selected.sequence,
+        sequence=selected.sequence if exact_sequence is not None else None,
         item_type=selected.item_type or "collected-edition",
     )
     return adapted if adapted is not None else exact

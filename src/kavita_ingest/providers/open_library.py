@@ -17,7 +17,7 @@ from .models import (
 
 class OpenLibraryProvider:
     name = ProviderName.OPEN_LIBRARY
-    normalization_schema_version = 1
+    normalization_schema_version = 2
     endpoint = "https://openlibrary.org/search.json"
 
     def __init__(self, client: CachedProviderClient, contact: str | None) -> None:
@@ -244,6 +244,7 @@ def _normalize_edition(raw: object) -> list[NormalizedCandidate]:
             RecordType.BOOK_EDITION,
             MediaKind.BOOK,
             raw["title"],
+            subtitle=_first_string(raw.get("subtitle")),
             identifiers=tuple(identifiers),
             publisher=_first_string(raw.get("publishers")),
             publication_date=_first_string(raw.get("publish_date")),

@@ -196,3 +196,84 @@ def test_hydration_reapplies_comic_collection_semantics_to_book_edition_detail()
     assert result.candidate.sequence == SequenceNumber.parse("1")
     assert result.candidate.creators == (Contributor("Grant Morrison", "writer"),)
     assert result.candidate.publisher == "DC Comics"
+
+class SparseBookTwoDetailProvider:
+    name = ProviderName.OPEN_LIBRARY
+
+    def __init__(self, title: str = "Animal Man by Grant Morrison") -> None:
+        self.title = title
+
+    def status(self) -> ProviderStatus:
+        return ProviderStatus(self.name, True, True, True, "fixture", ("exact_fetch",))
+
+    def search(self, query: SearchQuery) -> list[NormalizedCandidate]:
+        del query
+        return []
+
+    def fetch(self, provider_id: str) -> list[NormalizedCandidate]:
+        assert provider_id == "OL29876683M"
+        return [
+            NormalizedCandidate(
+                ProviderName.OPEN_LIBRARY,
+                "OL29876683M",
+                RecordType.BOOK_EDITION,
+                MediaKind.BOOK,
+                self.title,
+                creators=(Contributor("Grant Morrison", "author"),),
+                publisher="DC Comics",
+                publication_date="2020",
+                edition_id="OL29876683M",
+            )
+        ]
+
+    def lookup_identifier(self, identifier: Identifier) -> list[NormalizedCandidate]:
+        del identifier
+        return []
+
+
+def _animal_man_book_two_selection() -> NormalizedCandidate:
+    return NormalizedCandidate(
+        ProviderName.OPEN_LIBRARY,
+        "OL29876683M",
+        RecordType.COMIC_COLLECTION,
+        MediaKind.COMIC,
+        "Animal Man by Grant Morrison",
+        subtitle="Book Two",
+        creators=(Contributor("Grant Morrison", "writer"),),
+        publisher="DC Comics",
+        publication_date="2020",
+        series_title="Animal Man",
+        sequence=SequenceNumber.parse("2"),
+        item_type="collected-edition",
+        edition_id="OL29876683M",
+        provider_metadata={
+            "collection_adapter": "book_edition",
+            "collection_source_record_type": "book_edition",
+            "collection_series_source": "local",
+            "collection_sequence_source": "provider_title",
+        },
+    )
+
+
+def test_collection_hydration_keeps_verified_sequence_when_exact_detail_is_sparse() -> None:
+    selected = _animal_man_book_two_selection()
+
+    result = hydrate_candidate(selected, (SparseBookTwoDetailProvider(),))
+
+    assert result.status == "hydrated"
+    assert result.candidate.record_type is RecordType.COMIC_COLLECTION
+    assert result.candidate.media_kind is MediaKind.COMIC
+    assert result.candidate.sequence == SequenceNumber.parse("2")
+    assert result.candidate.creators == (Contributor("Grant Morrison", "writer"),)
+
+
+def test_collection_hydration_still_rejects_explicit_exact_sequence_contradiction() -> None:
+    selected = _animal_man_book_two_selection()
+
+    result = hydrate_candidate(
+        selected,
+        (SparseBookTwoDetailProvider("Animal Man by Grant Morrison Book Three"),),
+    )
+
+    assert result.status == "conflict"
+    assert any("issue number differs" in item for item in result.conflicts)

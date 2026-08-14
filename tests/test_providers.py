@@ -55,6 +55,25 @@ def test_open_library_normalizes_work_and_edition_and_isbn_lookup() -> None:
     assert provider.status().detail == "identified contact mode"
 
 
+def test_open_library_exact_edition_preserves_collection_subtitle() -> None:
+    payload = {
+        "key": "/books/OL29876683M",
+        "title": "Animal Man by Grant Morrison",
+        "subtitle": "Book Two",
+        "publishers": ["DC Comics"],
+        "publish_date": "2020",
+        "works": [{"key": "/works/OLANIMALW"}],
+    }
+    provider = OpenLibraryProvider(FixtureClient(payload), "contact@example.test")  # type: ignore[arg-type]
+
+    candidate = provider.fetch("OL29876683M")[0]
+
+    assert provider.normalization_schema_version == 2
+    assert candidate.record_type is RecordType.BOOK_EDITION
+    assert candidate.title == "Animal Man by Grant Morrison"
+    assert candidate.subtitle == "Book Two"
+
+
 def test_open_library_unidentified_mode_is_available() -> None:
     provider = OpenLibraryProvider(FixtureClient(_fixture("open_library.json")), None)  # type: ignore[arg-type]
     assert provider.status().enabled is True
