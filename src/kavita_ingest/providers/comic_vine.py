@@ -40,13 +40,16 @@ class ComicVineProvider:
         )
 
     def search(self, query: SearchQuery) -> list[NormalizedCandidate]:
+        if query.item_type == "collected-edition":
+            # Comic Vine's public volume schema does not provide an edition-format
+            # discriminator that can prove a volume is a TPB/hardcover/omnibus.
+            # Collection identity is resolved through edition-capable providers instead
+            # of guessing from same-titled Comic Vine volumes.
+            return []
         title = query.series_title or query.title
         terms = [title]
         if query.sequence:
             terms.append(query.sequence.raw)
-        collected = query.item_type == "collected-edition"
-        if collected:
-            terms.append("TPB")
         params = {
             "query": " ".join(terms),
             "resources": "issue,volume",
@@ -61,7 +64,7 @@ class ComicVineProvider:
             f"{self.endpoint}/search/",
             params,
             self._secret(),
-            "search:collection" if collected else "search:issue",
+            "search:issue",
             _normalize,
         )
 

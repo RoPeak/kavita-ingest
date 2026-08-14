@@ -32,6 +32,7 @@ from .presentation import (
     render_technical_plan,
 )
 from .review import interactive_review
+from .run_groups import run_group_key
 from .scanner import ScanResult, scan
 
 
@@ -321,7 +322,13 @@ def _run_new(
     _stage(output, 3, "Review", "current")
     decision_heads = _decision_heads(config, audit) if selection.reprocess else {}
     while True:
+        run_group_heads = _run_group_heads(config, audit)
         interactive_review(root, config, output, audit_result=audit, wizard_mode=True)
+        if _run_group_heads(config, audit) != run_group_heads:
+            output.print("\nRun choice changed; refreshing this review inside the selected run.\n")
+            audit = run_audit(root, config, mode="wizard", scans_override=selection.scans)
+            _render_audit(audit, output)
+            continue
         incomplete = _incomplete_review_items(config, audit, required_newer_than=decision_heads)
         if not incomplete:
             break
@@ -342,11 +349,40 @@ def _run_new(
                 _stage(output, 3, "Review", "saved")
                 return _plan_reviewed(config, root, output)
             continue
-        if choice != "R":
-            output.print("Review decisions saved. Resume later to finish review.")
-            return None
+        if choice == "R":
+            audit = run_audit(root, config, mode="wizard", scans_override=selection.scans)
+            _render_audit(audit, output)
+            continue
+        output.print("Review decisions saved. Resume later to finish review.")
+        return None
     _stage(output, 3, "Review", "saved")
     return _plan_reviewed(config, root, output)
+
+
+def _run_group_heads(config: AppConfig, audit: AuditResult) -> dict[str, int]:
+    if config.database_path is None:
+        return {}
+    keys = {
+        run_group_key(item.local.series_title)
+        for item in audit.items
+        if item.local.kind.value == "comic" and item.local.series_title
+    }
+    if not keys:
+        return {}
+    connection = connect(config.database_path)
+    try:
+        output: dict[str, int] = {}
+        for key in keys:
+            row = connection.execute(
+                "SELECT id FROM run_group_decisions "
+                "WHERE group_key=? AND provider='comic_vine' ORDER BY id DESC LIMIT 1",
+                (key,),
+            ).fetchone()
+            if row is not None:
+                output[key] = int(row["id"])
+        return output
+    finally:
+        connection.close()
 
 
 def _completed_source_assessment(

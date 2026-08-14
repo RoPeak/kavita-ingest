@@ -276,7 +276,7 @@ def test_generated_epub_runs_through_real_scan_review_plan_and_apply(tmp_path: P
 
     item = document["items"][0]
     destination = tmp_path / "books" / "Resolved Book" / "Resolved Book.epub"
-    assert document["schema_version"] == 2
+    assert document["schema_version"] == 3
     assert item["planning_policy"] == document["planning_policy"]
     assert item["expected_inventory"]
     assert item["provenance"]["decision_type"] == "manual_identity"

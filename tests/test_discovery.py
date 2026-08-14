@@ -17,6 +17,19 @@ def test_discovery_is_sorted_and_excludes_destination_roots(tmp_path: Path) -> N
     assert [path.name for path in discover(incoming, (ignored,))] == ["a.epub", "z.pdf"]
 
 
+
+def test_discovery_naturally_sorts_numbered_media(tmp_path: Path) -> None:
+    incoming = tmp_path / "incoming"
+    incoming.mkdir()
+    for name in ("Watchmen #10.pdf", "Watchmen #2.pdf", "Watchmen #1.pdf"):
+        (incoming / name).write_bytes(b"%PDF-1.4\n")
+
+    assert [path.name for path in discover(incoming)] == [
+        "Watchmen #1.pdf",
+        "Watchmen #2.pdf",
+        "Watchmen #10.pdf",
+    ]
+
 def test_signature_wins_over_extension_and_hash_is_stable(tmp_path: Path) -> None:
     path = tmp_path / "misnamed.epub"
     path.write_bytes(b"%PDF-1.7\nfixture")

@@ -22,7 +22,7 @@ from kavita_ingest.planning import (
     build_snapshot,
     new_plan,
 )
-from kavita_ingest.projection import project_book, project_comic
+from kavita_ingest.projection import project_book, project_comic, project_comic_pdf
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,6 +47,8 @@ def make_apply_fixture(
     writer_versions: dict[str, str] | None = None,
     file_mode: int = 0o644,
     directory_mode: int = 0o755,
+    comic_pdf: bool = False,
+    disguised_cbz_suffix: str | None = None,
 ) -> ApplyFixture:
     name = plan_name or f"{media_format}-{lifecycle}"
     incoming = tmp_path / name / "incoming"
@@ -55,9 +57,30 @@ def make_apply_fixture(
     archive_root = tmp_path / name / "archive"
     for directory in (incoming, books, comics, archive_root):
         directory.mkdir(parents=True)
-    source = _source(incoming, media_format, pdf_state=pdf_state, cbr_fixture=cbr_fixture)
-    root = books if media_format in {"epub", "pdf"} else comics
-    if media_format in {"epub", "pdf"}:
+    source = _source(
+        incoming,
+        media_format,
+        pdf_state=pdf_state,
+        cbr_fixture=cbr_fixture,
+        disguised_cbz_suffix=disguised_cbz_suffix,
+    )
+    root = comics if comic_pdf else (books if media_format in {"epub", "pdf"} else comics)
+    if comic_pdf:
+        identity = CanonicalIdentity(
+            MediaKind.COMIC,
+            "That Annihilated Place",
+            ("Geoff Johns",),
+            series_title="Doomsday Clock",
+            sequence=SequenceNumber.parse("1"),
+            run_start_year=2017,
+            item_type="issue",
+            publisher="DC Comics",
+            release_date="2017-11-22",
+            release_date_precision="day",
+            resolution=ResolutionLevel.MANUAL,
+        )
+        projection = project_comic_pdf(identity)
+    elif media_format in {"epub", "pdf"}:
         identity = (
             work_only_identity(title="Resolved Book", creators=("Alex Author",))
             if work_only
@@ -106,6 +129,7 @@ def make_apply_fixture(
             source.stat().st_size,
             source.stat().st_mtime_ns,
             media_format,
+            _signature(media_format),
         ),
         identity=identity,
         projection=projection,
@@ -148,6 +172,7 @@ def _source(
     *,
     pdf_state: str,
     cbr_fixture: str,
+    disguised_cbz_suffix: str | None,
 ) -> Path:
     if media_format == "epub":
         return create_epub(incoming / "source.epub")
@@ -158,7 +183,7 @@ def _source(
             signed_marker=pdf_state == "signed",
         )
     if media_format == "cbz":
-        path = incoming / "source.cbz"
+        path = incoming / f"source{disguised_cbz_suffix or '.cbz'}"
         with zipfile.ZipFile(path, "w") as archive:
             archive.writestr("001.jpg", b"first-page")
             archive.writestr("002.jpg", b"second-page")
@@ -168,6 +193,15 @@ def _source(
         shutil.copy2(Path("compatibility/fixtures/rar") / cbr_fixture, path)
         return path
     raise ValueError(media_format)
+
+
+def _signature(media_format: str) -> str:
+    return {
+        "epub": "zip-epub",
+        "pdf": "pdf",
+        "cbz": "zip",
+        "cbr": "rar",
+    }[media_format]
 
 
 def _versions(media_format: str) -> dict[str, str]:

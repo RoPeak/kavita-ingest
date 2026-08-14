@@ -135,3 +135,64 @@ def test_hydration_failure_retains_sparse_candidate_for_explicit_policy_choice()
     assert result.candidate is discovery
     assert result.error == "temporary outage"
     assert provider.fetches == 1
+
+
+class BookEditionDetailProvider:
+    name = ProviderName.GOOGLE_BOOKS
+
+    def status(self) -> ProviderStatus:
+        return ProviderStatus(self.name, True, True, True, "fixture", ("exact_fetch",))
+
+    def search(self, query: SearchQuery) -> list[NormalizedCandidate]:
+        del query
+        return []
+
+    def fetch(self, provider_id: str) -> list[NormalizedCandidate]:
+        assert provider_id == "collection-1"
+        return [
+            NormalizedCandidate(
+                ProviderName.GOOGLE_BOOKS,
+                "collection-1",
+                RecordType.BOOK_EDITION,
+                MediaKind.BOOK,
+                "Animal Man by Grant Morrison Book 1",
+                creators=(Contributor("Grant Morrison", "author"),),
+                publisher="DC Comics",
+                publication_date="2020-01-01",
+                edition_id="collection-1",
+            )
+        ]
+
+    def lookup_identifier(self, identifier: Identifier) -> list[NormalizedCandidate]:
+        del identifier
+        return []
+
+
+def test_hydration_reapplies_comic_collection_semantics_to_book_edition_detail() -> None:
+    selected = NormalizedCandidate(
+        ProviderName.GOOGLE_BOOKS,
+        "collection-1",
+        RecordType.COMIC_COLLECTION,
+        MediaKind.COMIC,
+        "Animal Man by Grant Morrison Book 1",
+        creators=(Contributor("Grant Morrison", "writer"),),
+        series_title="Animal Man",
+        sequence=SequenceNumber.parse("1"),
+        item_type="collected-edition",
+        provider_metadata={
+            "collection_adapter": "book_edition",
+            "collection_source_record_type": "book_edition",
+            "collection_series_source": "local",
+            "collection_sequence_source": "local",
+        },
+    )
+
+    result = hydrate_candidate(selected, (BookEditionDetailProvider(),))
+
+    assert result.status == "hydrated"
+    assert result.candidate.record_type is RecordType.COMIC_COLLECTION
+    assert result.candidate.media_kind is MediaKind.COMIC
+    assert result.candidate.series_title == "Animal Man"
+    assert result.candidate.sequence == SequenceNumber.parse("1")
+    assert result.candidate.creators == (Contributor("Grant Morrison", "writer"),)
+    assert result.candidate.publisher == "DC Comics"

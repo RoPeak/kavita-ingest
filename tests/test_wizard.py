@@ -709,7 +709,14 @@ def test_fresh_wizard_has_one_start_action_and_full_human_review_flow(
     with connect(fixture.config.database_path) as connection:  # type: ignore[arg-type]
         stored = PlanStore(connection).get(fixture.plan_id)
     audit = SimpleNamespace(
-        items=(object(),),
+        items=(
+            SimpleNamespace(
+                local=SimpleNamespace(
+                    kind=SimpleNamespace(value="comic"),
+                    series_title="Watchmen",
+                )
+            ),
+        ),
         summary={
             "sources": 1,
             "eligible_high_confidence": 1,

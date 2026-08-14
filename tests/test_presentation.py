@@ -60,4 +60,4 @@ def test_technical_view_exposes_exact_persisted_digest_and_document(tmp_path: Pa
     render_technical_plan(plan, Console(file=stream, width=100, force_terminal=False))
     text = stream.getvalue()
     assert plan.sha256 in text
-    assert '"planning_policy"' in text and '"schema_version": 2' in text
+    assert '"planning_policy"' in text and '"schema_version": 3' in text

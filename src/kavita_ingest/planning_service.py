@@ -26,7 +26,7 @@ from .planning import (
     build_snapshot,
     new_plan,
 )
-from .projection import project_book, project_comic
+from .projection import project_book, project_comic, project_comic_pdf
 from .resolution import resolve_explicit_identity
 from .run_groups import RunGroupRepository, run_group_key
 
@@ -172,7 +172,7 @@ class PlanBuilder:
                         continue
             try:
                 projection, transformations, versions = self._project(
-                    identity, current.format, policy
+                    identity, current, policy
                 )
             except ValueError as exc:
                 blocked += 1
@@ -197,6 +197,7 @@ class PlanBuilder:
                     current.size,
                     current.mtime_ns,
                     current.format.value,
+                    current.signature,
                 ),
                 identity=identity,
                 projection=projection,
@@ -286,9 +287,10 @@ class PlanBuilder:
     def _project(
         self,
         identity: Any,
-        source_format: SourceFormat,
+        source: SourceRecord,
         policy: PlanningPolicySnapshot,
     ) -> tuple[Any, tuple[dict[str, Any], ...], dict[str, str]]:
+        source_format = source.format
         if source_format is SourceFormat.CBR:
             if not policy.cbr_conversion_enabled:
                 raise ValueError(
@@ -300,13 +302,24 @@ class PlanBuilder:
                 ({"type": "cbr_to_cbz"},),
                 _writer_versions(source_format),
             )
+        if source_format is SourceFormat.PDF and identity.media_kind is MediaKind.COMIC:
+            return (
+                project_comic_pdf(identity, policy.naming),
+                ({"type": "pdf_comic_metadata"},),
+                _writer_versions(source_format),
+            )
         extension = f".{source_format.value}"
         projection = (
             project_book(identity, extension, policy.naming)
             if identity.media_kind is MediaKind.BOOK
             else project_comic(identity, extension, policy.naming)
         )
-        return projection, ({"type": "metadata_only"},), _writer_versions(source_format)
+        transformation = (
+            "zip_comic_to_cbz"
+            if source_format is SourceFormat.CBZ and source.path.suffix.casefold() != ".cbz"
+            else "metadata_only"
+        )
+        return projection, ({"type": transformation},), _writer_versions(source_format)
 
     def _destination_root(self, kind: MediaKind) -> Path:
         root = self.config.books_root if kind is MediaKind.BOOK else self.config.comics_root

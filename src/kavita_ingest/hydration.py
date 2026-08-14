@@ -5,6 +5,7 @@ import re
 from dataclasses import dataclass, replace
 from typing import Any
 
+from .collection_candidates import adapt_exact_collection_candidate
 from .providers.base import Provider, ProviderError
 from .providers.models import Contributor, Identifier, NormalizedCandidate
 
@@ -62,6 +63,7 @@ def hydrate_candidate(
             "unavailable",
             error="exact provider response did not contain the selected identity",
         )
+    exact = adapt_exact_collection_candidate(selected, exact)
     return merge_exact_candidate(selected, exact)
 
 

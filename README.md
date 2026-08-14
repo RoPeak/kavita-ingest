@@ -15,7 +15,7 @@ Supported inputs and transformations:
 | Input | Inspection | Metadata output | Notes |
 | --- | --- | --- | --- |
 | EPUB | Yes | EPUB/OPF | Calibre plus narrow contributor-role OPF patching |
-| PDF | Yes | Calibre XMP | Unsigned, unencrypted, non-signature-bearing PDFs only; semantic payload verified |
+| PDF | Yes | Calibre XMP | Books and comic issues; unsigned, unencrypted, non-signature-bearing PDFs only; semantic payload verified |
 | CBZ | Yes | CBZ + rich ComicInfo 2.1 | Existing publication payloads preserved |
 | CBR/RAR3 | Yes | Repacked CBZ + ComicInfo | Single-volume ordinary archives |
 | CBR/RAR5 | Yes | Repacked CBZ + ComicInfo | Single-volume ordinary archives |
@@ -102,8 +102,9 @@ python3 -m venv .venv
 .venv/bin/mypy --strict src
 ```
 
-The package exposes the `kavita-ingest` console script and is currently version
-`1.0.0`, the first supported v1 release.
+The package exposes the `kavita-ingest` console script. The latest supported
+release is `1.0.0`; development builds on `main` report `1.1.0.dev0` until the
+v1.1 release gate.
 
 The `compatibility-test` extra is only for rerunning Milestone 0 experiments. It
 includes `comicinfoxml`, which those experiments found unsuitable for production
@@ -280,10 +281,17 @@ intrinsically work-only: ordinary Accept presents an explicit warning and cannot
 turn aggregate work data into edition metadata.
 
 ComicInfo projection includes resolved creator roles, publisher, conservative
-publication date components, and language. Comic Vine formats are normalized to
-the canonical issue/annual/one-shot/collection/omnibus/graphic-novel vocabulary;
-unknown non-empty formats block planning for review instead of masquerading as
-ordinary issues.
+publication date components, and language. Ordinary comic issues and run context
+use Comic Vine. Collected editions are not guessed from same-titled Comic Vine
+volumes: edition-capable book providers may supply a true edition record, which
+is then adapted into the comic-collection domain while retaining explicit local
+series/collection-sequence evidence. Regular issue records still cannot satisfy
+a collected-edition identity.
+
+PDF comics use a separate Calibre/XMP projection rather than ComicInfo fields.
+The canonical issue number remains in the filename for Comic (Flexible) parsing;
+`calibre:series_index` is not repurposed as an issue number because Kavita treats
+that PDF field as a volume.
 
 Existing ComicInfo is preserved conservatively. Schema-known elements are
 emitted in deterministic ComicInfo 2.1 order, including pre-existing fields and
@@ -296,9 +304,12 @@ and validation classification while the source remains untouched.
 
 SQLite stores the sole authoritative canonical JSON bytes for each immutable
 plan. Exports are exact derivatives. A plan snapshot contains the resolved
-metadata, Kavita projection, writer requirements, source SHA-256, destination,
-transformation, source inventory, verification requirements, source lifecycle,
-naming policy, archive safety limits, and CBR conversion policy.
+metadata, Kavita projection, writer requirements, source SHA-256 and detected
+content signature, destination, transformation, source inventory, verification
+requirements, source lifecycle, naming policy, archive safety limits, and CBR
+conversion policy. Apply re-detects that signature instead of trusting a filename
+extension, so ZIP-backed comics carrying a `.cbr` suffix can be normalized safely
+to `.cbz` without weakening source preconditions.
 
 `plan create ROOT` consumes only persisted scan/classification evidence and the
 latest explicit review decisions under `ROOT`. It re-fingerprints every source,
@@ -417,8 +428,8 @@ redacted. Provider payload/evidence detail remains a debug concern.
 - Encrypted and signature-bearing PDFs cannot be metadata-written.
 - Symbolic/range ComicInfo numbering has parser/schema tests but incomplete live
   Kavita coverage.
-- Comic Vine collected-edition coverage is incomplete and ebook edition metadata
-  can be sparse.
+- Collected-edition identity depends on true edition records from Google Books or
+  Open Library; sparse provider coverage can still require explicit manual identity.
 - Live Kavita behavior can still reveal personal naming/presentation preferences.
 - Rollback is conservative preview only.
 

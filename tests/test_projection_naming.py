@@ -7,7 +7,12 @@ import pytest
 from kavita_ingest.canonical import CanonicalIdentity, ResolutionLevel, work_only_identity
 from kavita_ingest.domain import MediaKind, SequenceNumber
 from kavita_ingest.naming import NamingPolicy, detect_collisions
-from kavita_ingest.projection import OwnershipManifest, project_book, project_comic
+from kavita_ingest.projection import (
+    OwnershipManifest,
+    project_book,
+    project_comic,
+    project_comic_pdf,
+)
 
 
 @pytest.mark.parametrize(
@@ -227,6 +232,63 @@ def test_cover_date_never_manufactures_comicinfo_release_fields(
     assert {"Year", "Month", "Day"} <= set(projection.ownership.preserve_fields)
 
 
+
+def test_pdf_comic_projection_uses_only_pdf_safe_metadata_and_filename_issue_identity() -> None:
+    identity = CanonicalIdentity(
+        MediaKind.COMIC,
+        "That Annihilated Place",
+        ("Geoff Johns",),
+        series_title="Doomsday Clock",
+        sequence=SequenceNumber.parse("1"),
+        run_start_year=2017,
+        item_type="issue",
+        publisher="DC Comics",
+        release_date="2017-11-22",
+        release_date_precision="day",
+        language="en",
+        identifiers={"comic_vine": "4000-123"},
+    )
+
+    projection = project_comic_pdf(identity)
+
+    assert projection.destination_folder == PurePosixPath("Doomsday Clock (2017)")
+    assert projection.filename == "Doomsday Clock (2017) - 001 - That Annihilated Place.pdf"
+    assert projection.ownership.clear_fields == ()
+    assert projection.ownership.set_fields == {
+        "series": "Doomsday Clock (2017)",
+        "title": "That Annihilated Place",
+        "authors": ["Geoff Johns"],
+        "publisher": "DC Comics",
+        "date": "2017-11-22",
+        "language": "en",
+        "identifiers": {"comic_vine": "4000-123"},
+    }
+    assert "series_index" not in projection.ownership.set_fields
+    assert "Series" not in projection.ownership.set_fields
+    assert "Number" not in projection.ownership.set_fields
+
+
+
+def test_standalone_collected_edition_does_not_invent_sequence_number() -> None:
+    identity = CanonicalIdentity(
+        MediaKind.COMIC,
+        "Supergirl: Woman of Tomorrow",
+        ("Tom King",),
+        series_title="Supergirl: Woman of Tomorrow",
+        sequence=None,
+        item_type="collected-edition",
+        publisher="DC Comics",
+    )
+
+    assert identity.planning_blocks() == ()
+    projection = project_comic(identity)
+
+    assert "Number" not in projection.ownership.set_fields
+    assert "Number" in projection.ownership.clear_fields
+    assert projection.metadata["Number"] == ""
+    assert " -  - " not in projection.filename
+    assert projection.filename.endswith(".cbz")
+
 def test_work_only_book_preserves_all_unresolved_edition_metadata() -> None:
     identity = work_only_identity(
         title="The Left Hand of Darkness", creators=("Ursula K. Le Guin",)
@@ -296,7 +358,6 @@ def test_unresolved_comic_blocks_with_precise_reasons() -> None:
     assert identity.planning_blocks() == (
         "comic run/series identity is unresolved",
         "comic item type is unresolved",
-        "comic issue/collection sequence is unresolved",
     )
 
 

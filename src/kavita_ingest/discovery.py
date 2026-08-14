@@ -26,7 +26,7 @@ def discover(root: Path, excluded_roots: tuple[Path, ...] = ()) -> Iterator[Path
             if not _is_excluded(current_path / name, excluded)
             and not (current_path / name).is_symlink()
         )
-        for name in sorted(files):
+        for name in sorted(files, key=_natural_name_key):
             path = current_path / name
             if path.is_symlink() or _is_excluded(path, excluded):
                 continue
@@ -98,6 +98,16 @@ def failed_source_record(path: Path) -> SourceRecord:
         sha256="",
         format=SourceFormat.UNKNOWN,
         signature="unreadable",
+    )
+
+
+def _natural_name_key(value: str) -> tuple[tuple[int, int | str], ...]:
+    """Sort numbered media in human sequence without changing filenames."""
+    parts = re.split(r"(\d+)", value.casefold())
+    return tuple(
+        (0, int(part)) if part.isdigit() else (1, part)
+        for part in parts
+        if part
     )
 
 

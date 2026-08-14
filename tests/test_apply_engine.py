@@ -48,6 +48,71 @@ def test_successful_apply_stages_verifies_commits_then_removes_source(
         assert sha256_file(fixture.destination) != source_hash
 
 
+
+
+
+def test_schema2_plan_remains_auditable_but_cannot_apply_under_signature_semantics(
+    tmp_path: Path,
+) -> None:
+    fixture = make_apply_fixture(
+        tmp_path,
+        "cbz",
+        plan_name="legacy-signature-plan",
+        approve=False,
+    )
+    database = fixture.config.database_path
+    assert database is not None
+
+    with connect(database) as connection:
+        store = PlanStore(connection)
+        current = store.get(fixture.plan_id)
+        document = json.loads(current.canonical_json)
+        document["schema_version"] = 2
+        del document["items"][0]["source"]["signature"]
+        payload = json.dumps(
+            document, ensure_ascii=True, sort_keys=True, separators=(",", ":")
+        ).encode()
+        legacy = store.import_bytes(payload)
+        store.approve(legacy.id, legacy.sha256)
+
+    with pytest.raises(ApplyRefused, match="predates immutable content-signature"):
+        ApplyEngine(fixture.config).apply(legacy.id)
+
+    assert fixture.source.exists()
+    assert not fixture.destination.exists()
+
+def test_zip_container_with_cbr_suffix_applies_as_cbz_without_suffix_trust(tmp_path: Path) -> None:
+    fixture = make_apply_fixture(
+        tmp_path,
+        "cbz",
+        plan_name="battle-beast-disguised-cbr",
+        disguised_cbz_suffix=".cbr",
+    )
+
+    summary = ApplyEngine(fixture.config).apply(fixture.plan_id)
+
+    assert summary.status is RunState.COMPLETE
+    assert not fixture.source.exists()
+    assert fixture.destination.suffix == ".cbz"
+    assert fixture.destination.is_file()
+
+
+def test_pdf_comic_uses_pdf_safe_projection_and_completes_apply(tmp_path: Path) -> None:
+    fixture = make_apply_fixture(
+        tmp_path,
+        "pdf",
+        plan_name="doomsday-clock-pdf-comic",
+        comic_pdf=True,
+    )
+
+    summary = ApplyEngine(fixture.config).apply(fixture.plan_id)
+
+    assert summary.status is RunState.COMPLETE
+    assert not fixture.source.exists()
+    assert fixture.destination.is_file()
+    assert fixture.destination.parent.name == "Doomsday Clock (2017)"
+    assert fixture.destination.name.startswith("Doomsday Clock (2017) - 001")
+
 def test_work_only_epub_preserves_unresolved_edition_metadata(tmp_path: Path) -> None:
     fixture = make_apply_fixture(tmp_path, "epub", work_only=True)
     before = opf_snapshot(fixture.source)

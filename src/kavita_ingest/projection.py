@@ -99,8 +99,13 @@ def project_comic(
     series = identity.series_title
     if identity.run_start_year is not None:
         series = f"{series} ({identity.run_start_year})"
-    number = identity.sequence.normalized if identity.sequence else "1"
     item_type = identity.item_type or "issue"
+    collection_like = item_type in {"trade", "collected-edition", "omnibus"}
+    number = (
+        identity.sequence.normalized
+        if identity.sequence
+        else ("" if collection_like else "1")
+    )
     comic_format = _FORMATS.get(item_type, "")
     volume = identity.collection_volume if identity.collection_volume is not None else ""
     metadata: dict[str, Any] = {
@@ -144,10 +149,82 @@ def project_comic(
         preserve_fields.extend(["Year", "Month", "Day"])
     owned = OwnershipManifest(
         set_fields={key: value for key, value in metadata.items() if value != ""},
-        clear_fields=tuple(key for key in ("Volume", "Format") if metadata[key] == ""),
+        clear_fields=tuple(
+            key for key in ("Number", "Volume", "Format") if metadata[key] == ""
+        ),
         preserve_fields=tuple(preserve_fields),
     )
     return KavitaProjection(MediaKind.COMIC, metadata, filename, folder, owned)
+
+
+def project_comic_pdf(
+    identity: CanonicalIdentity,
+    naming: NamingPolicy | None = None,
+) -> KavitaProjection:
+    """Project a comic identity into PDF-safe Calibre/XMP metadata.
+
+    PDF files cannot carry ComicInfo.xml. Keep issue identity in the canonical
+    filename while limiting owned metadata to fields understood by the verified
+    PDF writer. In particular, do not map comic issue Number to Calibre
+    series_index because Kavita interprets that field as a volume.
+    """
+    if identity.media_kind is not MediaKind.COMIC:
+        raise ValueError("comic PDF projection requires a comic identity")
+    blocks = identity.planning_blocks()
+    if blocks:
+        raise ValueError("; ".join(blocks))
+    assert identity.series_title is not None
+
+    series = identity.series_title
+    if identity.run_start_year is not None:
+        series = f"{series} ({identity.run_start_year})"
+
+    item_type = identity.item_type or "issue"
+    comic_format = _FORMATS.get(item_type, "")
+    policy = naming or NamingPolicy()
+    policy.validate()
+    naming_values = {
+        "title": identity.title or None,
+        "series": series,
+        "series_or_title": series,
+        "number": render_sequence(identity.sequence, policy.integer_padding),
+        "year": identity.run_start_year,
+        "author": identity.creators[0] if identity.creators else None,
+        "format": comic_format or None,
+    }
+    folder = PurePosixPath(render_component(policy.comic_folder, naming_values))
+    if comic_format and policy.comic_specials_subfolder:
+        folder /= "Specials"
+    filename = render_component(policy.comic_file, naming_values) + ".pdf"
+
+    metadata: dict[str, Any] = {"series": series}
+    if identity.title:
+        metadata["title"] = identity.title
+    if identity.creators:
+        metadata["authors"] = list(identity.creators)
+    if identity.publisher:
+        metadata["publisher"] = identity.publisher
+    if identity.release_date and identity.release_date_precision == "day":
+        metadata["date"] = identity.release_date
+    if identity.language:
+        metadata["language"] = identity.language
+    if identity.identifiers:
+        metadata["identifiers"] = dict(identity.identifiers)
+    if identity.description:
+        metadata["description"] = identity.description
+    if identity.subjects:
+        metadata["subjects"] = list(identity.subjects)
+
+    return KavitaProjection(
+        MediaKind.COMIC,
+        metadata,
+        filename,
+        folder,
+        OwnershipManifest(
+            set_fields=metadata,
+            preserve_fields=("series_index",),
+        ),
+    )
 
 
 def project_book(

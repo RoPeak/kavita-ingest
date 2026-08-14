@@ -13,8 +13,8 @@ from .canonical import CanonicalIdentity
 from .naming import NamingPolicy
 from .projection import KavitaProjection
 
-PLAN_SCHEMA_VERSION = 2
-SUPPORTED_PLAN_SCHEMA_VERSIONS = {1, PLAN_SCHEMA_VERSION}
+PLAN_SCHEMA_VERSION = 3
+SUPPORTED_PLAN_SCHEMA_VERSIONS = {1, 2, PLAN_SCHEMA_VERSION}
 CURRENT_PLANNING_POLICY_VERSION = 2
 LEGACY_POLICY_MESSAGE = (
     "This plan was created with an older planning-policy version and does not contain "
@@ -74,6 +74,7 @@ class SourcePrecondition:
     size: int
     mtime_ns: int
     media_format: str
+    signature: str
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -82,6 +83,7 @@ class SourcePrecondition:
             "size": self.size,
             "mtime_ns": self.mtime_ns,
             "media_format": self.media_format,
+            "signature": self.signature,
         }
 
 
@@ -306,10 +308,12 @@ def validate_plan_payload(payload: bytes) -> dict[str, Any]:
     items = document.get("items")
     if not isinstance(items, list):
         raise ValueError("plan items must be a list")
-    if document["schema_version"] == PLAN_SCHEMA_VERSION:
+    if document["schema_version"] >= 2:
         policy = document.get("planning_policy")
         if not isinstance(policy, dict) or policy.get("version") not in {1, 2}:
-            raise ValueError("schema 2 plans require supported planning_policy version 1 or 2")
+            raise ValueError(
+                "schema 2+ plans require supported planning_policy version 1 or 2"
+            )
         if policy.get("version") == 2:
             permissions = policy.get("permissions")
             if not isinstance(permissions, dict):
@@ -321,6 +325,20 @@ def validate_plan_payload(payload: bytes) -> dict[str, Any]:
     for item in items:
         if not isinstance(item, dict) or "item_id" not in item or "source" not in item:
             raise ValueError("each plan item requires item_id and source")
+        source = item["source"]
+        if not isinstance(source, dict):
+            raise ValueError("plan item source must be an object")
+        if document["schema_version"] >= 3:
+            signature = source.get("signature")
+            if not isinstance(signature, str) or signature not in {
+                "pdf",
+                "rar",
+                "zip",
+                "zip-epub",
+            }:
+                raise ValueError(
+                    "schema 3 plans require a supported immutable source signature"
+                )
         projection = item.get("kavita_projection")
         provenance = item.get("provenance")
         if projection is not None and (

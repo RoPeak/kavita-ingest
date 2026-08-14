@@ -27,11 +27,13 @@ from .archive_safety import ArchiveLimits, validate_inventory
 from .calibre import require_safe_calibre_executable
 from .config import AppConfig
 from .db import connect, migrate
+from .discovery import detect_signature
 from .filesystem import DestinationExists, LinuxFilesystem, NoClobberFilesystem, sha256_file
 from .locking import ProcessLock, lock_path
 from .plan_store import PlanStore, StoredPlan
 from .planning import (
     LEGACY_POLICY_MESSAGE,
+    PLAN_SCHEMA_VERSION,
     SUPPORTED_PLAN_SCHEMA_VERSIONS,
     require_current_planning_policy,
     validate_plan_payload,
@@ -87,6 +89,7 @@ class PreparedItem:
     source_hash: str
     source_size: int
     source_format: str
+    source_signature: str
     destination: Path
     lifecycle_policy: str
     archive_path: Path | None
@@ -252,6 +255,7 @@ class ApplyEngine:
         migrate(self.database_path)
         with connect(self.database_path) as connection:
             plan, document = self._eligible_plan(connection, plan_id)
+            self._require_current_apply_schema(document)
             prepared = self._prepare_items(document, run_id="preview")
         lifecycles: dict[str, int] = {}
         for item in prepared:
@@ -276,6 +280,7 @@ class ApplyEngine:
     def _apply_locked(self, connection: sqlite3.Connection, plan_id: int) -> ApplySummary:
         journal = JournalRepository(connection)
         plan, document = self._eligible_plan(connection, plan_id)
+        self._require_current_apply_schema(document)
         previous = journal.latest_for_plan(plan_id)
         if previous is not None:
             if previous.status is RunState.COMPLETE:
@@ -326,6 +331,7 @@ class ApplyEngine:
     def _recover_locked(self, connection: sqlite3.Connection, plan_id: int) -> ApplySummary:
         journal = JournalRepository(connection)
         plan, document = self._eligible_plan(connection, plan_id)
+        self._require_current_apply_schema(document)
         run = journal.latest_for_plan(plan_id)
         if run is None:
             raise ApplyRefused(f"plan {plan_id} has no apply run to recover")
@@ -517,6 +523,13 @@ class ApplyEngine:
             raise ApplyRefused("plan has no actionable items")
         return plan, document
 
+    def _require_current_apply_schema(self, document: dict[str, Any]) -> None:
+        if document.get("schema_version") != PLAN_SCHEMA_VERSION:
+            raise ApplyRefused(
+                "plan predates immutable content-signature preconditions; "
+                "abandon/recreate and approve a new plan before applying"
+            )
+
     def _prepare_items(self, document: dict[str, Any], *, run_id: str) -> tuple[PreparedItem, ...]:
         output: list[PreparedItem] = []
         for item in document["items"]:
@@ -536,6 +549,7 @@ class ApplyEngine:
                     str(item["source"]["sha256"]),
                     int(item["source"]["size"]),
                     str(item["source"]["media_format"]),
+                    str(item["source"].get("signature", "")),
                     destination,
                     policy,
                     archive,
@@ -678,11 +692,17 @@ class ApplyEngine:
                 )
 
     def _check_source_format(self, item: PreparedItem) -> None:
-        expected_suffix = {"epub": ".epub", "cbz": ".cbz", "cbr": ".cbr", "pdf": ".pdf"}
-        if item.source_format not in expected_suffix:
+        if item.source_format not in {"epub", "cbz", "cbr", "pdf"}:
             raise ApplyRefused(f"unsupported planned source format: {item.source_format}")
-        if item.source.suffix.casefold() != expected_suffix[item.source_format]:
-            raise ApplyRefused("source suffix no longer matches planned media format")
+        signature, detected = detect_signature(item.source)
+        if not item.source_signature:
+            raise ApplyRefused(
+                "plan lacks immutable source-signature evidence; regenerate the plan"
+            )
+        if signature != item.source_signature or detected.value != item.source_format:
+            raise StalePlan(
+                "source container signature no longer matches the approved plan"
+            )
         if item.source_format == "epub":
             with zipfile.ZipFile(item.source) as archive:
                 if archive.testzip() is not None or "mimetype" not in archive.namelist():

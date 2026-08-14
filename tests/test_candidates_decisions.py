@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from kavita_ingest.candidates import CandidateSession, generate_candidates
+from kavita_ingest.collection_candidates import adapt_collection_candidate
 from kavita_ingest.config import MatchingSettings
 from kavita_ingest.db import connect, migrate
 from kavita_ingest.decisions import (
@@ -345,7 +346,7 @@ def test_query_strategy_uses_identifier_before_structured_search() -> None:
     assert result.queries == ("google_books:identifier:isbn",)
 
 
-def test_collected_edition_query_retains_collection_semantics() -> None:
+def test_collected_edition_skips_comic_vine_without_edition_format_evidence() -> None:
     provider = FakeProvider(ProviderName.COMIC_VINE, [])
     local = LocalIdentity(
         MediaKind.COMIC,
@@ -354,8 +355,11 @@ def test_collected_edition_query_retains_collection_semantics() -> None:
         "Book 1",
         series_title="Animal Man",
     )
-    generate_candidates(local, (provider,))
-    assert provider.operations[0].startswith("search:collected-edition")
+
+    result = generate_candidates(local, (provider,))
+
+    assert provider.operations == []
+    assert result.candidates == ()
 
 
 def test_comic_run_is_resolved_once_and_reused_without_implicit_approval() -> None:
@@ -893,3 +897,99 @@ def test_batch_accept_requires_exact_count_and_excludes_unresolved_editions(tmp_
     assert len(accepted) == 1
     assert accepted[0].batch_id
     connection.close()
+
+
+def test_collected_edition_uses_book_edition_provider_without_crossing_issue_boundary() -> None:
+    google = FakeProvider(
+        ProviderName.GOOGLE_BOOKS,
+        [
+            NormalizedCandidate(
+                ProviderName.GOOGLE_BOOKS,
+                "new-x-men-ultimate-1",
+                RecordType.BOOK_EDITION,
+                MediaKind.BOOK,
+                "New X-Men by Grant Morrison Ultimate Collection Book 1",
+                creators=(Contributor("Grant Morrison", "author"),),
+                identifiers=(Identifier("isbn13", "9780785143141"),),
+                publisher="Marvel",
+                publication_date="2019-01-01",
+                edition_id="new-x-men-ultimate-1",
+            )
+        ],
+    )
+    comic_vine = FakeProvider(ProviderName.COMIC_VINE, [])
+    local = LocalIdentity(
+        MediaKind.COMIC,
+        "collected-edition",
+        0.98,
+        "Ultimate Collection Book 1",
+        creators=("Grant Morrison",),
+        series_title="New X-Men",
+        sequence=SequenceNumber.parse("1"),
+        year=2019,
+    )
+
+    result = generate_candidates(local, (google, comic_vine))
+
+    assert comic_vine.operations == []
+    assert google.operations == ["search:standalone-book:False"]
+    assert len(result.candidates) == 1
+    candidate = result.candidates[0]
+    assert candidate.record_type is RecordType.COMIC_COLLECTION
+    assert candidate.media_kind is MediaKind.COMIC
+    assert candidate.series_title == "New X-Men"
+    assert candidate.sequence == SequenceNumber.parse("1")
+    assert candidate.creators == (Contributor("Grant Morrison", "writer"),)
+    assert candidate.provider_metadata["collection_adapter"] == "book_edition"
+
+    score = score_candidates(local, [candidate], MatchingSettings())[0]
+    assert not score.hard_contradiction
+    assert score.score >= 85
+    assert score.identity_fields_high
+
+
+def test_collected_edition_never_adapts_book_work_or_regular_comic_issue() -> None:
+    google = FakeProvider(
+        ProviderName.GOOGLE_BOOKS,
+        [
+            NormalizedCandidate(
+                ProviderName.GOOGLE_BOOKS,
+                "work-only",
+                RecordType.BOOK_WORK,
+                MediaKind.BOOK,
+                "Animal Man",
+            )
+        ],
+    )
+    local = LocalIdentity(
+        MediaKind.COMIC,
+        "collected-edition",
+        0.98,
+        "Book 1",
+        creators=("Grant Morrison",),
+        series_title="Animal Man",
+        sequence=SequenceNumber.parse("1"),
+    )
+
+    result = generate_candidates(local, (google,))
+    issue = NormalizedCandidate(
+        ProviderName.COMIC_VINE,
+        "4000-1",
+        RecordType.COMIC_ISSUE,
+        MediaKind.COMIC,
+        "Animal Man",
+        series_title="Animal Man",
+        sequence=SequenceNumber.parse("1"),
+        run_id="4050-1",
+        run_start_year=1988,
+    )
+
+    assert result.candidates == ()
+    assert (
+        adapt_collection_candidate(
+            issue,
+            series_title="Animal Man",
+            sequence=SequenceNumber.parse("1"),
+        )
+        is None
+    )

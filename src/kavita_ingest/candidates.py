@@ -5,7 +5,8 @@ from dataclasses import dataclass
 from difflib import SequenceMatcher
 from typing import Self
 
-from .domain import SequenceNumber
+from .collection_candidates import adapt_collection_candidate
+from .domain import MediaKind, SequenceNumber
 from .matching import LocalIdentity
 from .providers.base import Provider, ProviderError
 from .providers.comic_vine import ComicVineProvider
@@ -207,11 +208,21 @@ def generate_candidates(
     queries: list[str] = []
     unavailable: list[str] = []
     available: list[ProviderName] = []
+    collected = local.kind is MediaKind.COMIC and local.subtype == "collected-edition"
+
     for provider in providers:
         status = provider.status()
-        if local.kind.value == "book" and status.provider is ProviderName.COMIC_VINE:
+        if local.kind is MediaKind.BOOK and status.provider is ProviderName.COMIC_VINE:
             continue
-        if local.kind.value == "comic" and status.provider is not ProviderName.COMIC_VINE:
+        if (
+            local.kind is MediaKind.COMIC
+            and not collected
+            and status.provider is not ProviderName.COMIC_VINE
+        ):
+            continue
+        if collected and status.provider is ProviderName.COMIC_VINE:
+            # Comic Vine's public volume resource has no collection-format field.
+            # Do not guess that a same-titled volume is a TPB/hardcover/omnibus.
             continue
         if not status.enabled and "cached" not in status.capabilities:
             unavailable.append(f"{status.provider.value}: {status.detail}")
@@ -219,35 +230,48 @@ def generate_candidates(
         try:
             for identifier in local.identifiers:
                 queries.append(f"{status.provider.value}:identifier:{identifier.scheme}")
-                _merge(output, provider.lookup_identifier(identifier))
+                values = provider.lookup_identifier(identifier)
+                _merge(
+                    output,
+                    _collection_candidates(local, values) if collected else values,
+                )
             provider_found = any(item.provider is status.provider for item in output.values())
             if provider_found:
                 available.append(status.provider)
                 continue
-            if (
-                session is not None
-                and isinstance(provider, ComicVineProvider)
-                and local.subtype != "collected-edition"
-            ):
+            if session is not None and isinstance(provider, ComicVineProvider):
                 values, comic_queries = session.search_comic_issue(local, provider)
                 queries.extend(comic_queries)
                 _merge(output, values)
             else:
+                query = _collection_book_query(local) if collected else _structured_query(local)
                 queries.append(f"{status.provider.value}:structured")
-                _merge(output, provider.search(_structured_query(local)))
+                values = provider.search(query)
+                _merge(
+                    output,
+                    _collection_candidates(local, values) if collected else values,
+                )
             available.append(status.provider)
             provider_found = any(item.provider is status.provider for item in output.values())
             if not provider_found and (local.creators or local.series_title):
-                relaxed = SearchQuery(
-                    local.kind,
-                    local.title,
-                    series_title=local.series_title,
-                    sequence=local.sequence,
-                    item_type=local.subtype,
-                    relaxed=True,
+                relaxed = (
+                    _collection_book_query(local, relaxed=True)
+                    if collected
+                    else SearchQuery(
+                        local.kind,
+                        local.title,
+                        series_title=local.series_title,
+                        sequence=local.sequence,
+                        item_type=local.subtype,
+                        relaxed=True,
+                    )
                 )
                 queries.append(f"{status.provider.value}:relaxed")
-                _merge(output, provider.search(relaxed))
+                values = provider.search(relaxed)
+                _merge(
+                    output,
+                    _collection_candidates(local, values) if collected else values,
+                )
         except ProviderError as exc:
             unavailable.append(f"{status.provider.value}: {exc}")
     return CandidateGeneration(
@@ -255,6 +279,39 @@ def generate_candidates(
         tuple(queries),
         tuple(unavailable),
         tuple(available),
+    )
+
+
+def _collection_candidates(
+    local: LocalIdentity, values: list[NormalizedCandidate]
+) -> list[NormalizedCandidate]:
+    output: list[NormalizedCandidate] = []
+    for candidate in values:
+        adapted = adapt_collection_candidate(
+            candidate,
+            series_title=local.series_title,
+            sequence=local.sequence,
+            item_type=local.subtype,
+        )
+        if adapted is not None:
+            output.append(adapted)
+    return output
+
+
+def _collection_book_query(local: LocalIdentity, *, relaxed: bool = False) -> SearchQuery:
+    series = (local.series_title or "").strip()
+    title = local.title.strip()
+    if series and title and not title.casefold().startswith(series.casefold()):
+        title = f"{series} {title}"
+    elif not title:
+        title = series
+    return SearchQuery(
+        MediaKind.BOOK,
+        title,
+        creators=() if relaxed else local.creators,
+        identifiers=local.identifiers,
+        item_type="standalone-book",
+        relaxed=relaxed,
     )
 
 

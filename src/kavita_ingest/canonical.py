@@ -64,8 +64,8 @@ class CanonicalIdentity:
                 blocks.append(f"comic item type is unsupported: {self.item_type}")
             if self.item_type in {"issue", "annual", "special"} and self.run_start_year is None:
                 blocks.append("comic run start year is unresolved")
-            if self.sequence is None and self.item_type not in {"one-shot", "graphic-novel"}:
-                blocks.append("comic issue/collection sequence is unresolved")
+            if self.sequence is None and self.item_type in {"issue", "annual", "special"}:
+                blocks.append("comic issue sequence is unresolved")
         if self.media_kind is MediaKind.UNKNOWN:
             blocks.append("media domain is unresolved")
         return tuple(dict.fromkeys(blocks))

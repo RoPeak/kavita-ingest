@@ -33,7 +33,7 @@ def _plan_file(tmp_path: Path) -> Path:
     )
     snapshot = build_snapshot(
         item_id="watchmen-1",
-        source=SourcePrecondition("/incoming/watchmen.cbz", "a" * 64, 10, 20, "cbz"),
+        source=SourcePrecondition("/incoming/watchmen.cbz", "a" * 64, 10, 20, "cbz", "zip"),
         identity=identity,
         projection=project_comic(identity),
         decision_provenance={
@@ -61,7 +61,7 @@ def test_plan_cli_import_show_approve_export_and_reimport_are_digest_bound(tmp_p
     assert match
     plan_id, digest = match.groups()
     shown = runner.invoke(app, ["plan", "show", plan_id, "--config", str(config)])
-    assert shown.exit_code == 0 and digest in shown.output and '"schema_version":2' in shown.output
+    assert shown.exit_code == 0 and digest in shown.output and '"schema_version":3' in shown.output
     refused = runner.invoke(
         app, ["plan", "approve", plan_id, "--digest", "0" * 64, "--config", str(config)]
     )

@@ -12,13 +12,22 @@ from kavita_ingest.canonical import CanonicalIdentity, ResolutionLevel, work_onl
 from kavita_ingest.db import connect, migrate
 from kavita_ingest.domain import MediaKind, SequenceNumber
 from kavita_ingest.plan_store import PlanStore
-from kavita_ingest.planning import SourcePrecondition, build_snapshot, new_plan
+from kavita_ingest.planning import (
+    SourcePrecondition,
+    build_snapshot,
+    new_plan,
+    validate_plan_payload,
+)
 from kavita_ingest.projection import project_book, project_comic
 
 
 def _source(name: str, fingerprint: str) -> SourcePrecondition:
+    media_format = Path(name).suffix[1:]
+    signature = {"epub": "zip-epub", "pdf": "pdf", "cbz": "zip", "cbr": "rar"}[
+        media_format
+    ]
     return SourcePrecondition(
-        f"/incoming/{name}", fingerprint * 64, 123, 456, Path(name).suffix[1:]
+        f"/incoming/{name}", fingerprint * 64, 123, 456, media_format, signature
     )
 
 
@@ -191,3 +200,40 @@ def test_projected_item_without_explicit_item_decision_is_rejected(tmp_path: Pat
     migrate(database)
     with connect(database) as connection, pytest.raises(ValueError, match="explicit approval"):
         PlanStore(connection).import_bytes(payload)
+
+
+def test_schema3_plan_binds_content_signature_and_schema2_remains_readable() -> None:
+    plan = new_plan("signature-plan", (_manual_comic("issue-3", "Same", "3", "3"),))
+    document = validate_plan_payload(plan.canonical_bytes())
+
+    assert document["schema_version"] == 3
+    assert document["items"][0]["source"]["signature"] == "zip"
+
+    legacy = plan.to_dict()
+    legacy["schema_version"] = 2
+    del legacy["items"][0]["source"]["signature"]
+    payload = json.dumps(legacy, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode()
+
+    parsed = validate_plan_payload(payload)
+    assert parsed["schema_version"] == 2
+    assert "signature" not in parsed["items"][0]["source"]
+
+
+def test_schema3_plan_rejects_missing_or_unsupported_content_signature() -> None:
+    plan = new_plan("signature-required", (_manual_comic("issue-4", "Same", "4", "4"),))
+
+    missing = plan.to_dict()
+    del missing["items"][0]["source"]["signature"]
+    missing_payload = json.dumps(
+        missing, ensure_ascii=True, sort_keys=True, separators=(",", ":")
+    ).encode()
+    with pytest.raises(ValueError, match="immutable source signature"):
+        validate_plan_payload(missing_payload)
+
+    unsupported = plan.to_dict()
+    unsupported["items"][0]["source"]["signature"] = "unknown"
+    unsupported_payload = json.dumps(
+        unsupported, ensure_ascii=True, sort_keys=True, separators=(",", ":")
+    ).encode()
+    with pytest.raises(ValueError, match="immutable source signature"):
+        validate_plan_payload(unsupported_payload)

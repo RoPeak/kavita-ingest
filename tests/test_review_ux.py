@@ -14,11 +14,13 @@ from kavita_ingest.audit import AuditResult, ReviewItem
 from kavita_ingest.candidates import CandidateGeneration
 from kavita_ingest.cli import app
 from kavita_ingest.config import AppConfig, MatchingSettings, ProviderSettings
-from kavita_ingest.db import migrate
+from kavita_ingest.db import connect, migrate
+from kavita_ingest.decisions import DecisionRepository, DecisionType
 from kavita_ingest.domain import MediaKind, SequenceNumber, SourceFormat, SourceRecord
 from kavita_ingest.hydration import HydrationResult
 from kavita_ingest.matching import LocalIdentity, reconcile, score_candidates
 from kavita_ingest.providers.base import ProviderError, ProviderStatus
+from kavita_ingest.providers.comic_vine import ComicVineProvider
 from kavita_ingest.providers.models import (
     Contributor,
     NormalizedCandidate,
@@ -29,9 +31,13 @@ from kavita_ingest.review import (
     _action_prompt,
     _batch_items,
     _candidate_writers,
+    _choose_comic_vine_run,
+    _collection_search_text,
     _hydrate_for_acceptance,
+    _mark_incompatible_group_decisions,
     interactive_review,
 )
+from kavita_ingest.run_groups import run_group_key
 
 
 def _candidate(identifier: str, year: int, date: str) -> NormalizedCandidate:
@@ -362,6 +368,132 @@ class _DetailProvider:
         del identifier
         return []
 
+
+
+
+
+
+def test_collection_search_text_combines_series_and_collection_subtitle() -> None:
+    local = LocalIdentity(
+        MediaKind.COMIC,
+        "collected-edition",
+        0.98,
+        "Ultimate Collection Book 1",
+        creators=("Grant Morrison",),
+        series_title="New X-Men",
+        sequence=SequenceNumber.parse("1"),
+    )
+
+    assert _collection_search_text(local) == "New X-Men Ultimate Collection Book 1"
+
+class _RunLookupClient:
+    def get(
+        self,
+        operation: str,
+        url: str,
+        public_params: dict[str, str],
+        secret_params: dict[str, str],
+        bucket: str,
+        normalize,  # type: ignore[no-untyped-def]
+    ) -> list[NormalizedCandidate]:
+        del url, public_params, secret_params, bucket
+        assert operation == "search-runs"
+        return normalize(
+            {
+                "results": [
+                    {
+                        "id": 53871,
+                        "resource_type": "volume",
+                        "api_detail_url": (
+                            "https://comicvine.gamespot.com/api/volume/4050-53871/"
+                        ),
+                        "name": "Watchmen",
+                        "start_year": None,
+                        "publisher": {"name": "DC Comics"},
+                    },
+                    {
+                        "id": 3622,
+                        "resource_type": "volume",
+                        "api_detail_url": (
+                            "https://comicvine.gamespot.com/api/volume/4050-3622/"
+                        ),
+                        "name": "Watchmen",
+                        "start_year": 1986,
+                        "publisher": {"name": "DC Comics"},
+                    },
+                    {
+                        "id": 29927,
+                        "resource_type": "volume",
+                        "api_detail_url": (
+                            "https://comicvine.gamespot.com/api/volume/4050-29927/"
+                        ),
+                        "name": "Watchmen",
+                        "start_year": 1987,
+                        "publisher": {"name": "DC Comics"},
+                    },
+                ]
+            }
+        )
+
+
+def test_group_run_chooser_uses_real_run_records_and_excludes_unknown_year(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    audit = _audit(tmp_path)
+    provider = ComicVineProvider(_RunLookupClient(), "secret")  # type: ignore[arg-type]
+    monkeypatch.setattr("kavita_ingest.review.typer.prompt", lambda *args, **kwargs: 2)
+    output = io.StringIO()
+
+    selected = _choose_comic_vine_run(
+        audit.items[0],
+        (provider,),
+        Console(file=output, force_terminal=False),
+    )
+
+    assert selected is not None
+    assert selected.record_type is RecordType.COMIC_RUN
+    assert selected.provider_id == "4050-29927"
+    assert selected.run_start_year == 1987
+    text = output.getvalue()
+    assert "4050-53871" not in text
+    assert "4050-3622" in text
+    assert "4050-29927" in text
+
+
+def test_run_group_change_append_only_marks_incompatible_issue_decision_unresolved(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "state.sqlite3"
+    migrate(database)
+    audit = _audit(tmp_path)
+    item = audit.items[0]
+
+    with connect(database) as connection:
+        repository = DecisionRepository(connection)
+        repository.add(
+            item.scan.source,
+            DecisionType.ACCEPTED,
+            item.local.evidence_hash(),
+            candidate_key=item.scores[0].candidate.key,
+            candidate_data_hash=item.scores[0].candidate.data_hash(),
+            payload={"candidate": item.scores[0].candidate.to_dict()},
+        )
+
+        changed = _mark_incompatible_group_decisions(
+            repository,
+            audit,
+            run_group_key("Watchmen"),
+            "4050-1987",
+        )
+
+        assert changed == 1
+        history = repository.history(item.scan.source)
+        assert [record.decision_type for record in history] == [
+            DecisionType.ACCEPTED,
+            DecisionType.UNRESOLVED,
+        ]
+        assert history[-1].payload["reason"] == "run_group_changed"
+        assert history[-1].payload["selected_run_id"] == "4050-1987"
 
 def test_successful_hydration_shows_enriched_creators_before_decision(
     tmp_path: Path,

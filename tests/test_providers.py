@@ -264,10 +264,10 @@ def test_comic_vine_preserves_date_meaning_and_precision(
     assert NormalizedCandidate.from_dict(candidate.to_dict()) == candidate
 
 
-def test_comic_vine_collected_search_uses_collection_oriented_query_bucket() -> None:
+def test_comic_vine_collected_search_refuses_to_guess_collection_format() -> None:
     client = FixtureClient(_fixture("comic_vine.json"))
     provider = ComicVineProvider(client, "secret")  # type: ignore[arg-type]
-    provider.search(
+    candidates = provider.search(
         SearchQuery(
             MediaKind.COMIC,
             "Animal Man Book 1",
@@ -275,8 +275,8 @@ def test_comic_vine_collected_search_uses_collection_oriented_query_bucket() -> 
             item_type="collected-edition",
         )
     )
-    assert "TPB" in client.calls[0][1]["query"]
-    assert client.calls[0][3] == "search:collection"
+    assert candidates == []
+    assert client.calls == []
 
 
 def test_comic_vine_missing_credential_is_explicit() -> None:

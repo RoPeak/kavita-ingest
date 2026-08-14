@@ -24,14 +24,16 @@ from .domain import SourceRecord
 from .hydration import HydrationResult, hydrate_candidate
 from .matching import (
     CandidateScore,
+    LocalIdentity,
     Reconciliation,
     reconcile,
     score_candidates,
     usable_identity_scores,
 )
 from .provider_runtime import build_providers
-from .providers.base import Provider
-from .providers.models import NormalizedCandidate, ProviderName, RecordType
+from .providers.base import Provider, ProviderError
+from .providers.comic_vine import ComicVineProvider
+from .providers.models import NormalizedCandidate, ProviderName, RecordType, SearchQuery
 from .run_groups import RunGroupRepository, run_group_key
 
 
@@ -55,6 +57,7 @@ def interactive_review(
         key: 0 for key in ("accepted", "work_only", "manual", "rejected", "unresolved", "skipped")
     }
     decided_this_pass: set[str] = set()
+    restart_requested = False
     try:
         for item in audit.items:
             current = item
@@ -95,31 +98,59 @@ def interactive_review(
                     output.print("\n".join(selected.explanation()))
                     continue
                 if action == "S":
-                    query = typer.prompt(
-                        "Revised title/series search",
-                        default=current.local.series_title or current.local.title,
+                    if (
+                        current.local.kind.value == "comic"
+                        and current.local.subtype == "collected-edition"
+                    ):
+                        query = typer.prompt(
+                            "Revised collection title search",
+                            default=_collection_search_text(current.local),
+                        )
+                        creator_text = typer.prompt(
+                            "Creator search (optional)",
+                            default=", ".join(current.local.creators),
+                            show_default=bool(current.local.creators),
+                        ).strip()
+                        creators = tuple(
+                            part.strip() for part in creator_text.split(",") if part.strip()
+                        )
+                        search_local = replace(
+                            current.local,
+                            title=query,
+                            creators=creators,
+                        )
+                    else:
+                        query = typer.prompt(
+                            "Revised provider search",
+                            default=current.local.series_title or current.local.title,
+                        )
+                        search_local = (
+                            replace(
+                                current.local,
+                                title=query,
+                                series_title=query,
+                            )
+                            if current.local.kind.value == "comic"
+                            else replace(current.local, title=query)
+                        )
+                    generated = generate_candidates(search_local, providers)
+                    scores = score_candidates(
+                        current.local, list(generated.candidates), config.matching
                     )
-                    local = (
-                        replace(current.local, series_title=query)
-                        if current.local.kind.value == "comic"
-                        else replace(current.local, title=query)
-                    )
-                    generated = generate_candidates(local, providers)
-                    scores = score_candidates(local, list(generated.candidates), config.matching)
                     scores = [
                         replace(
                             score,
                             suppressed=repository.rejection_suppresses(
                                 current.scan.source,
                                 score.candidate.key,
-                                local.evidence_hash(),
+                                source_evidence_hash,
                                 score.candidate.data_hash(),
                             ),
                             eligible=score.eligible
                             and not repository.rejection_suppresses(
                                 current.scan.source,
                                 score.candidate.key,
-                                local.evidence_hash(),
+                                source_evidence_hash,
                                 score.candidate.data_hash(),
                             ),
                         )
@@ -127,10 +158,10 @@ def interactive_review(
                     ]
                     current = ReviewItem(
                         current.scan,
-                        local,
+                        current.local,
                         generated,
                         tuple(scores),
-                        reconcile(local, scores[0] if scores else None),
+                        reconcile(current.local, scores[0] if scores else None),
                     )
                     displayed = _displayed_scores(current)
                     selected_rank = displayed[0].rank if displayed else None
@@ -161,39 +192,35 @@ def interactive_review(
                     decided_this_pass.add(current.scan.source.sha256)
                     decided = True
                     break
-                if action == "G" and selected:
-                    candidate = selected.candidate
-                    if (
-                        candidate.provider is not ProviderName.COMIC_VINE
-                        or not candidate.run_id
-                        or not candidate.series_title
-                    ):
-                        output.print("The displayed candidate has no selectable Comic Vine run.")
+                if action == "G":
+                    run = _choose_comic_vine_run(current, providers, output)
+                    if run is None:
                         continue
-                    run = NormalizedCandidate(
-                        provider=ProviderName.COMIC_VINE,
-                        provider_id=candidate.run_id,
-                        record_type=RecordType.COMIC_RUN,
-                        media_kind=candidate.media_kind,
-                        title=candidate.series_title,
-                        series_title=candidate.series_title,
-                        run_start_year=candidate.run_start_year,
-                        run_id=candidate.run_id,
-                    )
+                    assert run.series_title is not None
+                    group_key = run_group_key(run.series_title)
                     if typer.confirm(
-                        f"Use run {run.title} ({run.run_start_year or 'year unknown'}) "
+                        f"Use run {run.title} ({run.run_start_year}) "
                         "for this local series group?"
                     ):
                         run_groups.choose(
-                            run_group_key(candidate.series_title),
+                            group_key,
                             ProviderName.COMIC_VINE.value,
-                            candidate.run_id,
+                            run.provider_id,
                             run.to_dict(),
                         )
-                        output.print(
-                            "Run-group choice recorded. Re-run review to constrain the group; "
-                            "this issue was not accepted."
+                        invalidated = _mark_incompatible_group_decisions(
+                            repository, audit, group_key, run.provider_id
                         )
+                        output.print(
+                            "Run-group choice recorded. Review must restart so every issue is "
+                            "matched inside that exact run."
+                        )
+                        if invalidated:
+                            output.print(
+                                f"Marked {invalidated} incompatible earlier issue "
+                                "decision(s) unresolved for explicit re-review."
+                            )
+                        restart_requested = True
                         break
                     continue
                 if action == "A" and selected:
@@ -329,6 +356,8 @@ def interactive_review(
                     return audit
                 if action == "N":
                     break
+            if restart_requested:
+                break
             if not decided:
                 continue
         _show_summary(output, counts, len(audit.items), repository=repository, audit=audit)
@@ -496,12 +525,18 @@ def _show_item(
         console.print("Unavailable: " + "; ".join(item.generation.unavailable))
 
 
+def _collection_search_text(local: LocalIdentity) -> str:
+    series = (local.series_title or "").strip()
+    title = local.title.strip()
+    if series and title and title.casefold() != series.casefold():
+        if title.casefold().startswith(series.casefold()):
+            return title
+        return f"{series} {title}"
+    return title or series
+
+
 def _candidate_authors(candidate: NormalizedCandidate) -> str:
-    names = [
-        item.name
-        for item in candidate.creators
-        if item.role == "author"
-    ]
+    names = [item.name for item in candidate.creators if item.role == "author"]
     return ", ".join(dict.fromkeys(names)) or "-"
 
 
@@ -516,8 +551,110 @@ def _candidate_writers(candidate: NormalizedCandidate) -> str:
     names = [item.name for item in candidate.creators if item.role == "writer"]
     return ", ".join(dict.fromkeys(names)) or "-"
 
+
 def _displayed_scores(item: ReviewItem) -> list[CandidateScore]:
     return usable_identity_scores(item.scores)[:9]
+
+
+def _choose_comic_vine_run(
+    item: ReviewItem,
+    providers: tuple[Provider, ...],
+    console: Console,
+) -> NormalizedCandidate | None:
+    series = item.local.series_title
+    if item.local.kind.value != "comic" or not series:
+        console.print("This item has no local comic series to resolve.")
+        return None
+    provider = next(
+        (value for value in providers if isinstance(value, ComicVineProvider)),
+        None,
+    )
+    if provider is None:
+        console.print("Comic Vine is unavailable for run selection.")
+        return None
+    try:
+        runs = provider.search_runs(
+            SearchQuery(
+                item.local.kind,
+                series,
+                series_title=series,
+                item_type="run",
+            )
+        )
+    except ProviderError as exc:
+        console.print(f"Comic Vine run lookup failed: {exc}")
+        return None
+
+    key = run_group_key(series)
+    matching = [
+        run
+        for run in runs
+        if run.record_type is RecordType.COMIC_RUN
+        and run.series_title
+        and run_group_key(run.series_title) == key
+        and run.run_start_year is not None
+    ]
+    if not matching:
+        console.print(
+            "No Comic Vine run with an explicit start year is available for this series."
+        )
+        return None
+
+    table = Table(title=f"Selectable Comic Vine runs for {series}")
+    table.add_column("Rank")
+    table.add_column("Series")
+    table.add_column("Start")
+    table.add_column("Publisher")
+    table.add_column("Run ID")
+    for rank, run in enumerate(matching, start=1):
+        table.add_row(
+            str(rank),
+            run.series_title or run.title,
+            str(run.run_start_year),
+            run.publisher or "-",
+            run.provider_id,
+        )
+    console.print(table)
+    rank = int(typer.prompt("Run rank", type=int))
+    if not 1 <= rank <= len(matching):
+        console.print(f"Run rank {rank} is not displayed.")
+        return None
+    return matching[rank - 1]
+
+
+def _mark_incompatible_group_decisions(
+    repository: DecisionRepository,
+    audit: AuditResult,
+    group_key: str,
+    selected_run_id: str,
+) -> int:
+    changed = 0
+    for item in audit.items:
+        series = item.local.series_title
+        if not series or run_group_key(series) != group_key:
+            continue
+        latest = repository.latest(item.scan.source)
+        if latest is None or latest.decision_type not in {
+            DecisionType.ACCEPTED,
+            DecisionType.WORK_ACCEPTED,
+        }:
+            continue
+        candidate = latest.payload.get("candidate")
+        run_id = candidate.get("run_id") if isinstance(candidate, dict) else None
+        if run_id == selected_run_id:
+            continue
+        repository.add(
+            item.scan.source,
+            DecisionType.UNRESOLVED,
+            item.local.evidence_hash(),
+            payload={
+                "reason": "run_group_changed",
+                "selected_run_id": selected_run_id,
+                "explicit": True,
+            },
+        )
+        changed += 1
+    return changed
 
 
 def _action_prompt(
@@ -662,10 +799,18 @@ def _manual_identity_fields(item: ReviewItem) -> dict[str, str]:
         else "issue",
     )
     fields["item_type"] = item_type
-    if item_type not in {"one-shot", "graphic-novel"}:
+    if item_type in {"issue", "annual", "special"}:
         fields["sequence"] = typer.prompt(
             "Sequence", default=local.sequence.raw if local.sequence else "1"
         )
+    elif item_type in {"trade", "collected-edition", "omnibus"}:
+        sequence = typer.prompt(
+            "Sequence (optional)",
+            default=local.sequence.raw if local.sequence else "",
+            show_default=local.sequence is not None,
+        ).strip()
+        if sequence:
+            fields["sequence"] = sequence
     if item_type in {"issue", "annual", "special"}:
         fields["run_start_year"] = typer.prompt(
             "Run start year", default=str(local.run_start_year or "")

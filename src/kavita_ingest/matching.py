@@ -299,9 +299,17 @@ def _score(local: LocalIdentity, candidate: NormalizedCandidate) -> CandidateSco
         )
 
     _identifier_score(local, candidate, comparisons, contradictions)
-    local_title = local.series_title if local.kind is MediaKind.COMIC else local.title
-    candidate_title = candidate.series_title if local.kind is MediaKind.COMIC else candidate.title
-    similarity = _similarity(local_title or "", candidate_title or "")
+    local_title: str | None
+    candidate_title: str | None
+    if collected:
+        local_title, similarity = _collection_title_similarity(local, candidate.title)
+        candidate_title = candidate.title
+    else:
+        local_title = local.series_title if local.kind is MediaKind.COMIC else local.title
+        candidate_title = (
+            candidate.series_title if local.kind is MediaKind.COMIC else candidate.title
+        )
+        similarity = _similarity(local_title or "", candidate_title or "")
     if similarity >= 0.96:
         comparisons.append(
             _comparison(
@@ -352,7 +360,8 @@ def _score(local: LocalIdentity, candidate: NormalizedCandidate) -> CandidateSco
         )
 
     if (
-        local.kind is MediaKind.COMIC
+        not collected
+        and local.kind is MediaKind.COMIC
         and local.title
         and candidate.title
         and _normalize(local.title) != _normalize(local.series_title or "")
@@ -413,9 +422,17 @@ def _score(local: LocalIdentity, candidate: NormalizedCandidate) -> CandidateSco
 
     if local.sequence and candidate.sequence:
         exact = local.sequence.normalized == candidate.sequence.normalized
+        local_collection_sequence = (
+            collected
+            and candidate.provider_metadata.get("collection_sequence_source") == "local"
+        )
         kind = ComparisonKind.EXACT if exact else ComparisonKind.HARD_CONTRADICTION
-        delta = 30 if exact else -100
-        reason = "sequence numbers agree" if exact else "sequence numbers conflict"
+        delta = 0 if local_collection_sequence and exact else (30 if exact else -100)
+        reason = (
+            "collection sequence retained from explicit local filename evidence"
+            if local_collection_sequence and exact
+            else ("sequence numbers agree" if exact else "sequence numbers conflict")
+        )
         comparisons.append(
             _comparison(
                 "sequence",
@@ -576,6 +593,20 @@ def _comparison(
     )
 
 
+def _collection_title_similarity(
+    local: LocalIdentity, candidate_title: str
+) -> tuple[str, float]:
+    values = [local.title]
+    if local.series_title:
+        values.append(f"{local.series_title} {local.title}".strip())
+        if local.creators:
+            values.append(
+                f"{local.series_title} by {local.creators[0]} {local.title}".strip()
+            )
+    best = max(values, key=lambda value: _similarity(value, candidate_title))
+    return best, _similarity(best, candidate_title)
+
+
 def _similarity(left: str, right: str) -> float:
     return SequenceMatcher(None, _normalize(left), _normalize(right)).ratio()
 
@@ -605,9 +636,13 @@ def _candidate_year(
                 return int(title_year.group(1))
 
     value = (
-        candidate.cover_date
-        if candidate.media_kind is MediaKind.COMIC
-        else candidate.publication_date
+        candidate.publication_date
+        if local is not None and local.subtype == "collected-edition"
+        else (
+            candidate.cover_date
+            if candidate.media_kind is MediaKind.COMIC
+            else candidate.publication_date
+        )
     )
     match = re.match(r"(\d{4})", value or "")
     return int(match.group(1)) if match else None
