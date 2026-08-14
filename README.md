@@ -103,7 +103,7 @@ python3 -m venv .venv
 ```
 
 The package exposes the `kavita-ingest` console script and is currently version
-`0.1.0`, a pre-1.0 MVP.
+`1.0.0`, the first supported v1 release.
 
 The `compatibility-test` extra is only for rerunning Milestone 0 experiments. It
 includes `comicinfoxml`, which those experiments found unsuitable for production
