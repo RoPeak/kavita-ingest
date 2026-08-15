@@ -279,3 +279,158 @@ def test_long_unnumbered_collection_does_not_split_title_by_gaslight() -> None:
     assert hypothesis.subtype == "collected-edition"
     assert hypothesis.series == "Batman by Gaslight"
     assert hypothesis.creators == ()
+
+@pytest.mark.parametrize(
+    (
+        "path",
+        "subtype",
+        "series",
+        "title",
+        "sequence",
+        "year",
+        "edition_qualifiers",
+    ),
+    [
+        (
+            "Bone - The Complete Cartoon Epic in One Volume (2004) GetComics.INFO.cbr",
+            "collected-edition",
+            "Bone",
+            "The Complete Cartoon Epic in One Volume",
+            None,
+            2004,
+            ("The Complete Cartoon Epic in One Volume",),
+        ),
+        (
+            "Saga v01 (2012).cbr",
+            "collected-edition",
+            "Saga",
+            "Volume 1",
+            "1",
+            2012,
+            (),
+        ),
+        (
+            "Saga v02 (2013) (Digital-TPB) (Zone-Empire).cbr",
+            "collected-edition",
+            "Saga",
+            "Volume 2",
+            "2",
+            2013,
+            (),
+        ),
+        (
+            "Saga v05 (2015) GetComics.INFO.cbr",
+            "collected-edition",
+            "Saga",
+            "Volume 5",
+            "5",
+            2015,
+            (),
+        ),
+        (
+            "Spider-Man - Life Story (2021, 2nd edition) (Digital) (Zone-Empire).cbr",
+            "collected-edition",
+            "Spider-Man - Life Story",
+            "2nd edition",
+            None,
+            2021,
+            ("2nd edition",),
+        ),
+        (
+            "All-Star Superman (2018, DC Black Label Edition) (digital) "
+            "(Son of Ultron-Empire).cbr",
+            "collected-edition",
+            "All-Star Superman",
+            "DC Black Label Edition",
+            None,
+            2018,
+            ("DC Black Label Edition",),
+        ),
+    ],
+)
+def test_production_collection_filename_semantics(
+    path: str,
+    subtype: str,
+    series: str,
+    title: str,
+    sequence: str | None,
+    year: int,
+    edition_qualifiers: tuple[str, ...],
+) -> None:
+    result = classify(Path(path), SourceFormat.CBR, EMPTY)
+    hypothesis = result.hypotheses[0]
+
+    assert hypothesis.subtype == subtype
+    assert hypothesis.series == series
+    assert hypothesis.title == title
+    assert (hypothesis.sequence.normalized if hypothesis.sequence else None) == sequence
+    assert hypothesis.year == year
+    assert hypothesis.edition_qualifiers == edition_qualifiers
+
+
+def test_release_site_and_digital_tpb_are_noise_not_identity() -> None:
+    path = Path("Saga v02 (2013) (Digital-TPB) (Zone-Empire) GetComics.INFO.cbr")
+    result = classify(path, SourceFormat.CBR, EMPTY)
+    hypothesis = result.hypotheses[0]
+    noise = {item.raw for item in hypothesis.evidence if item.is_noise}
+
+    assert {"Digital-TPB", "Zone-Empire", "GetComics.INFO"} <= noise
+    assert hypothesis.series == "Saga"
+    assert hypothesis.title == "Volume 2"
+
+
+def test_compound_year_parenthetical_emits_structured_edition_evidence() -> None:
+    tokens = tokenize_filename(
+        Path("Spider-Man - Life Story (2021, 2nd edition) (Digital).cbr")
+    )
+
+    assert any(token.raw == "2021" and token.kind == "year" for token in tokens)
+    assert any(
+        token.raw == "2nd edition" and token.kind == "edition-qualifier"
+        for token in tokens
+    )
+
+
+def test_embedded_creator_credit_series_alias_does_not_override_clean_issue_filename() -> None:
+    inspection = InspectionResult(
+        InspectionStatus.OK,
+        SourceFormat.CBR,
+        metadata={
+            "comicinfo": {
+                "Series": "Oblivion Song By Kirkman & De Felici",
+                "Number": "1",
+                "Title": "Chapter One",
+            }
+        },
+    )
+
+    result = classify(
+        Path("Oblivion Song 001 (2018) GetComics.INFO.cbr"),
+        SourceFormat.CBR,
+        inspection,
+    )
+    hypothesis = result.hypotheses[0]
+
+    assert hypothesis.subtype == "issue"
+    assert hypothesis.series == "Oblivion Song"
+    assert hypothesis.title == "Chapter One"
+    assert hypothesis.sequence is not None
+    assert hypothesis.sequence.normalized == "1"
+    assert hypothesis.year == 2018
+    assert any("creator-credit alias" in reason for reason in hypothesis.reasons)
+
+
+def test_genuine_by_title_is_not_reinterpreted_as_creator_alias() -> None:
+    inspection = InspectionResult(
+        InspectionStatus.OK,
+        SourceFormat.CBZ,
+        metadata={"comicinfo": {"Series": "Batman by Gaslight", "Number": "1"}},
+    )
+
+    result = classify(
+        Path("Batman by Gaslight 001 (2019).cbz"),
+        SourceFormat.CBZ,
+        inspection,
+    )
+
+    assert result.hypotheses[0].series == "Batman by Gaslight"

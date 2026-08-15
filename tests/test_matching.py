@@ -381,3 +381,71 @@ def test_collection_publisher_shorthand_matches_common_imprint_suffixes() -> Non
     assert publisher.kind is ComparisonKind.SUPPORTING
     assert publisher.confidence == 1.0
     assert score.score == 100.0
+
+
+def test_empty_edition_qualifiers_preserve_historical_local_evidence_hash() -> None:
+    import hashlib
+    import json
+    from dataclasses import asdict
+
+    local = LocalIdentity(
+        MediaKind.COMIC,
+        "issue",
+        0.98,
+        "",
+        series_title="Absolute Batman",
+        sequence=SequenceNumber.parse("23"),
+        year=2026,
+    )
+    legacy_fields = asdict(local)
+    legacy_fields.pop("edition_qualifiers")
+    legacy_payload = json.dumps(legacy_fields, sort_keys=True, default=str)
+    legacy_hash = hashlib.sha256(legacy_payload.encode()).hexdigest()
+
+    assert local.evidence_hash() == legacy_hash
+
+
+def test_real_edition_qualifier_changes_local_evidence_hash() -> None:
+    base = LocalIdentity(
+        MediaKind.COMIC,
+        "collected-edition",
+        0.98,
+        "DC Black Label Edition",
+        series_title="All-Star Superman",
+        year=2018,
+    )
+    qualified = LocalIdentity(
+        MediaKind.COMIC,
+        "collected-edition",
+        0.98,
+        "DC Black Label Edition",
+        series_title="All-Star Superman",
+        year=2018,
+        edition_qualifiers=("DC Black Label Edition",),
+    )
+
+    assert qualified.evidence_hash() != base.evidence_hash()
+
+
+def test_local_identity_carries_structured_edition_qualifiers() -> None:
+    classification = Classification(
+        MediaKind.COMIC,
+        "collected-edition",
+        0.98,
+        False,
+        (
+            ParseHypothesis(
+                MediaKind.COMIC,
+                "collected-edition",
+                0.98,
+                title="DC Black Label Edition",
+                series="All-Star Superman",
+                year=2018,
+                edition_qualifiers=("DC Black Label Edition",),
+            ),
+        ),
+    )
+
+    local = local_identity(classification, {})
+
+    assert local.edition_qualifiers == ("DC Black Label Edition",)

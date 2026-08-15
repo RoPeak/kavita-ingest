@@ -16,11 +16,28 @@ from .domain import (
 
 _YEAR = re.compile(r"\((19\d{2}|20\d{2})\)")
 _NOISE_TERMS = re.compile(
-    r"^(digital|webrip|c2c|\d+ covers?|empire|dcp|pyrate(?:gonekiwi)?|"
+    r"^(digital|digital[-_ ]?tpb|webrip|c2c|\d+ covers?|empire|dcp|pyrate(?:gonekiwi)?|"
     r"[^()]*-(?:empire|dcp))$",
     re.IGNORECASE,
 )
 _TRAILING_RELEASE_GROUP = re.compile(r"\s*\(([^()]*(?:Empire|DCP))\)\s*$", re.IGNORECASE)
+_TRAILING_SOURCE_SITE = re.compile(
+    r"\s+(?:www\.)?[a-z0-9][a-z0-9-]*(?:\.[a-z0-9-]+)*"
+    r"\.(?:com|net|org|info|io|co|me|cc)\s*$",
+    re.IGNORECASE,
+)
+_COMPOUND_YEAR = re.compile(r"^((?:19|20)\d{2})\s*,\s*(.+)$", re.IGNORECASE)
+_EDITION_QUALIFIER = re.compile(
+    r"(?:\bedition\b|\bcollection\b|\bomnibus\b|\bcompendium\b|"
+    r"\babsolute\b|\bcompact\s+comics\b|\bhardcover\b|"
+    r"\btrade\s+paperback\b|\btpb\b|\bin\s+one\s+volume\b)",
+    re.IGNORECASE,
+)
+_COLLECTION_VOLUME_SHORTHAND = re.compile(r"^(.*?)\s+[vV](\d{1,4})$")
+_COMPLETE_ONE_VOLUME_SUFFIX = re.compile(
+    r"^(.*?)\s+-\s+((?:The\s+)?Complete\b.+\bin\s+One\s+Volume)$",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,13 +55,32 @@ def tokenize_filename(path: Path) -> tuple[FilenameToken, ...]:
     occupied: list[tuple[int, int]] = []
     for match in re.finditer(r"\(([^()]*)\)", text):
         raw = match.group(1).strip()
-        kind = "year" if re.fullmatch(r"(?:19|20)\d{2}", raw) else "parenthetical"
         noise = bool(_NOISE_TERMS.fullmatch(raw))
-        tokens.append(
-            FilenameToken(
-                raw, _normalize(raw), "release-noise" if noise else kind, match.span(), noise
+        compound = _compound_year_qualifier(raw)
+        if compound is not None:
+            year, qualifier = compound
+            tokens.append(FilenameToken(str(year), str(year), "year", match.span()))
+            tokens.append(
+                FilenameToken(
+                    qualifier,
+                    _normalize(qualifier),
+                    "edition-qualifier",
+                    match.span(),
+                )
             )
-        )
+        else:
+            kind = "year" if re.fullmatch(r"(?:19|20)\d{2}", raw) else "parenthetical"
+            if _looks_like_edition_qualifier(raw) and not noise:
+                kind = "edition-qualifier"
+            tokens.append(
+                FilenameToken(
+                    raw,
+                    _normalize(raw),
+                    "release-noise" if noise else kind,
+                    match.span(),
+                    noise,
+                )
+            )
         occupied.append(match.span())
     for match in re.finditer(r"#?\b(?:\d+(?:\.\d+)?[A-Za-z]?|TPB\d+)\b", text, re.IGNORECASE):
         if any(start <= match.start() < end for start, end in occupied):
@@ -53,8 +89,16 @@ def tokenize_filename(path: Path) -> tuple[FilenameToken, ...]:
         tokens.append(FilenameToken(raw, _normalize(raw), "sequence", match.span()))
     remainder = re.sub(r"\([^()]*\)", " ", text)
     for match in re.finditer(r"[^\s_-]+", remainder):
+        raw = match.group(0)
+        source_site = bool(_looks_like_source_site(raw))
         tokens.append(
-            FilenameToken(match.group(0), _normalize(match.group(0)), "text", match.span())
+            FilenameToken(
+                raw,
+                _normalize(raw),
+                "release-noise" if source_site else "text",
+                match.span(),
+                source_site,
+            )
         )
     return tuple(sorted(tokens, key=lambda token: (token.span[0], token.span[1], token.kind)))
 
@@ -201,10 +245,7 @@ def _comic_hypothesis(
     evidence: tuple[Evidence, ...],
     confidence: float,
 ) -> ParseHypothesis:
-    stem = _without_release_noise(path.stem)
-    year_match = _YEAR.search(stem)
-    year = int(year_match.group(1)) if year_match else None
-    stem = _YEAR.sub("", stem).strip(" -_")
+    stem, year, edition_qualifiers = _comic_filename_semantics(path.stem)
     comicinfo = inspection.metadata.get("comicinfo", {})
     if not isinstance(comicinfo, dict):
         comicinfo = {}
@@ -229,6 +270,8 @@ def _comic_hypothesis(
         creators = (_clean_title(creator),)
         sequence = sequence or SequenceNumber.parse(number)
         subtype = "collected-edition"
+        if collection_label:
+            edition_qualifiers = _merge_qualifiers(edition_qualifiers, collection_label)
         if comicinfo.get("Series") and _normalize(str(comicinfo["Series"])) != _normalize(series):
             identity_reasons.append(
                 "structured collection filename separates series, creator, and book index; "
@@ -245,7 +288,12 @@ def _comic_hypothesis(
             re.split(r"\b(?:TPB|Omnibus|Ultimate Collection)\b", stem, flags=re.IGNORECASE)[0]
         )
         title = title or _clean_title(stem)
+        qualifier = _first_edition_qualifier(stem)
+        if qualifier:
+            edition_qualifiers = _merge_qualifiers(edition_qualifiers, qualifier)
     else:
+        volume = _COLLECTION_VOLUME_SHORTHAND.match(stem)
+        one_volume = _COMPLETE_ONE_VOLUME_SUFFIX.match(stem)
         patterns = (
             re.match(
                 r"^(.+?)\s*-\s*V\d+\s*-\s*([\w.]+)\s*-\s*(.+)$",
@@ -256,9 +304,29 @@ def _comic_hypothesis(
             re.match(r"^(.*?)\s+([0-9]+(?:\.[0-9]+)?[A-Za-z]?)\s*(?:\([^)]*\))?$", stem),
         )
         match = next((item for item in patterns if item), None)
-        if match:
+        if volume:
+            series_text, number = volume.groups()
+            series = _clean_title(series_text)
+            sequence = sequence or SequenceNumber.parse(number)
+            title = title or f"Volume {int(number)}"
+            subtype = "collected-edition"
+        elif one_volume:
+            series_text, qualifier = one_volume.groups()
+            series = _clean_title(series_text)
+            title = title or _clean_title(qualifier)
+            edition_qualifiers = _merge_qualifiers(edition_qualifiers, qualifier)
+            subtype = "collected-edition"
+        elif match:
             groups = match.groups()
-            series = series or _clean_title(groups[0])
+            filename_series = _clean_title(groups[0])
+            if series and _series_creator_alias_base(series) == _normalize(filename_series):
+                identity_reasons.append(
+                    "filename issue syntax removes a trailing creator-credit alias "
+                    "from embedded series"
+                )
+                series = filename_series
+            else:
+                series = series or filename_series
             sequence = sequence or SequenceNumber.parse(groups[1])
             if len(groups) > 2:
                 title = title or _clean_title(groups[2])
@@ -266,9 +334,20 @@ def _comic_hypothesis(
             subtype = "annual" if re.search(r"\bAnnual\b", stem, re.IGNORECASE) else "special"
             series = series or _clean_title(stem)
         else:
-            subtype = "one-shot"
-            series = series or _clean_title(stem)
-            title = title or _clean_title(stem)
+            if sequence is not None and series:
+                subtype = "issue"
+                identity_reasons.append(
+                    "embedded comic issue number keeps item in issue classification"
+                )
+            elif edition_qualifiers:
+                subtype = "collected-edition"
+                base, qualifier = _split_edition_qualified_title(stem, edition_qualifiers)
+                series = series or base
+                title = title or qualifier or base
+            else:
+                subtype = "one-shot"
+                series = series or _clean_title(stem)
+                title = title or _clean_title(stem)
     if not series and path.parent.name and path.parent.name not in {".", path.anchor}:
         series = _clean_title(path.parent.name)
     return ParseHypothesis(
@@ -282,6 +361,7 @@ def _comic_hypothesis(
         creators=creators,
         evidence=evidence,
         reasons=("comic archive or strong issue/folder evidence", *identity_reasons),
+        edition_qualifiers=edition_qualifiers,
     )
 
 
@@ -307,11 +387,111 @@ def _filename_evidence(path: Path) -> tuple[Evidence, ...]:
 
 def _without_release_noise(text: str) -> str:
     text = _TRAILING_RELEASE_GROUP.sub("", text)
+    text = _TRAILING_SOURCE_SITE.sub("", text)
 
     def replace(match: re.Match[str]) -> str:
         return "" if _NOISE_TERMS.fullmatch(match.group(1).strip()) else match.group(0)
 
     return re.sub(r"\(([^()]*)\)", replace, text).strip(" -_")
+
+
+def _comic_filename_semantics(text: str) -> tuple[str, int | None, tuple[str, ...]]:
+    """Return identity-bearing comic filename text plus structured edition evidence."""
+    text = _without_release_noise(text)
+    year: int | None = None
+    qualifiers: list[str] = []
+
+    def replace_parenthetical(match: re.Match[str]) -> str:
+        nonlocal year
+        raw = match.group(1).strip()
+        if pure_year := re.fullmatch(r"(?:19|20)\d{2}", raw):
+            year = year or int(pure_year.group(0))
+            return ""
+        if compound := _compound_year_qualifier(raw):
+            compound_year, qualifier = compound
+            year = year or compound_year
+            qualifiers.append(qualifier)
+            return ""
+        if _looks_like_edition_qualifier(raw):
+            qualifiers.append(_clean_title(raw))
+            return ""
+        return match.group(0)
+
+    cleaned = re.sub(r"\(([^()]*)\)", replace_parenthetical, text)
+    cleaned = _clean_title(cleaned)
+    return cleaned, year, tuple(dict.fromkeys(qualifiers))
+
+
+def _compound_year_qualifier(value: str) -> tuple[int, str] | None:
+    match = _COMPOUND_YEAR.fullmatch(value.strip())
+    if not match or not _looks_like_edition_qualifier(match.group(2)):
+        return None
+    return int(match.group(1)), _clean_title(match.group(2))
+
+
+def _looks_like_edition_qualifier(value: str) -> bool:
+    return bool(_EDITION_QUALIFIER.search(value.strip()))
+
+
+def _looks_like_source_site(value: str) -> bool:
+    return bool(
+        re.fullmatch(
+            r"(?:www\.)?[a-z0-9][a-z0-9-]*(?:\.[a-z0-9-]+)*"
+            r"\.(?:com|net|org|info|io|co|me|cc)",
+            value,
+            re.IGNORECASE,
+        )
+    )
+
+
+def _first_edition_qualifier(value: str) -> str | None:
+    patterns = (
+        r"Ultimate Collection",
+        r"Collected Edition",
+        r"Omnibus",
+        r"TPB",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, value, re.IGNORECASE)
+        if match:
+            return _clean_title(match.group(0))
+    return None
+
+
+def _merge_qualifiers(values: tuple[str, ...], value: str) -> tuple[str, ...]:
+    cleaned = _clean_title(value)
+    if not cleaned or any(_normalize(item) == _normalize(cleaned) for item in values):
+        return values
+    return (*values, cleaned)
+
+
+def _split_edition_qualified_title(
+    stem: str,
+    qualifiers: tuple[str, ...],
+) -> tuple[str, str | None]:
+    """Separate a base title from a removed parenthetical edition label."""
+    base = _clean_title(stem)
+    qualifier = qualifiers[0] if qualifiers else None
+    return base, qualifier
+
+
+def _series_creator_alias_base(value: str) -> str | None:
+    """Recognize conservative trailing creator-credit variants used as series aliases."""
+    match = re.match(r"^(.*?)\s+by\s+(.+)$", value, re.IGNORECASE)
+    if not match:
+        return None
+    base, raw_credit = match.groups()
+    parts = [part.strip() for part in re.split(r"\s+(?:and|&)\s+", raw_credit, flags=re.I)]
+    if not parts or any(not part for part in parts):
+        return None
+    word_counts = [len(part.split()) for part in parts]
+    if len(parts) == 1 and word_counts[0] < 2:
+        return None
+    if len(parts) > 1 and not any(count >= 2 for count in word_counts):
+        return None
+    if any(count > 4 for count in word_counts):
+        return None
+    return _normalize(_clean_title(base))
 
 
 def _clean_title(value: str) -> str:

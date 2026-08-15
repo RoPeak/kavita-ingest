@@ -38,9 +38,16 @@ class LocalIdentity:
     run_start_year: int | None = None
     publisher: str | None = None
     language: str | None = None
+    edition_qualifiers: tuple[str, ...] = ()
 
     def evidence_hash(self) -> str:
-        payload = json.dumps(asdict(self), sort_keys=True, default=str)
+        fields = asdict(self)
+        # Keep historical decision evidence stable for sources that gain no new
+        # edition evidence. Only identities with a real qualifier should become
+        # stale under this parser upgrade.
+        if not self.edition_qualifiers:
+            fields.pop("edition_qualifiers", None)
+        payload = json.dumps(fields, sort_keys=True, default=str)
         return hashlib.sha256(payload.encode()).hexdigest()
 
 
@@ -132,6 +139,7 @@ def local_identity(classification: Classification, metadata: dict[str, Any]) -> 
         None,
         publisher,
         language,
+        hypothesis.edition_qualifiers,
     )
 
 

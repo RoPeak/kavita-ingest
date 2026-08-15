@@ -100,6 +100,7 @@ class ParseHypothesis:
     creators: tuple[str, ...] = ()
     evidence: tuple[Evidence, ...] = ()
     reasons: tuple[str, ...] = ()
+    edition_qualifiers: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
