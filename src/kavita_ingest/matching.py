@@ -9,7 +9,7 @@ from difflib import SequenceMatcher
 from enum import StrEnum
 from typing import Any
 
-from .collection_candidates import normalize_collection_title
+from .collection_candidates import collection_edition_qualifiers, normalize_collection_title
 from .config import MatchingSettings
 from .domain import Classification, MediaKind, SequenceNumber
 from .providers.models import Identifier, NormalizedCandidate, RecordType
@@ -459,11 +459,66 @@ def _score(local: LocalIdentity, candidate: NormalizedCandidate) -> CandidateSco
                     local.publisher,
                     candidate.publisher,
                     ComparisonKind.CONFLICT,
-                    -8,
+                    -20,
                     1 - publisher_similarity,
                     "collection publishers disagree",
                 )
             )
+
+    if collected and local.edition_qualifiers:
+        candidate_qualifiers = collection_edition_qualifiers(
+            candidate.title, candidate.subtitle
+        )
+        for qualifier in local.edition_qualifiers:
+            best, similarity = _best_qualifier_match(qualifier, candidate_qualifiers)
+            if best is not None and similarity >= 0.90:
+                comparisons.append(
+                    _comparison(
+                        "edition_qualifier",
+                        qualifier,
+                        best,
+                        ComparisonKind.EXACT,
+                        18,
+                        similarity,
+                        "edition qualifier agrees",
+                    )
+                )
+            elif best is not None and similarity >= 0.72:
+                comparisons.append(
+                    _comparison(
+                        "edition_qualifier",
+                        qualifier,
+                        best,
+                        ComparisonKind.SUPPORTING,
+                        10,
+                        similarity,
+                        "edition qualifier is strongly similar",
+                    )
+                )
+            elif candidate_qualifiers:
+                comparisons.append(
+                    _comparison(
+                        "edition_qualifier",
+                        qualifier,
+                        ", ".join(candidate_qualifiers),
+                        ComparisonKind.CONFLICT,
+                        -30,
+                        1 - similarity,
+                        "edition qualifier conflicts with provider edition family",
+                    )
+                )
+            else:
+                comparisons.append(
+                    _comparison(
+                        "edition_qualifier",
+                        qualifier,
+                        None,
+                        ComparisonKind.MISSING,
+                        -20,
+                        1,
+                        "distinctive local edition qualifier is absent from provider title",
+                    )
+                )
 
     if local.sequence and candidate.sequence:
         exact = local.sequence.normalized == candidate.sequence.normalized
@@ -551,6 +606,22 @@ def _score(local: LocalIdentity, candidate: NormalizedCandidate) -> CandidateSco
             item.field == "sequence" and item.kind is ComparisonKind.EXACT for item in comparisons
         )
     )
+    publisher_high = not any(
+        item.field == "publisher" and item.kind is ComparisonKind.CONFLICT
+        for item in comparisons
+    )
+    qualifier_high = (
+        not local.edition_qualifiers
+        or all(
+            any(
+                item.field == "edition_qualifier"
+                and item.local_value == qualifier
+                and item.kind in {ComparisonKind.EXACT, ComparisonKind.SUPPORTING}
+                for item in comparisons
+            )
+            for qualifier in local.edition_qualifiers
+        )
+    )
     return CandidateScore(
         candidate,
         total,
@@ -558,7 +629,7 @@ def _score(local: LocalIdentity, candidate: NormalizedCandidate) -> CandidateSco
         tuple(comparisons),
         tuple(contradictions),
         hard,
-        title_high and sequence_high,
+        title_high and sequence_high and publisher_high and qualifier_high,
     )
 
 
@@ -639,6 +710,31 @@ def _comparison(
         reason,
         ("local", "provider"),
     )
+
+
+def _best_qualifier_match(
+    local_qualifier: str,
+    candidate_qualifiers: tuple[str, ...],
+) -> tuple[str | None, float]:
+    if not candidate_qualifiers:
+        return None, 0.0
+    scored = [
+        (candidate, _qualifier_similarity(local_qualifier, candidate))
+        for candidate in candidate_qualifiers
+    ]
+    return max(scored, key=lambda item: item[1])
+
+
+def _qualifier_similarity(left: str, right: str) -> float:
+    left_key = _normalize(left)
+    right_key = _normalize(right)
+    if left_key == right_key:
+        return 1.0
+    if left_key and right_key and (left_key in right_key or right_key in left_key):
+        shorter = min(len(left_key), len(right_key))
+        longer = max(len(left_key), len(right_key))
+        return shorter / longer
+    return SequenceMatcher(None, left_key, right_key).ratio()
 
 
 def _collection_title_similarity(

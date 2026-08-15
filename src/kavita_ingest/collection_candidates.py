@@ -51,6 +51,31 @@ _COLLECTION_ROMAN_NUMERALS = {
     "xix": "19",
     "xx": "20",
 }
+
+_EDITION_QUALIFIER_PATTERNS = (
+    re.compile(r"\b\d+(?:st|nd|rd|th)\s+edition\b", re.IGNORECASE),
+    re.compile(r"\b(?:DC\s+)?Black\s+Label\s+Edition\b", re.IGNORECASE),
+    re.compile(r"\bUltimate\s+Collection\b", re.IGNORECASE),
+    re.compile(r"\bDeluxe\s+Edition\b", re.IGNORECASE),
+    re.compile(r"\bEssential\s+Edition\b", re.IGNORECASE),
+    re.compile(r"\bAbsolute\s+Edition\b", re.IGNORECASE),
+    re.compile(r"\bComplete\s+Collection\b", re.IGNORECASE),
+    re.compile(r"\bCompact\s+Comics\b", re.IGNORECASE),
+    re.compile(r"\bCollected\s+Edition\b", re.IGNORECASE),
+    re.compile(r"\bTrade\s+Paperback\b", re.IGNORECASE),
+    re.compile(r"\bHardcover\b", re.IGNORECASE),
+    re.compile(r"\bOmnibus\b", re.IGNORECASE),
+    re.compile(r"\bCompendium\b", re.IGNORECASE),
+    re.compile(
+        r"\b(?:The\s+)?Complete\b[^,:;()]{0,80}\bin\s+One\s+Volume\b",
+        re.IGNORECASE,
+    ),
+)
+_ORGANIZATION_AUTHOR_SUFFIX = re.compile(
+    r"\b(?:corporation|company|publishing|publishers?|press|learning|books|"
+    r"inc\.?|llc|ltd\.?|limited)\s*$",
+    re.IGNORECASE,
+)
 _COLLECTION_SEQUENCE_RE = re.compile(
     r"\b(?P<label>book|volume|vol\.?)\s*[-:#]?\s*"
     r"(?P<number>\d+(?:\.\d+)?|one|two|three|four|five|six|seven|eight|nine|ten|"
@@ -104,13 +129,7 @@ def adapt_collection_candidate(
     if candidate.record_type is not RecordType.BOOK_EDITION:
         return None
 
-    creators = tuple(
-        Contributor(
-            contributor.name,
-            "writer" if contributor.role.casefold() == "author" else contributor.role,
-        )
-        for contributor in candidate.creators
-    )
+    creators, organization_authors = _adapt_collection_contributors(candidate.creators)
     sequence_source = _collection_sequence_source(candidate, sequence)
     return replace(
         candidate,
@@ -130,6 +149,11 @@ def adapt_collection_candidate(
             **(
                 {"collection_sequence_source": sequence_source}
                 if sequence_source is not None
+                else {}
+            ),
+            **(
+                {"collection_organization_contributors": " | ".join(organization_authors)}
+                if organization_authors
                 else {}
             ),
         },
@@ -164,6 +188,21 @@ def normalize_collection_title(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", normalized).strip()
 
 
+def collection_edition_qualifiers(
+    title: str,
+    subtitle: str | None = None,
+) -> tuple[str, ...]:
+    """Extract explicit edition-family labels from provider-facing title text."""
+    output: list[str] = []
+    for value in (title, subtitle or ""):
+        for pattern in _EDITION_QUALIFIER_PATTERNS:
+            for match in pattern.finditer(value):
+                label = re.sub(r"\s+", " ", match.group(0)).strip(" -_:,;()")
+                if label and label.casefold() not in {item.casefold() for item in output}:
+                    output.append(label)
+    return tuple(output)
+
+
 def collection_number_word(number: SequenceNumber | None) -> str | None:
     """Return a conservative English word alias for integer collection numbers 1..20."""
     if number is None or not number.normalized.isdigit():
@@ -172,6 +211,27 @@ def collection_number_word(number: SequenceNumber | None) -> str | None:
     if not 1 <= integer <= 20:
         return None
     return next(word for word, value in _COLLECTION_NUMBER_WORDS.items() if int(value) == integer)
+
+
+def _adapt_collection_contributors(
+    contributors: tuple[Contributor, ...],
+) -> tuple[tuple[Contributor, ...], tuple[str, ...]]:
+    adapted: list[Contributor] = []
+    organizations: list[str] = []
+    for contributor in contributors:
+        if contributor.role.casefold() != "author":
+            adapted.append(contributor)
+            continue
+        if _looks_like_organization_author(contributor.name):
+            organizations.append(contributor.name)
+            continue
+        adapted.append(Contributor(contributor.name, "writer"))
+    return tuple(adapted), tuple(dict.fromkeys(organizations))
+
+
+def _looks_like_organization_author(value: str) -> bool:
+    words = value.strip().split()
+    return len(words) >= 2 and bool(_ORGANIZATION_AUTHOR_SUFFIX.search(value.strip()))
 
 
 def _resolve_collection_sequence(

@@ -383,6 +383,130 @@ def test_collection_publisher_shorthand_matches_common_imprint_suffixes() -> Non
     assert score.score == 100.0
 
 
+def test_exact_edition_qualifier_outranks_generic_volume_candidate() -> None:
+    local = LocalIdentity(
+        MediaKind.COMIC,
+        "collected-edition",
+        0.98,
+        "Ultimate Collection Book 2",
+        creators=("Grant Morrison",),
+        series_title="New X-Men",
+        sequence=SequenceNumber.parse("2"),
+        year=2009,
+        publisher="Marvel",
+        edition_qualifiers=("Ultimate Collection",),
+    )
+    generic = NormalizedCandidate(
+        ProviderName.GOOGLE_BOOKS,
+        "generic-volume-2",
+        RecordType.COMIC_COLLECTION,
+        MediaKind.COMIC,
+        "New X-Men by Grant Morrison Vol. 2",
+        creators=(Contributor("Grant Morrison", "writer"),),
+        publisher="Marvel",
+        publication_date="2009",
+        series_title="New X-Men",
+        sequence=SequenceNumber.parse("2"),
+        item_type="collected-edition",
+        provider_metadata={"collection_sequence_source": "provider_title"},
+    )
+    exact = NormalizedCandidate(
+        ProviderName.GOOGLE_BOOKS,
+        "ultimate-volume-2",
+        RecordType.COMIC_COLLECTION,
+        MediaKind.COMIC,
+        "New X-Men by Grant Morrison Ultimate Collection Book 2",
+        creators=(Contributor("Grant Morrison", "writer"),),
+        publisher="Marvel",
+        publication_date="2009",
+        series_title="New X-Men",
+        sequence=SequenceNumber.parse("2"),
+        item_type="collected-edition",
+        provider_metadata={"collection_sequence_source": "provider_title"},
+    )
+
+    scores = score_candidates(local, [generic, exact], SETTINGS)
+
+    assert scores[0].candidate.provider_id == "ultimate-volume-2"
+    assert scores[0].eligible
+    generic_score = next(score for score in scores if score.candidate is generic)
+    qualifier = next(
+        item for item in generic_score.comparisons if item.field == "edition_qualifier"
+    )
+    assert qualifier.kind is ComparisonKind.MISSING
+    assert not generic_score.identity_fields_high
+
+
+def test_conflicting_collection_edition_family_blocks_automatic_acceptance() -> None:
+    local = LocalIdentity(
+        MediaKind.COMIC,
+        "collected-edition",
+        0.98,
+        "DC Black Label Edition",
+        creators=("Grant Morrison",),
+        series_title="All-Star Superman",
+        year=2018,
+        publisher="DC",
+        edition_qualifiers=("DC Black Label Edition",),
+    )
+    candidate = NormalizedCandidate(
+        ProviderName.GOOGLE_BOOKS,
+        "deluxe",
+        RecordType.COMIC_COLLECTION,
+        MediaKind.COMIC,
+        "All-Star Superman Deluxe Edition",
+        creators=(Contributor("Grant Morrison", "writer"),),
+        publisher="DC Comics",
+        publication_date="2018",
+        series_title="All-Star Superman",
+        item_type="collected-edition",
+    )
+
+    score = score_candidates(local, [candidate], SETTINGS)[0]
+
+    qualifier = next(item for item in score.comparisons if item.field == "edition_qualifier")
+    assert qualifier.kind is ComparisonKind.CONFLICT
+    assert qualifier.score_delta == -30
+    assert not score.hard_contradiction
+    assert not score.identity_fields_high
+    assert not score.eligible
+
+
+def test_collection_publisher_conflict_blocks_automatic_acceptance_without_hard_rejection() -> None:
+    local = LocalIdentity(
+        MediaKind.COMIC,
+        "collected-edition",
+        0.98,
+        "DC Black Label Edition",
+        creators=("Grant Morrison",),
+        series_title="All-Star Superman",
+        year=2018,
+        publisher="DC",
+        edition_qualifiers=("DC Black Label Edition",),
+    )
+    candidate = NormalizedCandidate(
+        ProviderName.GOOGLE_BOOKS,
+        "turtleback",
+        RecordType.COMIC_COLLECTION,
+        MediaKind.COMIC,
+        "All-Star Superman (DC Black Label Edition)",
+        creators=(Contributor("Grant Morrison", "writer"),),
+        publisher="Turtleback",
+        publication_date="2018",
+        series_title="All-Star Superman",
+        item_type="collected-edition",
+    )
+
+    score = score_candidates(local, [candidate], SETTINGS)[0]
+
+    publisher = next(item for item in score.comparisons if item.field == "publisher")
+    assert publisher.kind is ComparisonKind.CONFLICT
+    assert publisher.score_delta == -20
+    assert not score.hard_contradiction
+    assert not score.identity_fields_high
+    assert not score.eligible
+
+
 def test_empty_edition_qualifiers_preserve_historical_local_evidence_hash() -> None:
     import hashlib
     import json

@@ -373,6 +373,16 @@ def _collection_book_queries(local: LocalIdentity) -> tuple[tuple[str, SearchQue
     primary = _collection_book_query(local)
     variants: list[tuple[str, SearchQuery]] = [("structured", primary)]
     seen = {(primary.title.casefold(), primary.creators, primary.relaxed)}
+    if local.creators:
+        title_only = SearchQuery(
+            MediaKind.BOOK,
+            primary.title,
+            creators=(),
+            identifiers=local.identifiers,
+            item_type="collected-edition",
+        )
+        variants.append(("title-only", title_only))
+        seen.add((title_only.title.casefold(), title_only.creators, title_only.relaxed))
 
     series = (local.series_title or "").strip()
     creator = local.creators[0].strip() if local.creators else ""
@@ -454,7 +464,7 @@ def _collection_relaxed_query(local: LocalIdentity) -> SearchQuery:
     return SearchQuery(
         MediaKind.BOOK,
         title,
-        creators=local.creators,
+        creators=(),
         identifiers=local.identifiers,
         item_type="collected-edition",
         relaxed=True,

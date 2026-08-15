@@ -113,6 +113,22 @@ class QuerySensitiveCollectionProvider:
         return []
 
 
+class CreatorSensitiveCollectionProvider(QuerySensitiveCollectionProvider):
+    def __init__(
+        self,
+        name: ProviderName,
+        title_only_responses: dict[str, list[NormalizedCandidate]],
+    ) -> None:
+        super().__init__(name, {})
+        self.title_only_responses = title_only_responses
+
+    def search(self, query: SearchQuery) -> list[NormalizedCandidate]:
+        self.queries.append(query)
+        if query.creators:
+            return []
+        return self.title_only_responses.get(query.title, [])
+
+
 class FlakyQueryCollectionProvider(QuerySensitiveCollectionProvider):
     def __init__(
         self,
@@ -987,7 +1003,7 @@ def test_collected_edition_uses_book_edition_provider_without_crossing_issue_bou
     result = generate_candidates(local, (google, comic_vine))
 
     assert comic_vine.operations == []
-    assert google.operations == ["search:collected-edition:False"] * 4
+    assert google.operations == ["search:collected-edition:False"] * 5
     assert len(result.candidates) == 1
     candidate = result.candidates[0]
     assert candidate.record_type is RecordType.COMIC_COLLECTION
@@ -1035,9 +1051,12 @@ def test_collected_edition_query_ladder_recovers_creator_inline_word_number_titl
 
     assert [query.title for query in provider.queries] == [
         "Animal Man Book 1",
+        "Animal Man Book 1",
         "Animal Man by Grant Morrison Book 1",
         "Animal Man by Grant Morrison Book One",
     ]
+    assert provider.queries[0].creators == ("Grant Morrison",)
+    assert provider.queries[1].creators == ()
     assert len(result.candidates) == 1
     candidate = result.candidates[0]
     assert candidate.record_type is RecordType.COMIC_COLLECTION
@@ -1128,6 +1147,73 @@ def test_collected_edition_query_ladder_survives_one_transient_provider_failure(
     )
 
 
+def test_collected_edition_title_only_query_recovers_from_bad_creator_hint() -> None:
+    edition = NormalizedCandidate(
+        ProviderName.GOOGLE_BOOKS,
+        "saga-volume-one",
+        RecordType.BOOK_EDITION,
+        MediaKind.BOOK,
+        "Saga Volume 1",
+        creators=(Contributor("Brian K. Vaughan", "author"),),
+        publisher="Image Comics",
+        publication_date="2012",
+        edition_id="saga-volume-one",
+    )
+    provider = CreatorSensitiveCollectionProvider(
+        ProviderName.GOOGLE_BOOKS,
+        {"Saga Volume 1": [edition]},
+    )
+    local = LocalIdentity(
+        MediaKind.COMIC,
+        "collected-edition",
+        0.98,
+        "Volume 1",
+        creators=("Brian K. Vaugn",),
+        series_title="Saga",
+        sequence=SequenceNumber.parse("1"),
+        year=2012,
+        publisher="Image",
+    )
+
+    result = generate_candidates(local, (provider,))
+
+    assert len(result.candidates) == 1
+    assert any(query.title == "Saga Volume 1" and not query.creators for query in provider.queries)
+    score = score_candidates(local, list(result.candidates), MatchingSettings())[0]
+    assert any(item.field == "creators" for item in score.comparisons)
+    assert score.candidate.provider_id == "saga-volume-one"
+
+
+def test_collection_adaptation_does_not_turn_organization_author_into_writer() -> None:
+    candidate = NormalizedCandidate(
+        ProviderName.GOOGLE_BOOKS,
+        "all-star-black-label",
+        RecordType.BOOK_EDITION,
+        MediaKind.BOOK,
+        "All-Star Superman (DC Black Label Edition)",
+        creators=(
+            Contributor("Grant Morrison", "author"),
+            Contributor("Perfection Learning Corporation", "author"),
+        ),
+        publisher="Turtleback",
+        publication_date="2018",
+        edition_id="all-star-black-label",
+    )
+
+    adapted = adapt_collection_candidate(
+        candidate,
+        series_title="All-Star Superman",
+        sequence=None,
+    )
+
+    assert adapted is not None
+    assert adapted.creators == (Contributor("Grant Morrison", "writer"),)
+    assert (
+        adapted.provider_metadata["collection_organization_contributors"]
+        == "Perfection Learning Corporation"
+    )
+
+
 def test_numbered_collected_edition_rejects_wrong_or_missing_provider_sequence() -> None:
     local_sequence = SequenceNumber.parse("2")
     wrong = NormalizedCandidate(
@@ -1201,6 +1287,7 @@ def test_collected_edition_uses_relaxed_series_author_search_only_after_precise_
     assert len(result.candidates) == 1
     assert provider.queries[-1].relaxed is True
     assert provider.queries[-1].title == "Animal Man"
+    assert provider.queries[-1].creators == ()
 
 
 def test_collected_edition_never_adapts_book_work_or_regular_comic_issue() -> None:
