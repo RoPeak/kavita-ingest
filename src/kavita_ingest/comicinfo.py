@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import importlib.resources
 from dataclasses import dataclass
 from typing import Any, cast
@@ -77,6 +78,14 @@ SCHEMA_ORDER = (
 )
 
 
+COMICINFO_PROFILE_STRICT = "strict-2.1-v1"
+COMICINFO_PROFILE_IMAGEHASH = "2.1-imagehash-preserve-v1"
+PLANNED_COMICINFO_PROFILE = COMICINFO_PROFILE_IMAGEHASH
+SUPPORTED_COMICINFO_PROFILES = frozenset(
+    {COMICINFO_PROFILE_STRICT, COMICINFO_PROFILE_IMAGEHASH}
+)
+
+
 class ComicInfoError(ValueError):
     pass
 
@@ -87,7 +96,12 @@ class ComicInfoDocument:
     schema_valid: bool
 
 
-def read_comicinfo(data: bytes, *, require_schema: bool = False) -> ComicInfoDocument:
+def read_comicinfo(
+    data: bytes,
+    *,
+    require_schema: bool = False,
+    validation_profile: str = COMICINFO_PROFILE_STRICT,
+) -> ComicInfoDocument:
     parser = etree.XMLParser(resolve_entities=False, no_network=True, recover=False)
     try:
         root = etree.fromstring(data, parser)
@@ -103,10 +117,14 @@ def read_comicinfo(data: bytes, *, require_schema: bool = False) -> ComicInfoDoc
         if nodes and nodes[0].text is not None:
             metadata[field] = nodes[0].text.strip()
     schema = _schema()
-    valid = schema.validate(root)
-    if require_schema and not valid:
-        raise ComicInfoError(_validation_message(schema))
-    return ComicInfoDocument(metadata, valid)
+    strict_valid = schema.validate(root)
+    if require_schema:
+        profile_schema, validation_root = _profile_validation(root, validation_profile)
+        if not profile_schema.validate(validation_root):
+            raise ComicInfoError(
+                _validation_message(profile_schema, validation_profile=validation_profile)
+            )
+    return ComicInfoDocument(metadata, strict_valid)
 
 
 def patch_comicinfo(
@@ -115,6 +133,7 @@ def patch_comicinfo(
     set_fields: dict[str, Any],
     clear_fields: tuple[str, ...] = (),
     require_schema: bool = True,
+    validation_profile: str = COMICINFO_PROFILE_STRICT,
 ) -> bytes:
     """Patch owned fields while retaining every unowned node and attribute."""
     invalid = (set(set_fields) | set(clear_fields)) - set(OWNED_FIELDS)
@@ -144,9 +163,11 @@ def patch_comicinfo(
             root.append(node)
     _order_known_elements(root)
     if require_schema:
-        schema = _schema()
-        if not schema.validate(root):
-            raise ComicInfoError(_validation_message(schema))
+        schema, validation_root = _profile_validation(root, validation_profile)
+        if not schema.validate(validation_root):
+            raise ComicInfoError(
+                _validation_message(schema, validation_profile=validation_profile)
+            )
     return cast(bytes, etree.tostring(root, encoding="utf-8", xml_declaration=True))
 
 
@@ -254,7 +275,47 @@ def _order_known_elements(root: etree._Element) -> None:
         root.append(child)
 
 
-def _validation_message(schema: etree.XMLSchema) -> str:
+def imagehash_snapshot(data: bytes) -> tuple[tuple[str | None, str], ...]:
+    parser = etree.XMLParser(resolve_entities=False, no_network=True, recover=False)
+    try:
+        root = etree.fromstring(data, parser)
+    except etree.XMLSyntaxError as exc:
+        raise ComicInfoError(f"invalid ComicInfo XML: {exc}") from exc
+    if etree.QName(root).localname != "ComicInfo":
+        raise ComicInfoError("ComicInfo root element is required")
+    values: list[tuple[str | None, str]] = []
+    for pages in root:
+        if _schema_name(pages) != "Pages":
+            continue
+        for page in pages:
+            if _schema_name(page) != "Page" or "ImageHash" not in page.attrib:
+                continue
+            values.append((page.get("Image"), page.attrib["ImageHash"]))
+    return tuple(values)
+
+
+def _profile_validation(
+    root: etree._Element, validation_profile: str
+) -> tuple[etree.XMLSchema, etree._Element]:
+    if validation_profile not in SUPPORTED_COMICINFO_PROFILES:
+        raise ComicInfoError(f"unsupported ComicInfo validation profile: {validation_profile}")
+    schema = _schema()
+    if validation_profile == COMICINFO_PROFILE_STRICT:
+        return schema, root
+
+    validation_root = copy.deepcopy(root)
+    for pages in validation_root:
+        if _schema_name(pages) != "Pages":
+            continue
+        for page in pages:
+            if _schema_name(page) == "Page":
+                page.attrib.pop("ImageHash", None)
+    return schema, validation_root
+
+
+def _validation_message(
+    schema: etree.XMLSchema, *, validation_profile: str = COMICINFO_PROFILE_STRICT
+) -> str:
     errors = list(schema.error_log)
     if not errors:
         return "ComicInfo 2.1 schema validation failed without validator diagnostics"
@@ -266,7 +327,12 @@ def _validation_message(schema: etree.XMLSchema) -> str:
         )
         suffix = f", {classification}" if classification else ""
         details.append(f"{error.message} ({location}{suffix})")
-    return "ComicInfo 2.1 schema validation failed: " + "; ".join(details)
+    profile = (
+        ""
+        if validation_profile == COMICINFO_PROFILE_STRICT
+        else f" under compatibility profile {validation_profile}"
+    )
+    return "ComicInfo 2.1 schema validation failed" + profile + ": " + "; ".join(details)
 
 
 def _schema() -> etree.XMLSchema:

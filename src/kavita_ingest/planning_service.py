@@ -14,6 +14,7 @@ import rarfile
 
 from .calibre import require_safe_calibre_executable
 from .canonical import ResolutionLevel
+from .comicinfo import PLANNED_COMICINFO_PROFILE
 from .config import AppConfig
 from .decisions import DecisionRepository, DecisionType
 from .discovery import inspect_source
@@ -375,9 +376,12 @@ def _expected_inventory(row: sqlite3.Row) -> tuple[dict[str, Any], ...]:
 
 def _verification_requirements(source_format: SourceFormat) -> tuple[str, ...]:
     common = ("source_sha256", "metadata_readback", "destination_verification")
+    comicinfo = ("comicinfo_profile_validation", "comicinfo_extension_preservation")
     if source_format is SourceFormat.CBR:
-        return common + ("archive_inventory", "payload_byte_preservation")
-    if source_format in {SourceFormat.CBZ, SourceFormat.EPUB}:
+        return common + ("archive_inventory", "payload_byte_preservation") + comicinfo
+    if source_format is SourceFormat.CBZ:
+        return common + ("archive_inventory",) + comicinfo
+    if source_format is SourceFormat.EPUB:
         return common + ("archive_inventory",)
     if source_format is SourceFormat.PDF:
         return common + ("pdf_semantic_preservation",)
@@ -401,10 +405,14 @@ def _writer_versions(source_format: SourceFormat) -> dict[str, str]:
             "pikepdf": pikepdf.__version__,
         }
     if source_format is SourceFormat.CBZ:
-        return {"comicinfo_schema": "2.1"}
+        return {
+            "comicinfo_schema": "2.1",
+            "comicinfo_profile": PLANNED_COMICINFO_PROFILE,
+        }
     if source_format is SourceFormat.CBR:
         return {
             "comicinfo_schema": "2.1",
+            "comicinfo_profile": PLANNED_COMICINFO_PROFILE,
             "rarfile": rarfile.__version__,
             "unrar": _tool_version("unrar", "UNRAR"),
         }

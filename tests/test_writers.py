@@ -11,7 +11,13 @@ import pytest
 from compatibility.helpers.epub_factory import create_epub, publication_hashes
 from compatibility.helpers.pdf_factory import create_pdf
 from kavita_ingest.canonical import CanonicalIdentity
-from kavita_ingest.comicinfo import ComicInfoError, patch_comicinfo, read_comicinfo
+from kavita_ingest.comicinfo import (
+    COMICINFO_PROFILE_IMAGEHASH,
+    ComicInfoError,
+    imagehash_snapshot,
+    patch_comicinfo,
+    read_comicinfo,
+)
 from kavita_ingest.domain import MediaKind, SequenceNumber
 from kavita_ingest.projection import project_comic
 from kavita_ingest.writers.comic import write_cbz_metadata
@@ -241,6 +247,74 @@ def test_comicinfo_rejects_duplicate_owned_fields() -> None:
             set_fields={"Series": "C"},
         )
 
+
+
+def test_imagehash_compatibility_profile_is_narrow_and_preserving() -> None:
+    source = Path("tests/fixtures/comicinfo/imagehash_pages.xml").read_bytes()
+
+    with pytest.raises(ComicInfoError, match="ImageHash"):
+        patch_comicinfo(
+            source,
+            set_fields={"Series": "Oblivion Song (2018)", "Number": "1"},
+        )
+
+    output = patch_comicinfo(
+        source,
+        set_fields={"Series": "Oblivion Song (2018)", "Number": "1"},
+        validation_profile=COMICINFO_PROFILE_IMAGEHASH,
+    )
+
+    assert imagehash_snapshot(output) == imagehash_snapshot(source)
+    assert read_comicinfo(output).schema_valid is False
+    document = read_comicinfo(
+        output,
+        require_schema=True,
+        validation_profile=COMICINFO_PROFILE_IMAGEHASH,
+    )
+    assert document.metadata["Series"] == "Oblivion Song (2018)"
+
+    with pytest.raises(ComicInfoError, match="ImageHash"):
+        read_comicinfo(output, require_schema=True)
+
+    unrelated = Path("tests/fixtures/comicinfo/unknown_attribute.xml").read_bytes()
+    with pytest.raises(ComicInfoError, match="vendor"):
+        patch_comicinfo(
+            unrelated,
+            set_fields={"Series": "Still Strict"},
+            validation_profile=COMICINFO_PROFILE_IMAGEHASH,
+        )
+
+
+def test_cbz_writer_preserves_imagehash_under_frozen_compatibility_profile(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source.cbz"
+    destination = tmp_path / "out.cbz"
+    comicinfo = Path("tests/fixtures/comicinfo/imagehash_pages.xml").read_bytes()
+    with zipfile.ZipFile(source, "w") as archive:
+        archive.writestr("001.jpg", b"page-one")
+        archive.writestr("002.jpg", b"page-two")
+        archive.writestr("ComicInfo.xml", comicinfo)
+    before = source.read_bytes()
+
+    result = write_cbz_metadata(
+        source,
+        destination,
+        set_fields={"Series": "Oblivion Song (2018)", "Number": "1"},
+        comicinfo_profile=COMICINFO_PROFILE_IMAGEHASH,
+    )
+
+    assert result.valid
+    assert source.read_bytes() == before
+    assert "imagehash_preservation" in result.checks
+    with zipfile.ZipFile(destination) as archive:
+        output = archive.read("ComicInfo.xml")
+    assert imagehash_snapshot(output) == imagehash_snapshot(comicinfo)
+    assert read_comicinfo(
+        output,
+        require_schema=True,
+        validation_profile=COMICINFO_PROFILE_IMAGEHASH,
+    ).metadata["Series"] == "Oblivion Song (2018)"
 
 def test_cbz_writer_preserves_page_bytes_and_reads_back_metadata(tmp_path: Path) -> None:
     source = tmp_path / "source.cbz"

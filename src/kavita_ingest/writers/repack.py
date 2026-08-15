@@ -9,6 +9,7 @@ from pathlib import Path
 import rarfile
 
 from ..archive_safety import ArchiveLimits, validate_inventory
+from ..comicinfo import COMICINFO_PROFILE_STRICT
 from .comic import write_cbz_metadata
 from .common import VerificationResult
 
@@ -20,6 +21,7 @@ def repack_cbr_to_cbz(
     set_fields: dict[str, object],
     clear_fields: tuple[str, ...] = (),
     limits: ArchiveLimits | None = None,
+    comicinfo_profile: str = COMICINFO_PROFILE_STRICT,
 ) -> VerificationResult:
     resolved_limits = limits or ArchiveLimits()
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -51,7 +53,11 @@ def repack_cbr_to_cbz(
                     ):
                         shutil.copyfileobj(source_stream, target_stream, length=1024 * 1024)
         result = write_cbz_metadata(
-            raw_cbz, metadata_cbz, set_fields=set_fields, clear_fields=clear_fields
+            raw_cbz,
+            metadata_cbz,
+            set_fields=set_fields,
+            clear_fields=clear_fields,
+            comicinfo_profile=comicinfo_profile,
         )
         shutil.move(metadata_cbz, destination)
         return result

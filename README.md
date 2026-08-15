@@ -300,9 +300,15 @@ that PDF field as a volume.
 Existing ComicInfo is preserved conservatively. Schema-known elements are
 emitted in deterministic ComicInfo 2.1 order, including pre-existing fields and
 `Pages`. Unknown extensions, attributes, and invalid unowned known values are
-never deleted or silently rewritten to force compliance. When preserved content
-prevents strict validation, publication stops with the exact XSD message, line,
-and validation classification while the source remains untouched.
+never deleted or silently rewritten to force compliance. New comic plans freeze
+an explicit ComicInfo compatibility profile. The supported production profile
+preserves the commonly encountered unowned `Page@ImageHash` attribute byte-for-
+value, validates the document against the pinned 2.1 XSD with only that exact
+attribute omitted from a temporary validation copy, and independently verifies
+that the published ImageHash sequence is unchanged. Other unknown attributes,
+extensions, and invalid known values still stop publication with the exact XSD
+diagnostics while the source remains untouched. Plans that predate the explicit
+profile must be regenerated and re-approved before comic Apply.
 
 ### Plans and approval
 

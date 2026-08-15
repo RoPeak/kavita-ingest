@@ -4,6 +4,14 @@ All notable release-level changes to Kavita Ingest are recorded here.
 
 ## [Unreleased]
 
+### Fixed
+
+- Preserve existing ComicInfo `Page@ImageHash` extension metadata under an explicit plan-frozen compatibility profile, while continuing to reject unrelated schema incompatibilities and independently verifying that ImageHash values survive publication unchanged.
+
+### Safety
+
+- Comic plans created before the explicit ComicInfo compatibility profile remain auditable but must be regenerated and re-approved before Apply, preventing old immutable plan bytes from silently authorizing changed writer semantics.
+
 ## [1.1.0] - 2026-08-14
 
 ### Fixed

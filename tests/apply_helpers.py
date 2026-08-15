@@ -10,6 +10,7 @@ from compatibility.helpers.pdf_factory import create_pdf
 from kavita_ingest.archive_safety import ArchiveLimits
 from kavita_ingest.calibre import require_safe_calibre_executable
 from kavita_ingest.canonical import CanonicalIdentity, ResolutionLevel, work_only_identity
+from kavita_ingest.comicinfo import PLANNED_COMICINFO_PROFILE
 from kavita_ingest.config import AppConfig
 from kavita_ingest.db import connect, migrate
 from kavita_ingest.domain import MediaKind, SequenceNumber
@@ -49,6 +50,7 @@ def make_apply_fixture(
     directory_mode: int = 0o755,
     comic_pdf: bool = False,
     disguised_cbz_suffix: str | None = None,
+    cbz_comicinfo: bytes | None = None,
 ) -> ApplyFixture:
     name = plan_name or f"{media_format}-{lifecycle}"
     incoming = tmp_path / name / "incoming"
@@ -63,6 +65,7 @@ def make_apply_fixture(
         pdf_state=pdf_state,
         cbr_fixture=cbr_fixture,
         disguised_cbz_suffix=disguised_cbz_suffix,
+        cbz_comicinfo=cbz_comicinfo,
     )
     root = comics if comic_pdf else (books if media_format in {"epub", "pdf"} else comics)
     if comic_pdf:
@@ -173,6 +176,7 @@ def _source(
     pdf_state: str,
     cbr_fixture: str,
     disguised_cbz_suffix: str | None,
+    cbz_comicinfo: bytes | None,
 ) -> Path:
     if media_format == "epub":
         return create_epub(incoming / "source.epub")
@@ -187,6 +191,8 @@ def _source(
         with zipfile.ZipFile(path, "w") as archive:
             archive.writestr("001.jpg", b"first-page")
             archive.writestr("002.jpg", b"second-page")
+            if cbz_comicinfo is not None:
+                archive.writestr("ComicInfo.xml", cbz_comicinfo)
         return path
     if media_format == "cbr":
         path = incoming / "source.cbr"
@@ -221,8 +227,16 @@ def _versions(media_format: str) -> dict[str, str]:
             "pikepdf": "10.11.0",
         }
     if media_format == "cbz":
-        return {"comicinfo_schema": "2.1"}
-    return {"comicinfo_schema": "2.1", "rarfile": "4.5", "unrar": "7.00"}
+        return {
+            "comicinfo_schema": "2.1",
+            "comicinfo_profile": PLANNED_COMICINFO_PROFILE,
+        }
+    return {
+        "comicinfo_schema": "2.1",
+        "comicinfo_profile": PLANNED_COMICINFO_PROFILE,
+        "rarfile": "4.5",
+        "unrar": "7.00",
+    }
 
 
 def _transformation(media_format: str) -> str:

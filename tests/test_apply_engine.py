@@ -5,6 +5,7 @@ import json
 import os
 import shutil
 import sqlite3
+import zipfile
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -22,7 +23,11 @@ from kavita_ingest.apply_engine import (
     WriterDispatcher,
 )
 from kavita_ingest.apply_journal import ItemState, JournalRepository, RunState
-from kavita_ingest.comicinfo import ComicInfoError
+from kavita_ingest.comicinfo import (
+    COMICINFO_PROFILE_IMAGEHASH,
+    ComicInfoError,
+    imagehash_snapshot,
+)
 from kavita_ingest.db import connect
 from kavita_ingest.filesystem import LinuxFilesystem, sha256_file
 from kavita_ingest.locking import LockUnavailable, ProcessLock, lock_path
@@ -806,6 +811,61 @@ def test_abandon_refuses_already_complete_run(
         )
 
 
+
+def test_apply_preserves_imagehash_with_plan_frozen_compatibility_profile(
+    tmp_path: Path,
+) -> None:
+    comicinfo = Path("tests/fixtures/comicinfo/imagehash_pages.xml").read_bytes()
+    fixture = make_apply_fixture(
+        tmp_path,
+        "cbz",
+        lifecycle="preserve",
+        plan_name="imagehash-profile",
+        cbz_comicinfo=comicinfo,
+    )
+
+    summary = ApplyEngine(fixture.config).apply(fixture.plan_id)
+
+    assert summary.status is RunState.COMPLETE
+    assert fixture.source.exists()
+    assert fixture.destination.exists()
+    with zipfile.ZipFile(fixture.destination) as archive:
+        output = archive.read("ComicInfo.xml")
+    assert imagehash_snapshot(output) == imagehash_snapshot(comicinfo)
+
+
+def test_unprofiled_comic_plan_is_refused_before_writes(tmp_path: Path) -> None:
+    fixture = make_apply_fixture(
+        tmp_path,
+        "cbz",
+        plan_name="unprofiled-comic-plan",
+        writer_versions={"comicinfo_schema": "2.1"},
+    )
+
+    with pytest.raises(ApplyRefused, match="comicinfo_profile"):
+        ApplyEngine(fixture.config).apply(fixture.plan_id)
+
+    assert fixture.source.exists()
+    assert not fixture.destination.exists()
+
+
+def test_unknown_comicinfo_profile_is_refused_before_writes(tmp_path: Path) -> None:
+    fixture = make_apply_fixture(
+        tmp_path,
+        "cbz",
+        plan_name="unknown-comic-profile",
+        writer_versions={
+            "comicinfo_schema": "2.1",
+            "comicinfo_profile": "future-unknown-profile",
+        },
+    )
+
+    with pytest.raises(ApplyRefused, match="comicinfo_profile"):
+        ApplyEngine(fixture.config).apply(fixture.plan_id)
+
+    assert fixture.source.exists()
+    assert not fixture.destination.exists()
+
 def test_invalidated_plan_and_incompatible_writer_are_refused(tmp_path: Path) -> None:
     invalid = make_apply_fixture(tmp_path, "cbz", plan_name="invalid")
     with connect(invalid.config.database_path) as connection:  # type: ignore[arg-type]
@@ -821,7 +881,10 @@ def test_invalidated_plan_and_incompatible_writer_are_refused(tmp_path: Path) ->
         tmp_path,
         "cbz",
         plan_name="incompatible",
-        writer_versions={"comicinfo_schema": "99.0"},
+        writer_versions={
+            "comicinfo_schema": "99.0",
+            "comicinfo_profile": COMICINFO_PROFILE_IMAGEHASH,
+        },
     )
     with pytest.raises(StalePlan, match="capability mismatch"):
         ApplyEngine(incompatible.config).apply(incompatible.plan_id)

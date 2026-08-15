@@ -6,11 +6,12 @@ from pathlib import Path
 import pytest
 
 from kavita_ingest.canonical import CanonicalIdentity, ResolutionLevel
+from kavita_ingest.comicinfo import PLANNED_COMICINFO_PROFILE
 from kavita_ingest.config import AppConfig
 from kavita_ingest.db import connect, migrate
 from kavita_ingest.domain import MediaKind, SequenceNumber, SourceFormat, SourceRecord
 from kavita_ingest.planning import default_planning_policy
-from kavita_ingest.planning_service import PlanBuilder
+from kavita_ingest.planning_service import PlanBuilder, _writer_versions
 
 
 def _comic_identity(
@@ -41,6 +42,13 @@ def _builder(tmp_path: Path) -> tuple[PlanBuilder, sqlite3.Connection]:
     connection = connect(database)
     return PlanBuilder(connection, AppConfig(database_path=database)), connection
 
+
+
+def test_new_cbz_plans_freeze_explicit_comicinfo_compatibility_profile() -> None:
+    versions = _writer_versions(SourceFormat.CBZ)
+
+    assert versions["comicinfo_schema"] == "2.1"
+    assert versions["comicinfo_profile"] == PLANNED_COMICINFO_PROFILE
 
 def test_planner_routes_comic_pdf_to_pdf_safe_projection(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch

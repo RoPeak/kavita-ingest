@@ -25,6 +25,11 @@ from .apply_journal import (
 )
 from .archive_safety import ArchiveLimits, validate_inventory
 from .calibre import require_safe_calibre_executable
+from .comicinfo import (
+    COMICINFO_PROFILE_IMAGEHASH,
+    SUPPORTED_COMICINFO_PROFILES,
+    imagehash_snapshot,
+)
 from .config import AppConfig
 from .db import connect, migrate
 from .discovery import detect_signature
@@ -173,7 +178,11 @@ class WriterDispatcher:
             )
         if item.source_format == "cbz":
             return write_cbz_metadata(
-                item.source, destination, set_fields=set_fields, clear_fields=clear_fields
+                item.source,
+                destination,
+                set_fields=set_fields,
+                clear_fields=clear_fields,
+                comicinfo_profile=_comicinfo_profile(item),
             )
         if item.source_format == "cbr":
             return repack_cbr_to_cbz(
@@ -182,6 +191,7 @@ class WriterDispatcher:
                 set_fields=set_fields,
                 clear_fields=clear_fields,
                 limits=_archive_limits(item),
+                comicinfo_profile=_comicinfo_profile(item),
             )
         if item.source_format == "pdf":
             if clear_fields:
@@ -210,8 +220,20 @@ class WriterDispatcher:
         if item.source_format in {"cbz", "cbr"}:
             source = item.source
             if item.source_format == "cbr":
-                return _verify_repacked_cbr(source, candidate, set_fields, clear_fields)
-            return verify_cbz(source, candidate, set_fields, clear_fields)
+                return _verify_repacked_cbr(
+                    source,
+                    candidate,
+                    set_fields,
+                    clear_fields,
+                    comicinfo_profile=_comicinfo_profile(item),
+                )
+            return verify_cbz(
+                source,
+                candidate,
+                set_fields,
+                clear_fields,
+                comicinfo_profile=_comicinfo_profile(item),
+            )
         if item.source_format == "pdf":
             if clear_fields:
                 return VerificationResult(
@@ -675,8 +697,8 @@ class ApplyEngine:
         }
         required_keys = {
             "epub": {"ebook-meta", "opf_patcher"},
-            "cbz": {"comicinfo_schema"},
-            "cbr": {"comicinfo_schema", "rarfile", "unrar"},
+            "cbz": {"comicinfo_schema", "comicinfo_profile"},
+            "cbr": {"comicinfo_schema", "comicinfo_profile", "rarfile", "unrar"},
             "pdf": {"ebook-meta", "pikepdf"},
         }.get(item.source_format)
         if required_keys is None:
@@ -696,6 +718,14 @@ class ApplyEngine:
                     ) from exc
             elif key == "unrar":
                 actual = _tool_version("unrar", "UNRAR")
+            elif key == "comicinfo_profile":
+                actual = str(expected)
+                if actual not in SUPPORTED_COMICINFO_PROFILES:
+                    raise ApplyRefused(
+                        "writer capability mismatch for comicinfo_profile: "
+                        f"plan={expected}, supported={sorted(SUPPORTED_COMICINFO_PROFILES)}"
+                    )
+                continue
             elif key in supported:
                 actual = supported[key]
             else:
@@ -1313,9 +1343,17 @@ def _verify_repacked_cbr(
     candidate: Path,
     set_fields: dict[str, object],
     clear_fields: tuple[str, ...],
+    *,
+    comicinfo_profile: str,
 ) -> VerificationResult:
     errors: list[str] = []
-    result = verify_cbz(candidate, candidate, set_fields, clear_fields)
+    result = verify_cbz(
+        candidate,
+        candidate,
+        set_fields,
+        clear_fields,
+        comicinfo_profile=comicinfo_profile,
+    )
     errors.extend(result.errors)
     try:
         with rarfile.RarFile(source) as archive, zipfile.ZipFile(candidate) as target:
@@ -1333,9 +1371,52 @@ def _verify_repacked_cbr(
             }
             if list(target_payloads) != list(expected) or target_payloads != expected:
                 errors.append("CBR-to-CBZ payload bytes or ordering changed")
-    except (OSError, rarfile.Error, zipfile.BadZipFile) as exc:
+            if comicinfo_profile == COMICINFO_PROFILE_IMAGEHASH:
+                source_comicinfo = _rar_comicinfo_bytes(archive)
+                candidate_comicinfo = _zip_comicinfo_bytes(target)
+                source_hashes = imagehash_snapshot(source_comicinfo) if source_comicinfo else ()
+                candidate_hashes = (
+                    imagehash_snapshot(candidate_comicinfo) if candidate_comicinfo else ()
+                )
+                if candidate_hashes != source_hashes:
+                    errors.append("ComicInfo Page ImageHash attributes changed during CBR repack")
+    except (OSError, ValueError, rarfile.Error, zipfile.BadZipFile) as exc:
         errors.append(str(exc))
     return VerificationResult(not errors, result.checks + ("cbr_payload_inventory",), tuple(errors))
+
+
+def _comicinfo_profile(item: PreparedItem) -> str:
+    requirements = item.document.get("writer_versions", {})
+    profile = requirements.get("comicinfo_profile") if isinstance(requirements, dict) else None
+    if not isinstance(profile, str) or not profile:
+        raise ApplyRefused(
+            "plan lacks an explicit ComicInfo compatibility profile; regenerate and approve it"
+        )
+    return profile
+
+
+def _rar_comicinfo_bytes(archive: rarfile.RarFile) -> bytes | None:
+    matches = [
+        item
+        for item in archive.infolist()
+        if not item.is_dir() and Path(item.filename).name.casefold() == "comicinfo.xml"
+    ]
+    if not matches:
+        return None
+    if len(matches) != 1:
+        raise ValueError("source CBR contains multiple ComicInfo.xml entries")
+    return bytes(archive.read(matches[0]))
+
+
+def _zip_comicinfo_bytes(archive: zipfile.ZipFile) -> bytes | None:
+    matches = [
+        name for name in archive.namelist() if Path(name).name.casefold() == "comicinfo.xml"
+    ]
+    if not matches:
+        return None
+    if len(matches) != 1:
+        raise ValueError("candidate CBZ contains multiple ComicInfo.xml entries")
+    return archive.read(matches[0])
 
 
 def _output_evidence(path: Path, verified: VerificationResult) -> dict[str, Any]:
