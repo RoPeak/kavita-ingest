@@ -1456,3 +1456,75 @@ def test_collected_edition_rejects_issue_shaped_book_catalog_result() -> None:
         )
         is None
     )
+
+
+
+def test_collection_generation_records_structured_rejection_diagnostics() -> None:
+    local = LocalIdentity(
+        MediaKind.COMIC,
+        "collected-edition",
+        0.98,
+        "Volume 1",
+        series_title="Saga",
+        sequence=SequenceNumber.parse("1"),
+    )
+    values = [
+        NormalizedCandidate(
+            ProviderName.OPEN_LIBRARY,
+            "good",
+            RecordType.BOOK_EDITION,
+            MediaKind.BOOK,
+            "Saga Volume 1",
+        ),
+        NormalizedCandidate(
+            ProviderName.OPEN_LIBRARY,
+            "missing",
+            RecordType.BOOK_EDITION,
+            MediaKind.BOOK,
+            "Saga",
+        ),
+        NormalizedCandidate(
+            ProviderName.OPEN_LIBRARY,
+            "wrong-volume",
+            RecordType.BOOK_EDITION,
+            MediaKind.BOOK,
+            "Saga Volume 2",
+        ),
+        NormalizedCandidate(
+            ProviderName.OPEN_LIBRARY,
+            "issue-shaped",
+            RecordType.BOOK_EDITION,
+            MediaKind.BOOK,
+            "Saga Issue 1",
+        ),
+    ]
+
+    result = generate_candidates(local, (FakeProvider(ProviderName.OPEN_LIBRARY, values),))
+
+    assert result.candidates
+    attempt = next(item for item in result.attempts if item.outcome == "ok")
+    assert attempt.raw_count == 4
+    assert attempt.accepted_count == 1
+    assert dict(attempt.rejection_counts) == {
+        "collection_sequence_conflict": 1,
+        "collection_sequence_missing": 1,
+        "issue_shaped_book": 1,
+    }
+
+
+def test_collection_generation_records_intentional_comic_vine_skip() -> None:
+    local = LocalIdentity(
+        MediaKind.COMIC,
+        "collected-edition",
+        0.98,
+        "Volume 1",
+        series_title="Saga",
+        sequence=SequenceNumber.parse("1"),
+    )
+    provider = FakeProvider(ProviderName.COMIC_VINE, [])
+
+    result = generate_candidates(local, (provider,))
+
+    assert provider.operations == []
+    assert result.attempts[0].outcome == "skipped"
+    assert result.attempts[0].detail == "unsupported_collection_format"

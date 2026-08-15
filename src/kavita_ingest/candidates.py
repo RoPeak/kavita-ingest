@@ -1,11 +1,16 @@
 from __future__ import annotations
 
 import re
+from collections import Counter
 from dataclasses import dataclass, field
 from difflib import SequenceMatcher
 from typing import Self
 
-from .collection_candidates import adapt_collection_candidate, collection_number_word
+from .collection_candidates import (
+    adapt_collection_candidate,
+    collection_candidate_rejection_reason,
+    collection_number_word,
+)
 from .domain import MediaKind, SequenceNumber
 from .matching import LocalIdentity
 from .providers.base import Provider, ProviderError
@@ -20,11 +25,23 @@ from .providers.models import (
 
 
 @dataclass(frozen=True, slots=True)
+class ProviderAttempt:
+    provider: ProviderName
+    strategy: str
+    outcome: str
+    raw_count: int = 0
+    accepted_count: int = 0
+    rejection_counts: tuple[tuple[str, int], ...] = ()
+    detail: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class CandidateGeneration:
     candidates: tuple[NormalizedCandidate, ...]
     queries: tuple[str, ...]
     unavailable: tuple[str, ...]
     available: tuple[ProviderName, ...] = ()
+    attempts: tuple[ProviderAttempt, ...] = ()
 
 
 @dataclass(slots=True)
@@ -278,33 +295,77 @@ def generate_candidates(
     queries: list[str] = []
     unavailable: list[str] = []
     available: list[ProviderName] = []
+    attempts: list[ProviderAttempt] = []
     collected = local.kind is MediaKind.COMIC and local.subtype == "collected-edition"
 
     for provider in providers:
         status = provider.status()
         if local.kind is MediaKind.BOOK and status.provider is ProviderName.COMIC_VINE:
+            attempts.append(
+                ProviderAttempt(
+                    status.provider,
+                    "provider-routing",
+                    "skipped",
+                    detail="media_kind_not_supported",
+                )
+            )
             continue
         if (
             local.kind is MediaKind.COMIC
             and not collected
             and status.provider is not ProviderName.COMIC_VINE
         ):
+            attempts.append(
+                ProviderAttempt(
+                    status.provider,
+                    "provider-routing",
+                    "skipped",
+                    detail="media_kind_not_supported",
+                )
+            )
             continue
         if collected and status.provider is ProviderName.COMIC_VINE:
             # Comic Vine's public volume resource has no collection-format field.
             # Do not guess that a same-titled volume is a TPB/hardcover/omnibus.
+            attempts.append(
+                ProviderAttempt(
+                    status.provider,
+                    "collection-format",
+                    "skipped",
+                    detail="unsupported_collection_format",
+                )
+            )
             continue
         if not status.enabled and "cached" not in status.capabilities:
             unavailable.append(f"{status.provider.value}: {status.detail}")
+            attempts.append(
+                ProviderAttempt(
+                    status.provider,
+                    "provider-status",
+                    "unavailable",
+                    detail="provider_unavailable",
+                )
+            )
             continue
         try:
             for identifier in local.identifiers:
-                queries.append(f"{status.provider.value}:identifier:{identifier.scheme}")
+                strategy = f"identifier:{identifier.scheme}"
+                queries.append(f"{status.provider.value}:{strategy}")
                 values = provider.lookup_identifier(identifier)
-                _merge(
-                    output,
-                    _collection_candidates(local, values) if collected else values,
+                accepted, rejection_counts = _diagnostic_identity_candidates(
+                    local, values, collected=collected
                 )
+                attempts.append(
+                    ProviderAttempt(
+                        status.provider,
+                        strategy,
+                        "ok",
+                        raw_count=len(values),
+                        accepted_count=len(accepted),
+                        rejection_counts=rejection_counts,
+                    )
+                )
+                _merge(output, accepted if collected else values)
             provider_found = any(item.provider is status.provider for item in output.values())
             if provider_found:
                 available.append(status.provider)
@@ -312,10 +373,28 @@ def generate_candidates(
             if session is not None and isinstance(provider, ComicVineProvider):
                 values, comic_queries = session.search_comic_issue(local, provider)
                 queries.extend(comic_queries)
+                accepted, rejection_counts = _diagnostic_identity_candidates(
+                    local, values, collected=False
+                )
+                attempts.append(
+                    ProviderAttempt(
+                        status.provider,
+                        "comic-issue",
+                        "ok",
+                        raw_count=len(values),
+                        accepted_count=len(accepted),
+                        rejection_counts=rejection_counts,
+                    )
+                )
                 _merge(output, values)
             elif collected:
                 any_response, collection_errors = _search_collection_provider(
-                    local, provider, status.provider, output, queries
+                    local,
+                    provider,
+                    status.provider,
+                    output,
+                    queries,
+                    attempts,
                 )
                 provider_found = any(
                     item.provider is status.provider for item in output.values()
@@ -330,8 +409,22 @@ def generate_candidates(
                 continue
             else:
                 query = _structured_query(local)
-                queries.append(f"{status.provider.value}:structured")
+                strategy = "structured"
+                queries.append(f"{status.provider.value}:{strategy}")
                 values = provider.search(query)
+                accepted, rejection_counts = _diagnostic_identity_candidates(
+                    local, values, collected=False
+                )
+                attempts.append(
+                    ProviderAttempt(
+                        status.provider,
+                        strategy,
+                        "ok",
+                        raw_count=len(values),
+                        accepted_count=len(accepted),
+                        rejection_counts=rejection_counts,
+                    )
+                )
                 _merge(output, values)
             available.append(status.provider)
             provider_found = any(item.provider is status.provider for item in output.values())
@@ -344,16 +437,39 @@ def generate_candidates(
                     item_type=local.subtype,
                     relaxed=True,
                 )
-                queries.append(f"{status.provider.value}:relaxed")
+                strategy = "relaxed"
+                queries.append(f"{status.provider.value}:{strategy}")
                 values = provider.search(relaxed)
+                accepted, rejection_counts = _diagnostic_identity_candidates(
+                    local, values, collected=False
+                )
+                attempts.append(
+                    ProviderAttempt(
+                        status.provider,
+                        strategy,
+                        "ok",
+                        raw_count=len(values),
+                        accepted_count=len(accepted),
+                        rejection_counts=rejection_counts,
+                    )
+                )
                 _merge(output, values)
         except ProviderError as exc:
             unavailable.append(f"{status.provider.value}: {exc}")
+            attempts.append(
+                ProviderAttempt(
+                    status.provider,
+                    "provider-request",
+                    "error",
+                    detail="provider_failure",
+                )
+            )
     return CandidateGeneration(
         tuple(_identity_candidates(local, list(output.values()))),
         tuple(queries),
         tuple(unavailable),
-        tuple(available),
+        tuple(dict.fromkeys(available)),
+        tuple(attempts),
     )
 
 
@@ -363,55 +479,110 @@ def _search_collection_provider(
     provider_name: ProviderName,
     output: dict[str, NormalizedCandidate],
     queries: list[str],
+    attempts: list[ProviderAttempt],
 ) -> tuple[bool, list[str]]:
-    """Run collection query variants independently so one transient failure is not fatal.
-
-    Collection recall deliberately uses a bounded query ladder because catalogue
-    providers vary in how creator credits and volume numbers appear in titles. A
-    temporary HTTP failure for one spelling must not prevent later, more exact
-    variants from being attempted. The provider client already performs its own
-    per-request retry; this function isolates failures between distinct queries.
-    """
+    """Run collection query variants independently so one transient failure is not fatal."""
     any_response = False
     errors: list[str] = []
     for label, query in _collection_book_queries(local):
-        queries.append(f"{provider_name.value}:collection:{label}")
+        strategy = f"collection:{label}"
+        queries.append(f"{provider_name.value}:{strategy}")
         try:
             values = provider.search(query)
         except ProviderError as exc:
             errors.append(f"{label}: {exc}")
+            attempts.append(
+                ProviderAttempt(
+                    provider_name,
+                    strategy,
+                    "error",
+                    detail="provider_failure",
+                )
+            )
             continue
         any_response = True
-        _merge(output, _collection_candidates(local, values))
+        accepted, rejection_counts = _diagnostic_identity_candidates(
+            local, values, collected=True
+        )
+        attempts.append(
+            ProviderAttempt(
+                provider_name,
+                strategy,
+                "ok",
+                raw_count=len(values),
+                accepted_count=len(accepted),
+                rejection_counts=rejection_counts,
+            )
+        )
+        _merge(output, accepted)
 
     provider_found = any(item.provider is provider_name for item in output.values())
     if not provider_found:
         relaxed = _collection_relaxed_query(local)
-        queries.append(f"{provider_name.value}:collection:relaxed")
+        strategy = "collection:relaxed"
+        queries.append(f"{provider_name.value}:{strategy}")
         try:
             values = provider.search(relaxed)
         except ProviderError as exc:
             errors.append(f"relaxed: {exc}")
+            attempts.append(
+                ProviderAttempt(
+                    provider_name,
+                    strategy,
+                    "error",
+                    detail="provider_failure",
+                )
+            )
         else:
             any_response = True
-            _merge(output, _collection_candidates(local, values))
+            accepted, rejection_counts = _diagnostic_identity_candidates(
+                local, values, collected=True
+            )
+            attempts.append(
+                ProviderAttempt(
+                    provider_name,
+                    strategy,
+                    "ok",
+                    raw_count=len(values),
+                    accepted_count=len(accepted),
+                    rejection_counts=rejection_counts,
+                )
+            )
+            _merge(output, accepted)
     return any_response, errors
 
 
-def _collection_candidates(
-    local: LocalIdentity, values: list[NormalizedCandidate]
-) -> list[NormalizedCandidate]:
-    output: list[NormalizedCandidate] = []
-    for candidate in values:
-        adapted = adapt_collection_candidate(
-            candidate,
-            series_title=local.series_title,
-            sequence=local.sequence,
-            item_type=local.subtype,
-        )
-        if adapted is not None:
-            output.append(adapted)
-    return output
+def _diagnostic_identity_candidates(
+    local: LocalIdentity,
+    values: list[NormalizedCandidate],
+    *,
+    collected: bool,
+) -> tuple[list[NormalizedCandidate], tuple[tuple[str, int], ...]]:
+    if collected:
+        accepted: list[NormalizedCandidate] = []
+        reasons: Counter[str] = Counter()
+        for candidate in values:
+            reason = collection_candidate_rejection_reason(candidate, local.sequence)
+            if reason is not None:
+                reasons[reason] += 1
+                continue
+            adapted = adapt_collection_candidate(
+                candidate,
+                series_title=local.series_title,
+                sequence=local.sequence,
+                item_type=local.subtype,
+            )
+            if adapted is None:
+                reasons["wrong_record_type"] += 1
+            else:
+                accepted.append(adapted)
+        return accepted, tuple(sorted(reasons.items()))
+
+    accepted = _identity_candidates(local, values)
+    rejected = len(values) - len(accepted)
+    counts = (("wrong_record_type", rejected),) if rejected else ()
+    return accepted, counts
+
 
 
 def _collection_book_query(local: LocalIdentity) -> SearchQuery:

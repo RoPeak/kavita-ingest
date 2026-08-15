@@ -75,13 +75,19 @@ def interactive_review(
                 _displayed_scores(current)[0].rank if _displayed_scores(current) else None
             )
             decided = False
+            render_needed = True
             while True:
-                _show_item(output, current, selected_rank, compact=wizard_mode and not advanced)
+                if render_needed:
+                    _show_item(
+                        output, current, selected_rank, compact=wizard_mode and not advanced
+                    )
+                    render_needed = False
                 prompt = _action_prompt(
                     current,
                     audit,
                     wizard_mode=wizard_mode and not advanced,
                     review_fingerprints=review_fingerprints,
+                    exclude_fingerprints=decided_this_pass,
                 )
                 if wizard_mode and not advanced:
                     action = str(
@@ -94,16 +100,22 @@ def interactive_review(
                 if action == "M" and wizard_mode:
                     advanced = True
                     output.print("Advanced review actions are now available for this item.")
+                    render_needed = True
+                    continue
+                if action == "V" and selected is None:
+                    _show_candidate_diagnostics(output, current)
                     continue
                 if action == "V":
                     action = "X"
                 if action.isdigit() and any(score.rank == int(action) for score in displayed):
                     selected_rank = int(action)
+                    render_needed = True
                     continue
                 if action == "C" and displayed:
                     rank = typer.prompt("Candidate rank", type=int)
                     if any(score.rank == rank for score in displayed):
                         selected_rank = rank
+                        render_needed = True
                     else:
                         output.print(f"Candidate rank {rank} is not displayed.")
                     continue
@@ -178,6 +190,7 @@ def interactive_review(
                     )
                     displayed = _displayed_scores(current)
                     selected_rank = displayed[0].rank if displayed else None
+                    render_needed = True
                     continue
                 if action == "E":
                     field = typer.prompt("Canonical field")
@@ -322,14 +335,21 @@ def interactive_review(
                     decided_this_pass.add(current.scan.source.sha256)
                     decided = True
                     break
-                if action == "B":
+                if action in {"B", "Y"}:
+                    include = (
+                        _current_group_fingerprints(current, audit, review_fingerprints)
+                        if action == "B"
+                        else review_fingerprints
+                    )
                     eligible = _batch_items(
                         audit,
                         exclude_fingerprints=decided_this_pass,
-                        include_fingerprints=review_fingerprints,
+                        include_fingerprints=include,
                     )
+                    scope = "current series/group" if action == "B" else "entire pending ingest"
                     output.print(
-                        f"Eligible, non-conflicting, edition-resolved items: {len(eligible)}"
+                        f"Eligible, non-conflicting, edition-resolved items in {scope}: "
+                        f"{len(eligible)}"
                     )
                     hydrated_items: list[
                         tuple[SourceRecord, CandidateScore, Reconciliation, str]
@@ -389,6 +409,7 @@ def interactive_review(
                     return audit
                 if action == "N":
                     break
+                output.print("Choose one of the displayed actions.")
             if restart_requested:
                 break
             if not decided:
@@ -417,6 +438,34 @@ def _batch_items(
         )
     ]
     return batch_eligible_items(items)
+
+
+def _current_group_fingerprints(
+    current: ReviewItem,
+    audit: AuditResult,
+    review_fingerprints: frozenset[str] | None,
+) -> frozenset[str]:
+    local = current.local
+    if local.kind.value == "comic":
+        identity = run_group_key(local.series_title or local.title)
+    else:
+        identity = (local.series_title or local.title).casefold().strip()
+    key = (local.kind.value, local.subtype, identity)
+    selected = {
+        item.scan.source.sha256
+        for item in audit.items
+        if (
+            item.local.kind.value,
+            item.local.subtype,
+            run_group_key(item.local.series_title or item.local.title)
+            if item.local.kind.value == "comic"
+            else (item.local.series_title or item.local.title).casefold().strip(),
+        )
+        == key
+    }
+    if review_fingerprints is not None:
+        selected.intersection_update(review_fingerprints)
+    return frozenset(selected)
 
 
 def _hydrate_for_acceptance(
@@ -594,6 +643,51 @@ def _show_item(
         )
     if item.generation.unavailable:
         console.print("Unavailable: " + "; ".join(item.generation.unavailable))
+
+
+def _show_candidate_diagnostics(console: Console, item: ReviewItem) -> None:
+    attempts = item.generation.attempts
+    if not attempts:
+        console.print("No structured provider-attempt diagnostics were recorded for this audit.")
+        if item.generation.queries:
+            console.print("Strategies attempted: " + ", ".join(item.generation.queries))
+        if item.generation.unavailable:
+            console.print("Unavailable: " + "; ".join(item.generation.unavailable))
+        return
+
+    labels = {
+        "wrong_record_type": "wrong record type",
+        "issue_shaped_book": "issue-shaped catalogue record",
+        "collection_sequence_missing": "collection sequence missing",
+        "collection_sequence_conflict": "collection sequence conflict",
+        "unsupported_collection_format": "provider cannot prove collection format",
+        "media_kind_not_supported": "provider not used for this media kind",
+        "provider_unavailable": "provider unavailable",
+        "provider_failure": "provider request failed",
+    }
+    console.print("Candidate search diagnostics:")
+    for attempt in attempts:
+        if attempt.outcome == "ok":
+            line = (
+                f"  {attempt.provider.value} / {attempt.strategy}: "
+                f"{attempt.raw_count} returned, {attempt.accepted_count} usable"
+            )
+            if attempt.rejection_counts:
+                rejected = ", ".join(
+                    f"{count} {labels.get(reason, reason.replace('_', ' '))}"
+                    for reason, count in attempt.rejection_counts
+                )
+                line += f"; rejected: {rejected}"
+            console.print(line)
+            continue
+        reason = labels.get(
+            attempt.detail or "",
+            (attempt.detail or attempt.outcome).replace("_", " "),
+        )
+        console.print(
+            f"  {attempt.provider.value} / {attempt.strategy}: "
+            f"{attempt.outcome} ({reason})"
+        )
 
 
 def _collection_search_text(local: LocalIdentity) -> str:
@@ -778,13 +872,27 @@ def _action_prompt(
     *,
     wizard_mode: bool = False,
     review_fingerprints: frozenset[str] | None = None,
+    exclude_fingerprints: set[str] | None = None,
 ) -> str:
     displayed = _displayed_scores(item)
+    group_fingerprints = _current_group_fingerprints(item, audit, review_fingerprints)
+    group_batch = _batch_items(
+        audit,
+        exclude_fingerprints=exclude_fingerprints,
+        include_fingerprints=group_fingerprints,
+    )
+    all_batch = _batch_items(
+        audit,
+        exclude_fingerprints=exclude_fingerprints,
+        include_fingerprints=review_fingerprints,
+    )
     if wizard_mode:
         if displayed:
             actions = ["[V] View why"]
             if candidate_planning_context_ready(item.local, displayed[0].candidate):
                 actions.insert(0, "[A] Accept")
+            if len(group_batch) > 1:
+                actions.append(f"[B] Accept eligible group ({len(group_batch)})")
             if any(
                 score.candidate.run_id
                 and not candidate_planning_context_ready(item.local, score.candidate)
@@ -798,6 +906,7 @@ def _action_prompt(
         return "  ".join(
             [
                 "[S] Search",
+                "[V] Why no matches?",
                 "[I] Enter identity",
                 "[U] Unresolved",
                 "[N] Next",
@@ -806,8 +915,10 @@ def _action_prompt(
             ]
         )
     actions = ["[N]ext source"]
-    if len(_batch_items(audit, include_fingerprints=review_fingerprints)) > 0:
-        actions.append("[B]atch")
+    if group_batch:
+        actions.append(f"[B]atch current group ({len(group_batch)})")
+    if len(all_batch) > len(group_batch):
+        actions.append(f"[Y] batch entire pending ingest ({len(all_batch)})")
     if displayed:
         actions.insert(0, "[A]ccept")
         actions.extend(["[R]eject", "[C]hoose candidate"])
@@ -818,8 +929,11 @@ def _action_prompt(
         if item.local.kind.value == "book":
             actions.append("[W]ork-only")
         actions.append("e[X]plain")
+    else:
+        actions.append("[V]why-no-matches")
     actions.extend(["[U]nresolved", "[K]skip", "[Q]uit"])
     return " ".join(actions)
+
 
 
 def _low_confidence_message(score: CandidateScore) -> str:

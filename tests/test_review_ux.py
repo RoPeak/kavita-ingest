@@ -11,7 +11,7 @@ from rich.console import Console
 from typer.testing import CliRunner
 
 from kavita_ingest.audit import AuditResult, ReviewItem
-from kavita_ingest.candidates import CandidateGeneration
+from kavita_ingest.candidates import CandidateGeneration, ProviderAttempt
 from kavita_ingest.cli import app
 from kavita_ingest.config import AppConfig, MatchingSettings, ProviderSettings
 from kavita_ingest.db import connect, migrate
@@ -33,6 +33,7 @@ from kavita_ingest.review import (
     _candidate_writers,
     _choose_comic_vine_run,
     _collection_search_text,
+    _current_group_fingerprints,
     _hydrate_for_acceptance,
     _mark_incompatible_group_decisions,
     interactive_review,
@@ -752,3 +753,120 @@ def test_wizard_surfaces_group_run_and_hides_accept_when_run_year_is_missing(
     assert "[G] Choose run" in prompt
     assert "[A] Accept" not in prompt
     assert rescored[0].eligible is False
+
+
+
+def test_batch_defaults_to_current_series_group_and_keeps_global_explicit(tmp_path: Path) -> None:
+    base = _audit(tmp_path, eligible=True)
+    items = []
+    for index, series in enumerate(("Watchmen", "Watchmen", "Saga", "Saga"), start=1):
+        source = replace(
+            base.items[0].scan.source,
+            path=tmp_path / f"{series} {index:03}.cbz",
+            sha256=f"{index + 100:064x}",
+        )
+        local = replace(base.items[0].local, title=series, series_title=series)
+        candidate = replace(
+            base.items[0].scores[0].candidate,
+            title=series,
+            series_title=series,
+            provider_id=f"candidate-{index}",
+            run_id=f"run-{series}",
+        )
+        score = replace(base.items[0].scores[0], candidate=candidate)
+        items.append(
+            replace(
+                base.items[0],
+                scan=SimpleNamespace(source=source),
+                local=local,
+                generation=CandidateGeneration((candidate,), (), ()),
+                scores=(score,),
+                reconciliation=reconcile(local, score),
+            )
+        )
+    audit = replace(base, items=tuple(items), summary={"sources": 4})
+
+    current = items[0]
+    group = _current_group_fingerprints(current, audit, None)
+
+    assert group == frozenset(
+        {items[0].scan.source.sha256, items[1].scan.source.sha256}
+    )
+    prompt = _action_prompt(current, audit)
+    assert "[B]atch current group (2)" in prompt
+    assert "[Y] batch entire pending ingest (4)" in prompt
+
+
+def test_invalid_review_action_reprompts_without_redrawing_item(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database = tmp_path / "state.sqlite3"
+    migrate(database)
+    audit = _audit(tmp_path, eligible=True)
+    answers = iter(["Z", "U"])
+    monkeypatch.setattr(
+        "kavita_ingest.review.typer.prompt", lambda *args, **kwargs: next(answers)
+    )
+    output = io.StringIO()
+
+    interactive_review(
+        tmp_path,
+        AppConfig(database_path=database, providers=ProviderSettings(offline=True)),
+        Console(file=output, force_terminal=False),
+        audit_result=audit,
+        wizard_mode=True,
+    )
+
+    text = output.getvalue()
+    assert text.count("Path:") == 1
+    assert "Choose one of the displayed actions." in text
+
+
+def test_no_match_diagnostics_explain_provider_filtering(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database = tmp_path / "state.sqlite3"
+    migrate(database)
+    audit = _unusable_audit(tmp_path)
+    item = replace(
+        audit.items[0],
+        generation=replace(
+            audit.items[0].generation,
+            attempts=(
+                ProviderAttempt(
+                    ProviderName.OPEN_LIBRARY,
+                    "collection:structured",
+                    "ok",
+                    raw_count=3,
+                    accepted_count=0,
+                    rejection_counts=(("collection_sequence_conflict", 3),),
+                ),
+                ProviderAttempt(
+                    ProviderName.COMIC_VINE,
+                    "collection-format",
+                    "skipped",
+                    detail="unsupported_collection_format",
+                ),
+            ),
+        ),
+    )
+    audit = replace(audit, items=(item,))
+    answers = iter(["V", "U"])
+    monkeypatch.setattr(
+        "kavita_ingest.review.typer.prompt", lambda *args, **kwargs: next(answers)
+    )
+    output = io.StringIO()
+
+    interactive_review(
+        tmp_path,
+        AppConfig(database_path=database, providers=ProviderSettings(offline=True)),
+        Console(file=output, force_terminal=False),
+        audit_result=audit,
+        wizard_mode=True,
+    )
+
+    text = output.getvalue()
+    assert "[V] Why no matches?" in _action_prompt(item, audit, wizard_mode=True)
+    assert "3 returned, 0 usable" in text
+    assert "collection sequence" in text and "conflict" in text
+    assert "provider cannot prove collection" in text and "format" in text

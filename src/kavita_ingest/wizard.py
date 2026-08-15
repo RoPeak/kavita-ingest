@@ -585,7 +585,11 @@ def _resume(config: AppConfig, state: ResumeState, output: Console) -> str | Non
         engine = ApplyEngine(config)
         summary = engine.status(state.plan_id)
         if summary:
-            render_apply_summary(summary, output)
+            render_apply_summary(
+                summary,
+                output,
+                inspections=engine.inspect_recovery(state.plan_id),
+            )
         if not typer.confirm("Recover this interrupted ingest now?", default=False):
             return None
         recovered = engine.recover(state.plan_id)
@@ -594,7 +598,11 @@ def _resume(config: AppConfig, state: ResumeState, output: Console) -> str | Non
         if recovered.status.value == "complete":
             render_completed_apply(recovered, document, output, compact=True)
             return _finish_menu(document, output)
-        render_apply_summary(recovered, output)
+        render_apply_summary(
+            recovered,
+            output,
+            inspections=engine.inspect_recovery(state.plan_id),
+        )
         return None
     return _review_and_maybe_apply(config, _get_plan(config, state.plan_id), output)
 
@@ -606,7 +614,7 @@ def _review_and_maybe_apply(
         plan,
         output,
         technical_header=False,
-        pause_every=8 if output.is_terminal else None,
+        compact=True,
     )
     if plan.status == "draft":
         outcome = _plan_approval_menu(config, plan, output)
@@ -792,7 +800,11 @@ def _apply(
         output.print(f"Apply refused: {exc}")
         return None
     if summary.status.value != "complete":
-        render_apply_summary(summary, output)
+        render_apply_summary(
+            summary,
+            output,
+            inspections=ApplyEngine(config).inspect_recovery(plan_id),
+        )
         return summary
     _stage(output, 6, "Apply", "complete")
     _stage(output, 7, "Finish", "complete")

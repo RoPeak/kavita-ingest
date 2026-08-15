@@ -12,7 +12,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.text import Text
 
-from .apply_engine import ApplySummary
+from .apply_engine import ApplySummary, RecoveryInspection
 from .plan_store import StoredPlan
 
 
@@ -29,6 +29,7 @@ def render_plan_summary(
     *,
     technical_header: bool = True,
     pause_every: int | None = None,
+    compact: bool = False,
 ) -> dict[str, Any]:
     document = plan_document(plan)
     items = _display_items(document)
@@ -56,14 +57,17 @@ def render_plan_summary(
         console.print("Library root" + ("s" if len(roots) > 1 else "") + ":")
         for root in roots:
             console.print(Text(f"  {root}"))
-    for index, item in enumerate(items, start=1):
-        console.print(_item_panel(item))
-        if pause_every and index < len(items) and index % pause_every == 0:
-            typer.prompt(
-                f"Reviewed {index} of {len(items)} plan items. Press Enter to continue",
-                default="",
-                show_default=False,
-            )
+    if compact:
+        _render_compact_plan_items(items, console)
+    else:
+        for index, item in enumerate(items, start=1):
+            console.print(_item_panel(item))
+            if pause_every and index < len(items) and index % pause_every == 0:
+                typer.prompt(
+                    f"Reviewed {index} of {len(items)} plan items. Press Enter to continue",
+                    default="",
+                    show_default=False,
+                )
     policy = document.get("planning_policy", {})
     permissions = policy.get("permissions", {}) if isinstance(policy, dict) else {}
     if permissions:
@@ -133,11 +137,49 @@ def render_technical_plan(plan: StoredPlan, console: Console) -> None:
     console.print_json(plan.canonical_json.decode("utf-8"))
 
 
-def render_apply_summary(summary: ApplySummary, console: Console) -> None:
+def render_apply_summary(
+    summary: ApplySummary,
+    console: Console,
+    *,
+    inspections: tuple[RecoveryInspection, ...] = (),
+) -> None:
     console.print(f"Plan: {summary.plan_id}\nApply run: {summary.run_id}")
     console.print(f"Status: {summary.status.value}")
     for state, count in sorted(summary.counts.items()):
         console.print(f"  {state.replace('_', ' ').title():22} {count}")
+    attention = [item for item in inspections if item.state.value != "complete"]
+    if not attention:
+        return
+    console.print("\nItems needing attention:")
+    for item in attention:
+        source_name = Path(item.source).name
+        source_state = (
+            "present and verified"
+            if item.source_exists and item.source_matches
+            else "present but changed"
+            if item.source_exists and item.source_matches is False
+            else "present"
+            if item.source_exists
+            else "missing"
+        )
+        destination_state = (
+            "present and verified"
+            if item.destination_exists and item.destination_matches
+            else "present but unverified"
+            if item.destination_exists
+            else "not published"
+        )
+        console.print(
+            f"  {source_name}\n"
+            f"    State: {item.state.value.replace('_', ' ')}\n"
+            f"    Source: {source_state}; destination: {destination_state}"
+        )
+        if item.detail:
+            console.print(f"    Error: {_short_detail(item.detail)}")
+        console.print(f"    Next: {item.proposed_action}")
+    console.print(
+        "Use `ki apply-status <plan> --details` for the full durable recovery evidence."
+    )
 
 
 def render_completed_apply(
@@ -254,6 +296,35 @@ def render_human_status(
             ["", f"Invalidated plans    {invalidated}", f"Superseded plans     {superseded}"]
         )
     console.print(Text("\n".join(line for line in lines if line is not None)))
+
+
+def _render_compact_plan_items(items: list[dict[str, Any]], console: Console) -> None:
+    if not items:
+        return
+    grouped: Counter[str] = Counter()
+    singles: list[str] = []
+    for item in items:
+        destination = PurePosixPath(
+            str(_mapping(item.get("kavita_projection")).get("destination", "-"))
+        )
+        parent = destination.parent.as_posix() if len(destination.parts) > 1 else "."
+        grouped[parent] += 1
+        singles.append(_relative_destination(item))
+    console.print("Planned outputs:")
+    if len(items) <= 8:
+        for value in singles:
+            console.print(Text(f"  {value}"))
+        return
+    for parent, count in sorted(grouped.items()):
+        console.print(
+            Text(f"  {count} item{'s' if count != 1 else ''} -> {parent}/")
+        )
+    console.print("Use [V] View metadata/details to inspect every planned item.")
+
+
+def _short_detail(value: str, *, limit: int = 280) -> str:
+    normalized = " ".join(value.split())
+    return normalized if len(normalized) <= limit else normalized[: limit - 1] + "…"
 
 
 def _item_panel(item: dict[str, Any]) -> Panel:

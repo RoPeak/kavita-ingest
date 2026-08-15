@@ -85,6 +85,25 @@ _COLLECTION_SEQUENCE_RE = re.compile(
 )
 
 
+def collection_candidate_rejection_reason(
+    candidate: NormalizedCandidate,
+    sequence: SequenceNumber | None,
+) -> str | None:
+    """Return the stable reason a catalogue record cannot represent this collection."""
+    if _looks_like_single_issue(candidate.title):
+        return "issue_shaped_book"
+    if candidate.record_type not in {RecordType.COMIC_COLLECTION, RecordType.BOOK_EDITION}:
+        return "wrong_record_type"
+    if sequence is None:
+        return None
+    external = candidate.sequence or collection_sequence_hint(candidate.title, candidate.subtitle)
+    if external is None:
+        return "collection_sequence_missing"
+    if external.normalized != sequence.normalized:
+        return "collection_sequence_conflict"
+    return None
+
+
 def adapt_collection_candidate(
     candidate: NormalizedCandidate,
     *,
@@ -102,12 +121,10 @@ def adapt_collection_candidate(
     title must independently agree with that number rather than inheriting it
     silently from local evidence.
     """
-    if _looks_like_single_issue(candidate.title):
+    if collection_candidate_rejection_reason(candidate, sequence) is not None:
         return None
 
     resolved_sequence = _resolve_collection_sequence(candidate, sequence)
-    if sequence is not None and resolved_sequence is None:
-        return None
 
     if candidate.record_type is RecordType.COMIC_COLLECTION:
         sequence_source = _collection_sequence_source(candidate, sequence)

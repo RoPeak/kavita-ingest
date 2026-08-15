@@ -8,11 +8,12 @@ from pathlib import Path
 import pytest
 from rich.console import Console
 
-from kavita_ingest.apply_engine import ApplySummary
-from kavita_ingest.apply_journal import RunState
+from kavita_ingest.apply_engine import ApplySummary, RecoveryInspection
+from kavita_ingest.apply_journal import ItemState, RunState
 from kavita_ingest.db import connect
 from kavita_ingest.plan_store import PlanStore, StoredPlan
 from kavita_ingest.presentation import (
+    render_apply_summary,
     render_completed_apply,
     render_plan_details,
     render_plan_summary,
@@ -145,3 +146,56 @@ def test_compact_completed_apply_summarizes_large_batch() -> None:
     assert "13 items -> Watchmen (1986)/" in text
     assert "Use [D] Details to list every published path." in text
     assert "Watchmen (1986) - 013.pdf" not in text
+
+
+
+def test_compact_plan_preview_groups_large_ingest_without_item_wall() -> None:
+    plan = _display_plan_with_sequences(list(range(1, 14)))
+    stream = io.StringIO()
+
+    render_plan_summary(
+        plan,
+        Console(file=stream, width=100, force_terminal=False),
+        technical_header=False,
+        compact=True,
+    )
+
+    text = stream.getvalue()
+    assert "13 items -> Watchmen (1986)/" in text
+    assert "Use [V] View metadata/details" in text
+    assert "Planned item" not in text
+    assert "Watchmen (1986) - 013.pdf" not in text
+
+
+def test_failed_apply_summary_surfaces_item_error_and_safe_next_action() -> None:
+    summary = ApplySummary("run-1", 22, RunState.RECOVERY_REQUIRED, {"complete": 33, "failed": 2})
+    inspection = RecoveryInspection(
+        item_id="source-163",
+        state=ItemState.FAILED,
+        source="/incoming/Oblivion Song 001.cbr",
+        source_exists=True,
+        source_matches=True,
+        staging="/library/.stage/output.cbz",
+        staging_matches=None,
+        destination="/library/Oblivion Song/001.cbz",
+        destination_exists=False,
+        destination_matches=None,
+        proposed_action="retry staging only if source and destination preconditions still hold",
+        manual_intervention=False,
+        detail="ComicInfoError: " + "ImageHash is not allowed. " * 30,
+    )
+    stream = io.StringIO()
+
+    render_apply_summary(
+        summary,
+        Console(file=stream, width=100, force_terminal=False),
+        inspections=(inspection,),
+    )
+
+    text = stream.getvalue()
+    assert "Oblivion Song 001.cbr" in text
+    assert "Source: present and verified; destination: not published" in text
+    assert "ComicInfoError" in text
+    assert "retry staging only" in text
+    assert "ki apply-status <plan> --details" in text
+    assert len(max((line for line in text.splitlines() if "Error:" in line), key=len)) < 340
