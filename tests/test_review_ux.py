@@ -170,11 +170,70 @@ def test_declined_low_confidence_acceptance_saves_nothing_and_summarizes(
     assert "[W]ork-only" not in _action_prompt(audit.items[0], audit)
 
 
+def test_review_filter_only_presents_requested_pending_sources(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database = tmp_path / "state.sqlite3"
+    migrate(database)
+    base = _audit(tmp_path, eligible=True)
+    items = []
+    for index in range(3):
+        source = replace(
+            base.items[0].scan.source,
+            path=tmp_path / f"Watchmen {index + 1:03}.cbz",
+            sha256=f"{index + 1:064x}",
+        )
+        items.append(replace(base.items[0], scan=SimpleNamespace(source=source)))
+    audit = replace(base, items=tuple(items), summary={"sources": 3})
+    pending = frozenset({items[2].scan.source.sha256})
+    monkeypatch.setattr(
+        "kavita_ingest.review.typer.prompt", lambda *args, **kwargs: "U"
+    )
+    output = io.StringIO()
+
+    interactive_review(
+        tmp_path,
+        AppConfig(database_path=database, providers=ProviderSettings(offline=True)),
+        Console(file=output, force_terminal=False),
+        audit_result=audit,
+        wizard_mode=True,
+        review_fingerprints=pending,
+    )
+
+    text = output.getvalue()
+    assert "Watchmen 003.cbz" in text
+    assert "Watchmen 001.cbz" not in text
+    assert "Watchmen 002.cbz" not in text
+    with connect(database) as connection:
+        decisions = DecisionRepository(connection)
+        assert decisions.latest(items[0].scan.source) is None
+        assert decisions.latest(items[1].scan.source) is None
+        latest = decisions.latest(items[2].scan.source)
+        assert latest is not None and latest.decision_type is DecisionType.UNRESOLVED
+
+
+def test_batch_scope_can_be_limited_to_pending_review_fingerprints(tmp_path: Path) -> None:
+    base = _audit(tmp_path, eligible=True)
+    items = []
+    for index in range(3):
+        source = replace(
+            base.items[0].scan.source,
+            path=tmp_path / f"Watchmen {index + 1:03}.cbz",
+            sha256=f"{index + 10:064x}",
+        )
+        items.append(replace(base.items[0], scan=SimpleNamespace(source=source)))
+    audit = replace(base, items=tuple(items), summary={"sources": 3})
+    pending = frozenset({items[1].scan.source.sha256})
+
+    eligible = _batch_items(audit, include_fingerprints=pending)
+
+    assert [item[0].sha256 for item in eligible] == [items[1].scan.source.sha256]
+
+
 def test_batch_items_and_prompt_use_same_eligible_subset(tmp_path: Path) -> None:
     audit = _audit(tmp_path, eligible=True)
     assert len(_batch_items(audit)) == 1
     assert "[B]atch" in _action_prompt(audit.items[0], audit)
-
 
 
 def test_batch_items_can_exclude_source_already_decided_this_pass(tmp_path: Path) -> None:
@@ -367,10 +426,6 @@ class _DetailProvider:
     def lookup_identifier(self, identifier: object) -> list[NormalizedCandidate]:
         del identifier
         return []
-
-
-
-
 
 
 def test_collection_search_text_combines_series_and_collection_subtitle() -> None:

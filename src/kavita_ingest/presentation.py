@@ -212,15 +212,24 @@ def render_human_status(
     )
     lines = ["Kavita Ingest", ""]
     if last:
+        last_status = str(last["status"])
+        recovery_statuses = {"preflighting", "running", "recovery_required"}
+        if last_status == "complete":
+            ingest_summary = (
+                f"✓ {completed_items} item{'s' if completed_items != 1 else ''} completed"
+            )
+            recovery_summary = "✓ No recovery required"
+        elif last_status in recovery_statuses:
+            ingest_summary = f"! Recovery needed ({last_status.replace('_', ' ')})"
+            recovery_summary = ""
+        else:
+            ingest_summary = f"! Last ingest closed ({last_status.replace('_', ' ')})"
+            recovery_summary = "✓ No recovery required"
         lines.extend(
             [
                 "Last ingest",
-                (
-                    f"✓ {completed_items} item{'s' if completed_items != 1 else ''} completed"
-                    if last["status"] == "complete"
-                    else f"! Recovery needed ({last['status'].replace('_', ' ')})"
-                ),
-                "✓ No recovery required" if last["status"] == "complete" else "",
+                ingest_summary,
+                recovery_summary,
                 "",
             ]
         )

@@ -42,6 +42,40 @@ class DecisionRecord:
     batch_id: str | None
 
 
+REVIEW_COMPLETE_DECISION_TYPES = frozenset(
+    {
+        DecisionType.ACCEPTED,
+        DecisionType.WORK_ACCEPTED,
+        DecisionType.MANUAL_IDENTITY,
+        DecisionType.REJECTED,
+        DecisionType.UNRESOLVED,
+        DecisionType.SKIPPED,
+    }
+)
+
+
+def decision_needs_review(
+    decision: DecisionRecord | None,
+    source_evidence_hash: str,
+    *,
+    required_newer_than: int | None = None,
+    require_newer: bool = False,
+) -> bool:
+    """Return whether current source evidence still needs an explicit review outcome."""
+    if decision is None:
+        return True
+    if decision.source_evidence_hash != source_evidence_hash:
+        return True
+    if decision.decision_type not in REVIEW_COMPLETE_DECISION_TYPES:
+        return True
+    if (
+        decision.decision_type is DecisionType.UNRESOLVED
+        and decision.payload.get("reason") == "run_group_changed"
+    ):
+        return True
+    return require_newer and decision.id == required_newer_than
+
+
 class DecisionRepository:
     def __init__(self, connection: sqlite3.Connection) -> None:
         self.connection = connection

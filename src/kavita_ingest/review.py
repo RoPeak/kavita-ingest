@@ -19,6 +19,7 @@ from .decisions import (
     add_manual_override,
     batch_accept,
     batch_eligible_items,
+    decision_needs_review,
 )
 from .domain import SourceRecord
 from .hydration import HydrationResult, hydrate_candidate
@@ -45,6 +46,7 @@ def interactive_review(
     *,
     audit_result: AuditResult | None = None,
     wizard_mode: bool = False,
+    review_fingerprints: frozenset[str] | None = None,
 ) -> AuditResult:
     output = console or Console()
     audit = audit_result or run_audit(root, config, mode="review")
@@ -61,6 +63,11 @@ def interactive_review(
     restart_requested = False
     try:
         for item in audit.items:
+            if (
+                review_fingerprints is not None
+                and item.scan.source.sha256 not in review_fingerprints
+            ):
+                continue
             current = item
             source_evidence_hash = item.local.evidence_hash()
             advanced = not wizard_mode
@@ -70,7 +77,12 @@ def interactive_review(
             decided = False
             while True:
                 _show_item(output, current, selected_rank, compact=wizard_mode and not advanced)
-                prompt = _action_prompt(current, audit, wizard_mode=wizard_mode and not advanced)
+                prompt = _action_prompt(
+                    current,
+                    audit,
+                    wizard_mode=wizard_mode and not advanced,
+                    review_fingerprints=review_fingerprints,
+                )
                 if wizard_mode and not advanced:
                     action = str(
                         typer.prompt(prompt, default=None, show_default=False)
@@ -311,7 +323,11 @@ def interactive_review(
                     decided = True
                     break
                 if action == "B":
-                    eligible = _batch_items(audit, exclude_fingerprints=decided_this_pass)
+                    eligible = _batch_items(
+                        audit,
+                        exclude_fingerprints=decided_this_pass,
+                        include_fingerprints=review_fingerprints,
+                    )
                     output.print(
                         f"Eligible, non-conflicting, edition-resolved items: {len(eligible)}"
                     )
@@ -387,12 +403,18 @@ def _batch_items(
     audit: AuditResult,
     *,
     exclude_fingerprints: set[str] | None = None,
+    include_fingerprints: frozenset[str] | None = None,
 ) -> list[tuple[SourceRecord, CandidateScore, Reconciliation, str]]:
     excluded = exclude_fingerprints or set()
     items = [
         (item.scan.source, item.scores[0], item.reconciliation, item.local.evidence_hash())
         for item in audit.items
-        if item.scores and item.scan.source.sha256 not in excluded
+        if item.scores
+        and item.scan.source.sha256 not in excluded
+        and (
+            include_fingerprints is None
+            or item.scan.source.sha256 in include_fingerprints
+        )
     ]
     return batch_eligible_items(items)
 
@@ -722,7 +744,11 @@ def _mark_incompatible_group_decisions(
 
 
 def _action_prompt(
-    item: ReviewItem, audit: AuditResult, *, wizard_mode: bool = False
+    item: ReviewItem,
+    audit: AuditResult,
+    *,
+    wizard_mode: bool = False,
+    review_fingerprints: frozenset[str] | None = None,
 ) -> str:
     displayed = _displayed_scores(item)
     if wizard_mode:
@@ -751,7 +777,7 @@ def _action_prompt(
             ]
         )
     actions = ["[N]ext source"]
-    if len(_batch_items(audit)) > 0:
+    if len(_batch_items(audit, include_fingerprints=review_fingerprints)) > 0:
         actions.append("[B]atch")
     if displayed:
         actions.insert(0, "[A]ccept")
@@ -823,8 +849,8 @@ def _persisted_review_counts(
         decision = repository.latest(item.scan.source)
         key = (
             mapping.get(decision.decision_type)
-            if decision is not None
-            and decision.source_evidence_hash == item.local.evidence_hash()
+            if not decision_needs_review(decision, item.local.evidence_hash())
+            and decision is not None
             else None
         )
         if key is None:

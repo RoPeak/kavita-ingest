@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import json
 import zipfile
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -26,6 +27,8 @@ from kavita_ingest.decisions import (
 from kavita_ingest.domain import SourceRecord
 from kavita_ingest.plan_store import PlanStore
 from kavita_ingest.planning_service import PlanBuilder
+from kavita_ingest.review import _mark_incompatible_group_decisions
+from kavita_ingest.run_groups import run_group_key
 from kavita_ingest.scanner import scan
 from kavita_ingest.wizard import (
     DiscoverySelection,
@@ -162,6 +165,14 @@ def test_wizard_can_abandon_recoverable_run_without_touching_media(
     assert not fixture.destination.exists()
 
     assert detect_resume_state(fixture.config) is None
+
+    status = CliRunner().invoke(
+        app, ["status", "--config", str(_config(tmp_path, fixture))]
+    )
+    assert status.exit_code == 0, status.output
+    assert "Recovery needed" not in status.output
+    assert "Last ingest closed (failed)" in status.output
+    assert "No recovery required" in status.output
 
 
 def test_resume_detection_ignores_invalidated_plan(tmp_path: Path) -> None:
@@ -871,6 +882,107 @@ def test_review_completion_gate_blocks_missing_but_allows_explicit_unresolved(
         )
     assert _incomplete_review_items(settings, audit) == ()
 
+
+def test_review_resume_filters_53_items_down_to_18_pending(tmp_path: Path) -> None:
+    from tests.test_review_ux import _audit
+
+    database = tmp_path / "state.sqlite3"
+    migrate(database)
+    base = _audit(tmp_path, eligible=True)
+    items = []
+    for index in range(53):
+        source = replace(
+            base.items[0].scan.source,
+            path=tmp_path / f"Issue {index + 1:03}.cbz",
+            sha256=f"{index + 100:064x}",
+        )
+        items.append(replace(base.items[0], scan=SimpleNamespace(source=source)))
+    audit = replace(base, items=tuple(items), summary={"sources": 53})
+    settings = AppConfig(database_path=database)
+
+    with connect(database) as connection:
+        repository = DecisionRepository(connection)
+        for item in items[:35]:
+            repository.add(
+                item.scan.source,
+                DecisionType.SKIPPED,
+                item.local.evidence_hash(),
+                payload={"explicit": True},
+            )
+
+    incomplete = _incomplete_review_items(settings, audit)
+
+    assert len(incomplete) == 18
+    assert [item.source.sha256 for item in incomplete] == [
+        item.scan.source.sha256 for item in items[35:]
+    ]
+
+
+def test_changed_run_group_reopens_only_incompatible_current_decision(
+    tmp_path: Path,
+) -> None:
+    from tests.test_review_ux import _audit
+
+    database = tmp_path / "state.sqlite3"
+    migrate(database)
+    base = _audit(tmp_path, eligible=True)
+    first_source = replace(
+        base.items[0].scan.source,
+        path=tmp_path / "Watchmen 001.cbz",
+        sha256="1" * 64,
+    )
+    second_source = replace(
+        base.items[0].scan.source,
+        path=tmp_path / "Watchmen 002.cbz",
+        sha256="2" * 64,
+    )
+    other_source = replace(
+        base.items[0].scan.source,
+        path=tmp_path / "Other 001.cbz",
+        sha256="3" * 64,
+    )
+    first = replace(base.items[0], scan=SimpleNamespace(source=first_source))
+    second = replace(base.items[0], scan=SimpleNamespace(source=second_source))
+    other_local = replace(base.items[0].local, title="Other", series_title="Other")
+    other = replace(
+        base.items[0],
+        scan=SimpleNamespace(source=other_source),
+        local=other_local,
+    )
+    audit = replace(base, items=(first, second, other), summary={"sources": 3})
+    selected_run_id = "4050-1987"
+
+    with connect(database) as connection:
+        repository = DecisionRepository(connection)
+        repository.add(
+            first.scan.source,
+            DecisionType.ACCEPTED,
+            first.local.evidence_hash(),
+            payload={"candidate": first.scores[0].candidate.to_dict()},
+        )
+        selected_candidate = replace(first.scores[0].candidate, run_id=selected_run_id)
+        repository.add(
+            second.scan.source,
+            DecisionType.ACCEPTED,
+            second.local.evidence_hash(),
+            payload={"candidate": selected_candidate.to_dict()},
+        )
+        repository.add(
+            other.scan.source,
+            DecisionType.ACCEPTED,
+            other.local.evidence_hash(),
+            payload={"candidate": other.scores[0].candidate.to_dict()},
+        )
+        assert (
+            _mark_incompatible_group_decisions(
+                repository, audit, run_group_key("Watchmen"), selected_run_id
+            )
+            == 1
+        )
+
+    incomplete = _incomplete_review_items(AppConfig(database_path=database), audit)
+
+    assert [item.source.sha256 for item in incomplete] == [first.scan.source.sha256]
 
 
 def test_select_root_reprompts_after_nonexistent_directory(

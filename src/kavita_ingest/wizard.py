@@ -19,7 +19,7 @@ from .audit import AuditResult, run_audit
 from .completed_sources import CompletedSourceAssessment, assess_completed_sources
 from .config import AppConfig
 from .db import connect, migrate
-from .decisions import DecisionRepository, DecisionType
+from .decisions import DecisionRepository, decision_needs_review
 from .doctor import Check, checks
 from .paths import AppPaths
 from .plan_store import PlanStore, StoredPlan
@@ -323,8 +323,21 @@ def _run_new(
     _stage(output, 3, "Review", "current")
     decision_heads = _decision_heads(config, audit) if selection.reprocess else {}
     while True:
+        incomplete = _incomplete_review_items(
+            config, audit, required_newer_than=decision_heads
+        )
+        if not incomplete:
+            break
+        review_fingerprints = frozenset(item.source.sha256 for item in incomplete)
         run_group_heads = _run_group_heads(config, audit)
-        interactive_review(root, config, output, audit_result=audit, wizard_mode=True)
+        interactive_review(
+            root,
+            config,
+            output,
+            audit_result=audit,
+            wizard_mode=True,
+            review_fingerprints=review_fingerprints,
+        )
         if _run_group_heads(config, audit) != run_group_heads:
             output.print("\nRun choice changed; refreshing this review inside the selected run.\n")
             audit = run_audit(root, config, mode="wizard", scans_override=selection.scans)
@@ -476,25 +489,16 @@ def _incomplete_review_items(
     connection = _connection(config)
     try:
         decisions = DecisionRepository(connection)
-        complete = {
-            DecisionType.ACCEPTED,
-            DecisionType.WORK_ACCEPTED,
-            DecisionType.MANUAL_IDENTITY,
-            DecisionType.REJECTED,
-            DecisionType.UNRESOLVED,
-            DecisionType.SKIPPED,
-        }
         incomplete = []
+        baseline = required_newer_than or {}
         for item in audit.items:
-            decision = decisions.latest(item.scan.source)
-            previous = (required_newer_than or {}).get(item.scan.source.sha256)
-            if (
-                decision is None
-                or decision.decision_type not in complete
-                or (
-                    item.scan.source.sha256 in (required_newer_than or {})
-                    and decision.id == previous
-                )
+            source = item.scan.source
+            decision = decisions.latest(source)
+            if decision_needs_review(
+                decision,
+                item.local.evidence_hash(),
+                required_newer_than=baseline.get(source.sha256),
+                require_newer=source.sha256 in baseline,
             ):
                 incomplete.append(item.scan)
         return tuple(incomplete)
