@@ -8,7 +8,7 @@ from rich.console import Console
 from rich.table import Table
 
 from .audit import AuditResult, ReviewItem, run_audit
-from .candidates import generate_candidates
+from .candidates import comic_run_context, generate_candidates
 from .config import AppConfig
 from .db import connect
 from .decisions import (
@@ -209,8 +209,8 @@ def interactive_review(
                     run = _choose_comic_vine_run(current, providers, output)
                     if run is None:
                         continue
-                    assert run.series_title is not None
-                    group_key = run_group_key(run.series_title)
+                    assert current.local.series_title is not None
+                    group_key = run_group_key(current.local.series_title)
                     if typer.confirm(
                         f"Use run {run.title} ({run.run_start_year}) "
                         "for this local series group?"
@@ -658,6 +658,11 @@ def _choose_comic_vine_run(
     if provider is None:
         console.print("Comic Vine is unavailable for run selection.")
         return None
+    candidate_runs = {
+        run.provider_id: run
+        for score in item.scores
+        if (run := comic_run_context(score.candidate)) is not None
+    }
     try:
         runs = provider.search_runs(
             SearchQuery(
@@ -668,18 +673,42 @@ def _choose_comic_vine_run(
             )
         )
     except ProviderError as exc:
-        console.print(f"Comic Vine run lookup failed: {exc}")
-        return None
+        if not candidate_runs:
+            console.print(f"Comic Vine run lookup failed: {exc}")
+            return None
+        console.print(
+            f"Comic Vine run lookup failed ({exc}); using run context already "
+            "present on issue candidates."
+        )
+        runs = []
 
     key = run_group_key(series)
-    matching = [
-        run
-        for run in runs
-        if run.record_type is RecordType.COMIC_RUN
-        and run.series_title
-        and run_group_key(run.series_title) == key
-        and run.run_start_year is not None
-    ]
+    candidate_run_ids = set(candidate_runs)
+    matching_by_id: dict[str, NormalizedCandidate] = {}
+    for run in runs:
+        if run.record_type is not RecordType.COMIC_RUN or run.run_start_year is None:
+            continue
+        if run.provider_id in candidate_run_ids or (
+            run.series_title and run_group_key(run.series_title) == key
+        ):
+            # Prefer the exact run-search record when available; candidate-carried
+            # context remains the fallback for polluted local aliases.
+            matching_by_id[run.provider_id] = run
+    for provider_id, run in candidate_runs.items():
+        if provider_id in matching_by_id:
+            continue
+        if run.series_title and run_group_key(run.series_title) != key:
+            matching_by_id[provider_id] = run
+    if not matching_by_id:
+        matching_by_id.update(candidate_runs)
+    matching = sorted(
+        matching_by_id.values(),
+        key=lambda run: (
+            run.series_title or run.title,
+            run.run_start_year or 0,
+            run.provider_id,
+        ),
+    )
     if not matching:
         console.print(
             "No Comic Vine run with an explicit start year is available for this series."

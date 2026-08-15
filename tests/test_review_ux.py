@@ -491,6 +491,36 @@ class _RunLookupClient:
         )
 
 
+class _PollutedAliasRunLookupClient:
+    def get(
+        self,
+        operation: str,
+        url: str,
+        public_params: dict[str, str],
+        secret_params: dict[str, str],
+        bucket: str,
+        normalize,  # type: ignore[no-untyped-def]
+    ) -> list[NormalizedCandidate]:
+        del url, public_params, secret_params, bucket
+        assert operation == "search-runs"
+        return normalize(
+            {
+                "results": [
+                    {
+                        "id": 109114,
+                        "resource_type": "volume",
+                        "api_detail_url": (
+                            "https://comicvine.gamespot.com/api/volume/4050-109114/"
+                        ),
+                        "name": "Oblivion Song",
+                        "start_year": 2018,
+                        "publisher": {"name": "Image"},
+                    }
+                ]
+            }
+        )
+
+
 def test_group_run_chooser_uses_real_run_records_and_excludes_unknown_year(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -513,6 +543,98 @@ def test_group_run_chooser_uses_real_run_records_and_excludes_unknown_year(
     assert "4050-53871" not in text
     assert "4050-3622" in text
     assert "4050-29927" in text
+
+
+def test_group_run_chooser_keeps_candidate_carried_run_for_polluted_local_alias(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    base = _audit(tmp_path)
+    item = base.items[0]
+    local = replace(
+        item.local,
+        title="Chapter One",
+        series_title="Oblivion Song By Kirkman & De Felici",
+    )
+    issue = NormalizedCandidate(
+        ProviderName.COMIC_VINE,
+        "4000-700001",
+        RecordType.COMIC_ISSUE,
+        MediaKind.COMIC,
+        "Chapter One",
+        series_title="Oblivion Song",
+        sequence=SequenceNumber.parse("1"),
+        run_start_year=2018,
+        publisher="Image",
+        run_id="4050-109114",
+    )
+    scores = tuple(score_candidates(local, [issue], MatchingSettings()))
+    polluted = replace(
+        item,
+        local=local,
+        generation=CandidateGeneration((issue,), (), ()),
+        scores=scores,
+        reconciliation=reconcile(local, scores[0]),
+    )
+    provider = ComicVineProvider(
+        _PollutedAliasRunLookupClient(), "secret"
+    )  # type: ignore[arg-type]
+    monkeypatch.setattr("kavita_ingest.review.typer.prompt", lambda *args, **kwargs: 1)
+    output = io.StringIO()
+
+    selected = _choose_comic_vine_run(
+        polluted,
+        (provider,),
+        Console(file=output, force_terminal=False),
+    )
+
+    assert selected is not None
+    assert selected.provider_id == "4050-109114"
+    assert selected.series_title == "Oblivion Song"
+    assert selected.run_start_year == 2018
+    assert "4050-109114" in output.getvalue()
+
+
+def test_group_run_choice_is_persisted_under_local_not_provider_series_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database = tmp_path / "state.sqlite3"
+    migrate(database)
+    base = _audit(tmp_path)
+    item = base.items[0]
+    local = replace(item.local, series_title="Oblivion Song By Kirkman & De Felici")
+    audit = replace(base, items=(replace(item, local=local),))
+    selected = NormalizedCandidate(
+        ProviderName.COMIC_VINE,
+        "4050-109114",
+        RecordType.COMIC_RUN,
+        MediaKind.COMIC,
+        "Oblivion Song",
+        series_title="Oblivion Song",
+        run_start_year=2018,
+        publisher="Image",
+        run_id="4050-109114",
+    )
+    monkeypatch.setattr("kavita_ingest.review._choose_comic_vine_run", lambda *args: selected)
+    monkeypatch.setattr("kavita_ingest.review.typer.prompt", lambda *args, **kwargs: "G")
+    monkeypatch.setattr("kavita_ingest.review.typer.confirm", lambda *args, **kwargs: True)
+
+    interactive_review(
+        tmp_path,
+        AppConfig(database_path=database, providers=ProviderSettings(offline=True)),
+        Console(file=io.StringIO(), force_terminal=False),
+        audit_result=audit,
+    )
+
+    with connect(database) as connection:
+        rows = [
+            tuple(row)
+            for row in connection.execute(
+                "SELECT group_key, provider_run_id FROM run_group_decisions ORDER BY id"
+            ).fetchall()
+        ]
+    assert rows == [
+        (run_group_key("Oblivion Song By Kirkman & De Felici"), "4050-109114")
+    ]
 
 
 def test_run_group_change_append_only_marks_incompatible_issue_decision_unresolved(

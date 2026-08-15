@@ -182,6 +182,47 @@ class RunReuseClient:
         return normalize(raw)
 
 
+class AliasRunClient:
+    def __init__(self) -> None:
+        self.operations: list[str] = []
+
+    def get(
+        self,
+        operation: str,
+        url: str,
+        public_params: dict[str, str],
+        secret_params: dict[str, str],
+        bucket: str,
+        normalize: Callable[[object], list[NormalizedCandidate]],
+    ) -> list[NormalizedCandidate]:
+        del url, secret_params, bucket
+        self.operations.append(operation)
+        if operation == "search-runs":
+            raise AssertionError("known canonical run should be reused across the local alias")
+        assert operation == "issues-in-run"
+        assert public_params["filter"].startswith("volume:109114,")
+        number = public_params["filter"].rsplit(":", 1)[-1]
+        return normalize(
+            {
+                "results": [
+                    {
+                        **_comic_vine_record("issue", 700001, "Chapter One"),
+                        "issue_number": number,
+                        "cover_date": "2018-03-01",
+                        "volume": {
+                            "id": 109114,
+                            "name": "Oblivion Song",
+                            "start_year": 2018,
+                            "api_detail_url": (
+                                "https://comicvine.gamespot.com/api/volume/4050-109114/"
+                            ),
+                        },
+                    }
+                ]
+            }
+        )
+
+
 class TitleDisambiguationClient:
     def get(
         self,
@@ -470,6 +511,65 @@ def test_comic_run_is_resolved_once_and_reused_without_implicit_approval() -> No
     assert "comic_vine:run-reused" in later_result.queries
     assert session.metrics()["repeated_run_queries_avoided"] == 1
     assert session.metrics()["run_disambiguation_queries"] == 2
+
+
+def test_selected_provider_run_is_reused_across_creator_polluted_local_alias() -> None:
+    client = AliasRunClient()
+    provider = ComicVineProvider(client, "secret")  # type: ignore[arg-type]
+    run = NormalizedCandidate(
+        ProviderName.COMIC_VINE,
+        "4050-109114",
+        RecordType.COMIC_RUN,
+        MediaKind.COMIC,
+        "Oblivion Song",
+        series_title="Oblivion Song",
+        run_start_year=2018,
+        run_id="4050-109114",
+    )
+    local = LocalIdentity(
+        MediaKind.COMIC,
+        "issue",
+        0.98,
+        "Chapter One",
+        series_title="Oblivion Song By Kirkman & De Felici",
+        sequence=SequenceNumber.parse("1"),
+    )
+    session = CandidateSession.from_local_identities([local])
+    session.seed_resolved_run("Oblivion Song", run)
+
+    result = generate_candidates(local, (provider,), session)
+
+    assert client.operations == ["issues-in-run"]
+    assert result.candidates[0].run_id == "4050-109114"
+    assert result.candidates[0].run_start_year == 2018
+    assert "comic_vine:run-reused" in result.queries
+    assert session.resolved_runs["oblivion song by kirkman de felici"].provider_id == (
+        "4050-109114"
+    )
+
+
+def test_genuine_by_title_is_not_folded_into_known_provider_run_alias() -> None:
+    run = NormalizedCandidate(
+        ProviderName.COMIC_VINE,
+        "4050-1",
+        RecordType.COMIC_RUN,
+        MediaKind.COMIC,
+        "Batman",
+        series_title="Batman",
+        run_start_year=1940,
+    )
+    local = LocalIdentity(
+        MediaKind.COMIC,
+        "issue",
+        0.98,
+        "Batman by Gaslight",
+        series_title="Batman by Gaslight",
+        sequence=SequenceNumber.parse("1"),
+    )
+    session = CandidateSession.from_local_identities([local])
+    session.seed_resolved_run("Batman", run)
+
+    assert "batman by gaslight" not in session.resolved_runs
 
 
 

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from difflib import SequenceMatcher
 from typing import Self
 
@@ -10,7 +10,13 @@ from .domain import MediaKind, SequenceNumber
 from .matching import LocalIdentity
 from .providers.base import Provider, ProviderError
 from .providers.comic_vine import ComicVineProvider
-from .providers.models import NormalizedCandidate, ProviderName, SearchQuery
+from .providers.models import (
+    Identifier,
+    NormalizedCandidate,
+    ProviderName,
+    RecordType,
+    SearchQuery,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -26,6 +32,7 @@ class CandidateSession:
     run_start_hints: dict[str, int]
     run_max_sequences: dict[str, SequenceNumber]
     resolved_runs: dict[str, NormalizedCandidate | None]
+    known_runs: dict[tuple[ProviderName, str], NormalizedCandidate] = field(default_factory=dict)
     run_resolution_queries: int = 0
     run_disambiguation_queries: int = 0
     repeated_run_queries_avoided: int = 0
@@ -71,11 +78,14 @@ class CandidateSession:
     ) -> tuple[list[NormalizedCandidate], list[str]]:
         if not local.series_title or not local.sequence:
             return provider.search(_structured_query(local)), ["comic_vine:structured"]
-        key = _run_key(local.series_title)
+        key = self._resolved_key(local.series_title)
         queries: list[str] = []
         if key in self.resolved_runs:
             self.repeated_run_queries_avoided += 1
             queries.append("comic_vine:run-reused")
+            reused = self.resolved_runs[key]
+            if reused is not None:
+                self._store_resolution(local.series_title, reused)
         else:
             hint = local.run_start_year or self.run_start_hints.get(key)
             run_query = SearchQuery(
@@ -95,22 +105,82 @@ class CandidateSession:
                 selected, issue_candidates = self._disambiguate_run(
                     key, local, provider, matching_runs
                 )
-            self.resolved_runs[key] = selected
+            self._store_resolution(local.series_title, selected)
             if issue_candidates:
+                self._remember_issue_runs(issue_candidates)
                 queries.append("comic_vine:issue-evidence")
                 return issue_candidates, queries
+        key = self._resolved_key(local.series_title)
         run = self.resolved_runs[key]
         if run is None:
             queries.append("comic_vine:structured-fallback")
-            return _identity_candidates(local, provider.search(_structured_query(local))), queries
+            fallback = _identity_candidates(local, provider.search(_structured_query(local)))
+            self._remember_issue_runs(fallback)
+            return fallback, queries
         self.run_issue_queries += 1
         queries.append(f"comic_vine:issue-in-run:{run.provider_id}")
-        return provider.search_issue_in_run(run, local.sequence), queries
+        issues = provider.search_issue_in_run(run, local.sequence)
+        self._remember_issue_runs(issues)
+        return issues, queries
 
     def seed_resolved_run(self, series_title: str, run: NormalizedCandidate) -> None:
         if run.record_type.value != "comic_run":
             raise ValueError("candidate-session run seed must be a comic run")
+        self._remember_run(run)
+        self._store_resolution(series_title, run)
+
+    def _resolved_key(self, series_title: str) -> str:
+        keys = _run_alias_keys(series_title)
+        for key in keys:
+            if key in self.resolved_runs and self.resolved_runs[key] is not None:
+                return key
+        for key in keys:
+            if key in self.resolved_runs:
+                return key
+        return _run_key(series_title)
+
+    def _store_resolution(
+        self,
+        series_title: str,
+        run: NormalizedCandidate | None,
+    ) -> None:
+        if run is None:
+            self.resolved_runs[_run_key(series_title)] = None
+            return
         self.resolved_runs[_run_key(series_title)] = run
+        self._remember_run(run)
+        for value in (run.series_title, run.title):
+            if value:
+                self.resolved_runs[_run_key(value)] = run
+
+    def _remember_run(self, run: NormalizedCandidate) -> None:
+        self.known_runs[(run.provider, run.provider_id)] = run
+
+    def _remember_issue_runs(self, candidates: list[NormalizedCandidate]) -> None:
+        aliases: dict[str, dict[str, NormalizedCandidate]] = {}
+        for candidate in candidates:
+            run = comic_run_context(candidate)
+            if run is None:
+                continue
+            known = self.known_runs.get((run.provider, run.provider_id))
+            if known is not None:
+                run = known
+            else:
+                self._remember_run(run)
+            for value in (candidate.series_title, run.series_title, run.title):
+                if not value:
+                    continue
+                aliases.setdefault(_run_key(value), {})[run.provider_id] = run
+        for key, runs in aliases.items():
+            if len(runs) != 1:
+                continue
+            run = next(iter(runs.values()))
+            if key not in self.resolved_runs:
+                self.resolved_runs[key] = run
+                continue
+            current = self.resolved_runs[key]
+            if current is not None and current.provider_id == run.provider_id:
+                self.resolved_runs[key] = run
 
     def metrics(self) -> dict[str, int]:
         return {
@@ -528,6 +598,64 @@ def _comic_cover_year(candidate: NormalizedCandidate) -> int | None:
 
 def _run_key(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", value.casefold()).strip()
+
+
+def _run_alias_keys(value: str) -> tuple[str, ...]:
+    """Return conservative in-session aliases for a local comic series.
+
+    Embedded ComicInfo sometimes appends creator credits to the actual series
+    name (for example ``Oblivion Song By Kirkman & De Felici``). Provider run
+    identity is stronger than that local decoration, but broad fuzzy grouping
+    would be unsafe. Only strip an explicit trailing ``by`` credit when it looks
+    like a creator list rather than part of a genuine title such as
+    ``Batman by Gaslight``.
+    """
+    exact = _run_key(value)
+    match = re.match(r"^(?P<title>.+?)\s+by\s+(?P<credit>.+)$", value, re.IGNORECASE)
+    if match is None or not _looks_like_creator_credit(match.group("credit")):
+        return (exact,)
+    base = _run_key(match.group("title"))
+    return (exact, base) if base and base != exact else (exact,)
+
+
+def _looks_like_creator_credit(value: str) -> bool:
+    parts = [part.strip() for part in re.split(r"\s*(?:&|\band\b)\s*", value) if part.strip()]
+    if not parts:
+        return False
+    word_counts = [len(re.findall(r"[A-Za-z][A-Za-z'’-]*", part)) for part in parts]
+    if len(parts) == 1:
+        return word_counts[0] >= 2
+    return all(count >= 1 for count in word_counts) and any(count >= 2 for count in word_counts)
+
+
+def comic_run_context(candidate: NormalizedCandidate) -> NormalizedCandidate | None:
+    """Project provider-derived issue run fields into a reusable run snapshot.
+
+    No metadata is invented here: a context is returned only when Comic Vine
+    supplied a run id, canonical series title, and explicit run start year on
+    the issue candidate itself.
+    """
+    if (
+        candidate.provider is not ProviderName.COMIC_VINE
+        or candidate.record_type is not RecordType.COMIC_ISSUE
+        or not candidate.run_id
+        or not candidate.series_title
+        or candidate.run_start_year is None
+    ):
+        return None
+    return NormalizedCandidate(
+        provider=ProviderName.COMIC_VINE,
+        provider_id=candidate.run_id,
+        record_type=RecordType.COMIC_RUN,
+        media_kind=MediaKind.COMIC,
+        title=candidate.series_title,
+        identifiers=(Identifier("comic_vine", candidate.run_id),),
+        publisher=candidate.publisher,
+        series_title=candidate.series_title,
+        run_start_year=candidate.run_start_year,
+        run_id=candidate.run_id,
+        provider_schema_version=candidate.provider_schema_version,
+    )
 
 
 def _title_similarity(left: str, right: str) -> float:
