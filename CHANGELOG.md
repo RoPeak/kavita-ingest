@@ -6,6 +6,7 @@ All notable release-level changes to Kavita Ingest are recorded here.
 
 ### Fixed
 
+- Prompt for library scan scope when `[L] Check libraries` is selected in the wizard: Enter keeps the configured Books + Comics defaults, while one or more semicolon-separated custom directories can narrow the same read-only check and any explicitly confirmed repair/recheck to the selected scope.
 - Make `library-check` output human-first and colour-coded: red blocking readiness errors, orange cleanup warnings, green pass states, grouped per-file findings, plain-language labels and recommended paths; also fix the library-check strict-typing regression for non-PDF comic containers.
 - Harden collected-edition identification around real catalogue conventions: parse corrected `Series, Vol. N` filenames even over stale embedded metadata, search deterministic `Volume`/`Vol.` punctuation variants, preserve creator-free recall, and treat large edition-year mismatches as material conflicts instead of weak penalties.
 - Preserve real collection-volume semantics through acceptance and planning: integer collection sequence now resolves to canonical `collection_volume`, ComicInfo `Volume` is written while issue `Number` is cleared, and Kavita Flexible filenames use `vNN` inside the existing `Specials/` model.

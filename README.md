@@ -267,7 +267,10 @@ calls and writes no database state. With no argument it checks the configured
 Books and Comics roots; an ancestor such as `~/Libraries` checks every configured
 destination below it, while a configured library or series subdirectory narrows
 the scan. The same check is available inside the guided wizard as `[L] Check
-libraries`, including after a completed ingest. Human output is grouped by affected
+libraries`, including after a completed ingest. The wizard first shows the saved
+Books and Comics roots and prompts for the directory path(s) to scan: press Enter
+to use both configured libraries, or enter one or more custom paths separated by
+semicolons to narrow the audit. Human output is grouped by affected
 file and uses green pass states, orange cleanup warnings, red blocking errors, and
 plain recommended paths; stable `--json` output retains the detailed diagnostic
 codes for automation. Use `--details` to include diagnostic codes and every checked

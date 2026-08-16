@@ -9,7 +9,7 @@ from typer.testing import CliRunner
 from compatibility.helpers.epub_factory import create_epub
 from kavita_ingest.cli import app
 from kavita_ingest.config import AppConfig
-from kavita_ingest.library_check import check_library
+from kavita_ingest.library_check import check_library, check_library_roots
 
 
 def _comic(
@@ -68,6 +68,30 @@ def test_library_check_accepts_configured_parent_and_canonical_media(tmp_path: P
     assert result.findings == ()
     assert {scope.kind for scope in result.scopes} == {"books", "comics"}
     assert {path: (path.read_bytes(), path.stat().st_mtime_ns) for path in before} == before
+
+
+def test_library_check_accepts_multiple_explicit_roots_without_duplicate_scans(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    assert config.books_root is not None
+    assert config.comics_root is not None
+    book = config.books_root / "Fixture Series" / "Fixture Series - 1.5 - Fixture Book.epub"
+    book.parent.mkdir(parents=True)
+    create_epub(book)
+    comic = config.comics_root / "Series (2024)" / "Series (2024) - 001 - Chapter One.cbz"
+    _comic(comic, series="Series (2024)")
+
+    result = check_library_roots(
+        (config.books_root, config.comics_root, config.comics_root / "Series (2024)"),
+        config,
+    )
+
+    assert result.kavita_ready is True
+    assert result.canonical is True
+    assert len(result.media) == 2
+    assert {scope.kind for scope in result.scopes} == {"books", "comics"}
+    assert len(result.scopes) == 2
 
 
 def test_library_check_flags_root_level_media_as_readiness_error(tmp_path: Path) -> None:

@@ -1268,12 +1268,14 @@ offline = true
     result = CliRunner().invoke(
         app,
         ["wizard", "--config", str(config)],
-        input="l\nq\n",
+        input="l\n\nq\n",
     )
 
     assert result.exit_code == 0, result.output
     assert "[L] Check" in result.output and "libraries" in result.output
     assert "Library health check" in result.output
+    assert "Libraries to scan" in result.output
+    assert "Press Enter to scan the configured libraries above" in result.output
     assert "Kavita readiness: PASS" in result.output
     assert "No problems found" in result.output
     assert "No changes made" in result.output
@@ -1311,7 +1313,7 @@ offline = true
     result = CliRunner().invoke(
         app,
         ["wizard", "--config", str(config)],
-        input="l\ny\nAPPLY 1 FIXES\nq\n",
+        input="l\n\ny\nAPPLY 1 FIXES\nq\n",
     )
 
     assert result.exit_code == 0, result.output
@@ -1321,3 +1323,35 @@ offline = true
     assert "kavita-ingest layout: CANONICAL" in result.output
     assert (comics / "Saga" / "Specials" / "Saga - v01 - Saga Vol. 1.cbz").is_file()
     assert not legacy.exists()
+
+
+def test_wizard_library_check_accepts_custom_semicolon_separated_paths(tmp_path: Path) -> None:
+    incoming = tmp_path / "incoming"
+    books = tmp_path / "books"
+    comics = tmp_path / "comics"
+    for directory in (incoming, books, comics):
+        directory.mkdir()
+    config = tmp_path / "library-custom-scope-wizard.toml"
+    config.write_text(
+        f'''[paths]
+incoming = ["{incoming}"]
+books = "{books}"
+comics = "{comics}"
+database = "{tmp_path / 'state.sqlite3'}"
+
+[providers]
+offline = true
+''',
+        encoding="utf-8",
+    )
+
+    result = CliRunner().invoke(
+        app,
+        ["wizard", "--config", str(config)],
+        input=f"l\n{books}; {comics}\nq\n",
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Library path(s)" in result.output
+    assert "Kavita readiness: PASS" in result.output
+    assert "No changes made" in result.output

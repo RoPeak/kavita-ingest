@@ -129,6 +129,31 @@ def check_library(root: Path | None, config: AppConfig) -> LibraryCheckResult:
     """
 
     scopes = _resolve_scopes(root, config)
+    return _check_scopes(root, scopes, config)
+
+
+def check_library_roots(
+    roots: tuple[Path, ...], config: AppConfig
+) -> LibraryCheckResult:
+    """Read-only audit of one or more explicitly selected library directories.
+
+    This is primarily used by the interactive wizard, where a user may want to check
+    both configured libraries, one configured library, or several subdirectories in a
+    single pass.  Overlapping selections are collapsed so the same media file is never
+    scanned twice.
+    """
+
+    if not roots:
+        return check_library(None, config)
+    scopes = _resolve_multiple_scopes(roots, config)
+    return _check_scopes(None, scopes, config)
+
+
+def _check_scopes(
+    requested_root: Path | None,
+    scopes: tuple[LibraryScope, ...],
+    config: AppConfig,
+) -> LibraryCheckResult:
     findings: list[LibraryFinding] = []
     checked: list[CheckedMedia] = []
     series_folders: dict[tuple[Path, str], set[str]] = defaultdict(set)
@@ -153,7 +178,7 @@ def check_library(root: Path | None, config: AppConfig) -> LibraryCheckResult:
         CheckedMedia(item.path, item.kind, item.path not in finding_paths) for item in checked
     ]
     checked.sort(key=lambda item: str(item.path).casefold())
-    return LibraryCheckResult(root, scopes, tuple(checked), tuple(findings))
+    return LibraryCheckResult(requested_root, scopes, tuple(checked), tuple(findings))
 
 
 def _resolve_scopes(root: Path | None, config: AppConfig) -> tuple[LibraryScope, ...]:
@@ -190,6 +215,37 @@ def _resolve_scopes(root: Path | None, config: AppConfig) -> tuple[LibraryScope,
             f"configured roots: {configured_text}"
         )
     return tuple(scopes)
+
+
+def _resolve_multiple_scopes(
+    roots: tuple[Path, ...], config: AppConfig
+) -> tuple[LibraryScope, ...]:
+    scopes: list[LibraryScope] = []
+    for root in roots:
+        scopes.extend(_resolve_scopes(root, config))
+
+    # A user can legitimately enter both a parent directory and one of its children.
+    # Keep only the broadest scan root for a given configured library so media is not
+    # scanned twice and cross-file diagnostics remain correct.
+    collapsed: list[LibraryScope] = []
+    for scope in sorted(
+        scopes,
+        key=lambda item: (
+            item.kind,
+            str(item.library_root).casefold(),
+            len(item.scan_root.parts),
+            str(item.scan_root).casefold(),
+        ),
+    ):
+        if any(
+            existing.kind == scope.kind
+            and existing.library_root == scope.library_root
+            and _contains(existing.scan_root, scope.scan_root)
+            for existing in collapsed
+        ):
+            continue
+        collapsed.append(scope)
+    return tuple(collapsed)
 
 
 def _check_scope(

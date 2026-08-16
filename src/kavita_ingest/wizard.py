@@ -6,7 +6,7 @@ import sqlite3
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import typer
 from rich.console import Console
@@ -21,7 +21,12 @@ from .config import AppConfig
 from .db import connect, migrate
 from .decisions import DecisionRepository, decision_needs_review
 from .doctor import Check, checks
-from .library_check import check_library, render_library_check
+from .library_check import (
+    LibraryCheckResult,
+    check_library,
+    check_library_roots,
+    render_library_check,
+)
 from .library_repair import (
     apply_library_repairs,
     plan_library_repairs,
@@ -774,13 +779,20 @@ def _diagnostics(config: AppConfig, config_path: Path | None, output: Console) -
 
 
 def _library_health_check(config: AppConfig, output: Console) -> None:
-    try:
-        result = check_library(None, config)
-        repair_plan = plan_library_repairs(result, config)
-    except (OSError, ValueError) as exc:
-        output.print(f"[bold red]Library check could not run:[/bold red] {exc}")
-        _reader_pause(output, "Press Enter to return to the wizard")
-        return
+    while True:
+        selected_roots = _prompt_library_check_roots(config, output)
+        if selected_roots == "cancel":
+            return
+        try:
+            result = _check_selected_libraries(selected_roots, config)
+            repair_plan = plan_library_repairs(result, config)
+        except (OSError, ValueError) as exc:
+            output.print(f"[bold red]Library check could not run:[/bold red] {exc}")
+            if typer.confirm("Choose different library path(s)?", default=True):
+                continue
+            output.print("Library check cancelled. No files changed.")
+            return
+        break
 
     render_library_check(result, output, show_read_only_note=False)
     render_library_repair_summary(repair_plan, output)
@@ -816,7 +828,7 @@ def _library_health_check(config: AppConfig, output: Console) -> None:
 
     try:
         outcome = apply_library_repairs(repair_plan, config)
-        refreshed = check_library(None, config)
+        refreshed = _check_selected_libraries(selected_roots, config)
         remaining = plan_library_repairs(refreshed, config)
     except (OSError, ValueError) as exc:
         output.print(f"[bold red]Library repair stopped:[/bold red] {exc}")
@@ -836,6 +848,38 @@ def _library_health_check(config: AppConfig, output: Console) -> None:
     render_manual_guidance(remaining, output)
     output.print("\n[dim]Only the explicitly confirmed repairs above were changed.[/dim]")
     _reader_pause(output, "Press Enter to return to the wizard")
+
+
+def _prompt_library_check_roots(
+    config: AppConfig, output: Console
+) -> tuple[Path, ...] | None | Literal["cancel"]:
+    output.print("\n[bold]Libraries to scan[/bold]")
+    if config.books_root is not None:
+        output.print(f"  Books   {config.books_root.expanduser().resolve(strict=False)}")
+    if config.comics_root is not None:
+        output.print(f"  Comics  {config.comics_root.expanduser().resolve(strict=False)}")
+    output.print(
+        "[dim]Press Enter to scan the configured libraries above. "
+        "To scan something else, enter one or more directory paths separated by ';'.[/dim]"
+    )
+
+    while True:
+        raw = typer.prompt("Library path(s)", default="", show_default=False).strip()
+        if not raw:
+            return None
+        values = tuple(part.strip() for part in raw.split(";") if part.strip())
+        if not values:
+            return None
+        roots = tuple(Path(value).expanduser() for value in values)
+        return roots
+
+
+def _check_selected_libraries(
+    roots: tuple[Path, ...] | None, config: AppConfig
+) -> LibraryCheckResult:
+    if roots is None:
+        return check_library(None, config)
+    return check_library_roots(roots, config)
 
 
 def _create_plan(config: AppConfig, root: Path) -> tuple[StoredPlan, PlanBuildResult]:
