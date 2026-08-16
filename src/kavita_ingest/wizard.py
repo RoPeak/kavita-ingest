@@ -21,6 +21,7 @@ from .config import AppConfig
 from .db import connect, migrate
 from .decisions import DecisionRepository, decision_needs_review
 from .doctor import Check, checks
+from .library_check import check_library, render_library_check
 from .paths import AppPaths
 from .plan_store import PlanStore, StoredPlan
 from .planning_service import NoActionableItems, PlanBuilder, PlanBuildResult
@@ -267,7 +268,7 @@ def _home(
             output.print(
                 "[R] Recover interrupted ingest   "
                 "[A] Abandon this ingest   "
-                "[D] Diagnostics   [Q] Quit"
+                "[D] Diagnostics   [L] Check libraries   [Q] Quit"
             )
             choice = _choice("R")
             if choice in {"", "R"}:
@@ -283,7 +284,7 @@ def _home(
                 options = ["[Enter] Choose source and start"]
             if resume:
                 output.print(f"{resume.detail}\n[R] {resume.action_label}")
-            options.extend(["[D] Diagnostics", "[Q] Quit"])
+            options.extend(["[D] Diagnostics", "[L] Check libraries", "[Q] Quit"])
             output.print("   ".join(options))
             choice = _choice("")
             if choice == "R" and resume:
@@ -294,6 +295,9 @@ def _home(
                 return "change"
         if choice == "D":
             _diagnostics(config, config_path, output)
+            continue
+        if choice == "L":
+            _library_health_check(config, output)
             continue
         if choice == "Q":
             return "quit"
@@ -598,7 +602,7 @@ def _resume(config: AppConfig, state: ResumeState, output: Console) -> str | Non
         document = plan_document(plan)
         if recovered.status.value == "complete":
             render_completed_apply(recovered, document, output, compact=True)
-            return _finish_menu(document, output)
+            return _finish_menu(config, document, output)
         render_apply_summary(
             recovered,
             output,
@@ -632,7 +636,7 @@ def _review_and_maybe_apply(
     summary = _apply(config, plan.id, document, output)
     if summary is None or summary.status.value != "complete":
         return None
-    return _finish_menu(document, output)
+    return _finish_menu(config, document, output)
 
 
 def _plan_approval_menu(
@@ -762,6 +766,16 @@ def _diagnostics(config: AppConfig, config_path: Path | None, output: Console) -
     _render_checks(checks(config, AppPaths.default(), config_path), output)
 
 
+def _library_health_check(config: AppConfig, output: Console) -> None:
+    try:
+        result = check_library(None, config)
+    except (OSError, ValueError) as exc:
+        output.print(f"[bold red]Library check could not run:[/bold red] {exc}")
+    else:
+        render_library_check(result, output)
+    _reader_pause(output, "Press Enter to return to the wizard")
+
+
 def _create_plan(config: AppConfig, root: Path) -> tuple[StoredPlan, PlanBuildResult]:
     connection = _connection(config)
     try:
@@ -853,8 +867,10 @@ def _reader_pause(output: Console, message: str) -> None:
     typer.prompt(message, default="", show_default=False)
 
 
-def _finish_menu(document: dict[str, Any], output: Console) -> str | None:
-    options = ["[N] New ingest", "[D] Details"]
+def _finish_menu(
+    config: AppConfig, document: dict[str, Any], output: Console
+) -> str | None:
+    options = ["[N] New ingest", "[D] Details", "[L] Check libraries"]
     open_root = _openable_root(document)
     if open_root:
         options.append("[O] Open destination folder")
@@ -868,6 +884,9 @@ def _finish_menu(document: dict[str, Any], output: Console) -> str | None:
             for item in _document_destinations(document):
                 output.print(item)
             return None
+        if choice == "L":
+            _library_health_check(config, output)
+            continue
         if choice == "O" and open_root:
             subprocess.run(["xdg-open", str(open_root)], check=False)
             return None

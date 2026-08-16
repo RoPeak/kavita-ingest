@@ -18,7 +18,7 @@ from .db import connect
 from .decisions import DecisionRepository, reopen_review
 from .discovery import inspect_source
 from .doctor import checks
-from .library_check import check_library
+from .library_check import check_library, render_library_check
 from .locking import LockUnavailable
 from .logging_config import configure_logging, provider_secrets, set_console_verbosity
 from .matching import CandidateScore, usable_identity_scores
@@ -269,40 +269,7 @@ def library_check_command(
     if as_json:
         _emit_json("library-check", result.to_dict())
     else:
-        typer.echo("Kavita library check")
-        for scope in result.scopes:
-            typer.echo(
-                f"  {scope.kind:6} {scope.scan_root}"
-                + (
-                    f"  (library root: {scope.library_root})"
-                    if scope.scan_root != scope.library_root
-                    else ""
-                )
-            )
-        typer.echo("")
-        typer.echo(f"Media files:          {len(result.media)}")
-        typer.echo(f"Readiness errors:     {result.errors}")
-        typer.echo(f"Canonical warnings:   {result.warnings}")
-        typer.echo(
-            "Kavita readiness:     " + ("READY" if result.kavita_ready else "NEEDS ATTENTION")
-        )
-        typer.echo("kavita-ingest layout: " + ("CANONICAL" if result.canonical else "DRIFT FOUND"))
-        if result.findings:
-            typer.echo("\nFindings")
-            for finding in result.findings:
-                marker = "ERROR" if finding.severity == "error" else "WARN "
-                typer.echo(f"{marker} {finding.code}: {finding.path}")
-                typer.echo(f"      {finding.message}")
-                if finding.expected:
-                    typer.echo(f"      expected: {finding.expected}")
-        else:
-            typer.echo("\nNo readiness or canonical-layout findings.")
-        if details and result.media:
-            typer.echo("\nChecked media")
-            for item in result.media:
-                state = "canonical" if item.canonical else "finding"
-                typer.echo(f"{state:9} {item.kind:6} {item.path}")
-        typer.echo("\nRead-only check complete; no media or database state was modified.")
+        render_library_check(result, Console(), details=details)
 
     if result.errors or (strict and result.warnings):
         raise typer.Exit(1)

@@ -1243,3 +1243,37 @@ def test_material_conflict_plan_requires_typed_risky_approval(
     assert approvals == [77]
     assert "Plan was not approved." in output.getvalue()
     assert "material" in output.getvalue() and "evidence conflicts" in output.getvalue()
+
+
+def test_wizard_home_offers_read_only_library_check(tmp_path: Path) -> None:
+    incoming = tmp_path / "incoming"
+    books = tmp_path / "books"
+    comics = tmp_path / "comics"
+    for directory in (incoming, books, comics):
+        directory.mkdir()
+    config = tmp_path / "library-check-wizard.toml"
+    config.write_text(
+        f'''[paths]
+incoming = ["{incoming}"]
+books = "{books}"
+comics = "{comics}"
+database = "{tmp_path / 'state.sqlite3'}"
+
+[providers]
+offline = true
+''',
+        encoding="utf-8",
+    )
+
+    result = CliRunner().invoke(
+        app,
+        ["wizard", "--config", str(config)],
+        input="l\nq\n",
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "[L] Check" in result.output and "libraries" in result.output
+    assert "Library health check" in result.output
+    assert "Kavita readiness: PASS" in result.output
+    assert "No problems found" in result.output
+    assert "No changes made" in result.output

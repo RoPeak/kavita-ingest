@@ -265,10 +265,13 @@ enabled providers or their caches and ranks candidates, but accepts nothing.
 calls and writes no database state. With no argument it checks the configured
 Books and Comics roots; an ancestor such as `~/Libraries` checks every configured
 destination below it, while a configured library or series subdirectory narrows
-the scan. It distinguishes Kavita-readiness errors from kavita-ingest canonical
-layout drift and can emit stable `--json` output. Use `--details` to list every
-checked media path and `--strict` when automation should fail on warnings as well
-as readiness errors.
+the scan. The same check is available inside the guided wizard as `[L] Check
+libraries`, including after a completed ingest. Human output is grouped by affected
+file and uses green pass states, orange cleanup warnings, red blocking errors, and
+plain recommended paths; stable `--json` output retains the detailed diagnostic
+codes for automation. Use `--details` to include diagnostic codes and every checked
+media path, and `--strict` when automation should fail on warnings as well as
+readiness errors.
 
 The readiness layer checks local conditions that materially affect Kavita scans,
 including supported content signatures, inspectability, no media directly at a

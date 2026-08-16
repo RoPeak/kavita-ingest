@@ -224,12 +224,79 @@ def test_library_check_cli_json_and_strict_exit(tmp_path: Path) -> None:
     )
 
     assert human.exit_code == 0, human.output
-    assert "Kavita readiness:     READY" in human.output
-    assert "kavita-ingest layout: DRIFT FOUND" in human.output
-    assert "Read-only check complete" in human.output
+    assert "Kavita readiness: PASS" in human.output
+    assert "CLEANUP RECOMMENDED" in human.output
+    assert "Read-only check:" in human.output
     assert strict.exit_code == 1
     assert machine.exit_code == 0
     payload = json.loads(machine.output)
     assert payload["command"] == "library-check"
     assert payload["summary"]["kavita_ready"] is True
     assert payload["summary"]["canonical"] is False
+
+
+def test_library_check_human_output_is_grouped_plain_and_colour_capable(tmp_path: Path) -> None:
+    import io
+
+    from rich.console import Console
+
+    from kavita_ingest.library_check import render_library_check
+
+    config = _config(tmp_path)
+    assert config.comics_root is not None
+    comic = config.comics_root / "Saga" / "Specials" / "Saga - 001 - Saga Vol. 1.cbz"
+    _comic(
+        comic,
+        series="Saga",
+        number="1",
+        title="Saga Vol. 1",
+        format_="Trade Paperback",
+    )
+    result = check_library(config.comics_root, config)
+    plain_stream = io.StringIO()
+    render_library_check(result, Console(file=plain_stream, width=120))
+    rendered = plain_stream.getvalue()
+    assert "Kavita readiness: PASS" in rendered
+    assert "CLEANUP RECOMMENDED" in rendered
+    assert "2 warnings across 1 file" in rendered
+    assert "Collected edition uses issue Number instead of Volume" in rendered
+    assert "Recommended:" in rendered
+    assert "Diagnostic code:" not in rendered
+
+    colour_stream = io.StringIO()
+    colour_console = Console(
+        file=colour_stream, force_terminal=True, color_system="standard", width=120
+    )
+    render_library_check(result, colour_console)
+    assert "\x1b[" in colour_stream.getvalue()
+
+
+def test_library_check_clean_human_output_has_green_pass_message(tmp_path: Path) -> None:
+    import io
+
+    from rich.console import Console
+
+    from kavita_ingest.library_check import render_library_check
+
+    config = _config(tmp_path)
+    assert config.comics_root is not None
+    comic = config.comics_root / "Saga" / "Specials" / "Saga - v01 - Saga Vol. 1.cbz"
+    _comic(
+        comic,
+        series="Saga",
+        number="",
+        volume="1",
+        title="Saga Vol. 1",
+        format_="Trade Paperback",
+    )
+    result = check_library(config.comics_root, config)
+    stream = io.StringIO()
+    console = Console(file=stream, force_terminal=True, color_system="standard", width=120)
+
+    render_library_check(result, console)
+
+    rendered = stream.getvalue()
+    assert "Kavita readiness: PASS" in rendered
+    assert "kavita-ingest layout: CANONICAL" in rendered
+    assert "No problems found" in rendered
+    assert "\x1b[" in rendered

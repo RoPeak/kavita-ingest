@@ -7,6 +7,10 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Literal
 
+from rich.console import Console
+from rich.panel import Panel
+from rich.text import Text
+
 from .archive_safety import ArchiveLimits
 from .config import AppConfig
 from .discovery import SUPPORTED_EXTENSIONS, detect_signature
@@ -662,7 +666,8 @@ def _check_comic(
         "author": None,
         "format": format_value or None,
     }
-    expected_extension = ".pdf" if detected is SourceFormat.PDF else ".cbz"
+    # PDFs return through _check_comic_pdf_path above; archive comics canonicalise to CBZ.
+    expected_extension = ".cbz"
     expected_filename = render_component(policy.comic_file, values) + expected_extension
     expected_relative = expected_parent / expected_filename
     actual_relative = PurePosixPath(path.relative_to(scope.library_root).as_posix())
@@ -830,3 +835,144 @@ def _contains(parent: Path, child: Path) -> bool:
 def _finding_sort_key(item: LibraryFinding) -> tuple[int, str, str]:
     severity = {"error": 0, "warning": 1, "info": 2}[item.severity]
     return severity, str(item.path).casefold(), item.code
+
+
+_FINDING_LABELS: dict[str, str] = {
+    "media_at_library_root": "Media is stored directly at the library root",
+    "unreadable_media": "Media file could not be read",
+    "unsupported_signature": "File contents are not a supported media format",
+    "extension_signature_mismatch": "Filename extension does not match the file contents",
+    "library_kind_mismatch": "Media is stored in the wrong Kavita library",
+    "book_title_metadata_missing": "Book title metadata is missing",
+    "book_creator_metadata_missing": "Book author metadata is missing",
+    "invalid_book_series_index": "Book series number is invalid",
+    "noncanonical_book_path": "Book filename or folder uses an older/non-standard layout",
+    "comicinfo_missing": "ComicInfo.xml metadata is missing",
+    "comic_title_is_only_edition_label": "Comic title contains only an edition label",
+    "collection_format_uses_issue_number": "Collected edition uses issue Number instead of Volume",
+    "comic_number_and_volume_set": "ComicInfo sets both Number and Volume",
+    "noninteger_collection_volume": "Collected-edition Volume is not an integer",
+    "invalid_comic_number": "Comic issue number is invalid",
+    "comic_sequence_missing": "Comic issue/volume number is missing",
+    "comic_series_folder_mismatch": "Comic is stored under the wrong series folder",
+    "noncanonical_comic_folder": "Comic is stored in a non-standard subfolder",
+    "noncanonical_comic_path": "Comic filename or folder uses an older/non-standard layout",
+    "duplicate_comic_slot": "Two files claim the same comic issue/volume slot",
+    "series_split_across_folders": "One comic series is split across multiple folders",
+    "symlink_directory_skipped": "Symlinked directory was not checked",
+    "symlink_file_skipped": "Symlinked media file was not checked",
+}
+
+
+def render_library_check(
+    result: LibraryCheckResult,
+    console: Console,
+    *,
+    details: bool = False,
+    show_read_only_note: bool = True,
+) -> None:
+    """Render a compact, human-first library health report with colour/status cues."""
+
+    scope_lines = Text()
+    for index, scope in enumerate(result.scopes):
+        if index:
+            scope_lines.append("\n")
+        scope_lines.append(f"{scope.kind.title():7}", style="bold")
+        scope_lines.append(f" {scope.scan_root}")
+        if scope.scan_root != scope.library_root:
+            scope_lines.append(f"  (library root: {scope.library_root})", style="dim")
+    console.print(Panel(scope_lines, title="Library health check", border_style="cyan"))
+
+    affected_paths = {
+        finding.path
+        for finding in result.findings
+        if finding.severity in {"error", "warning"}
+    }
+    console.print(f"Checked [bold]{len(result.media)}[/bold] media files.")
+
+    if result.kavita_ready:
+        console.print("[bold green]✓ Kavita readiness: PASS[/bold green]")
+        console.print("  Kavita should be able to scan this library structure.")
+    else:
+        console.print("[bold red]✗ Kavita readiness: NEEDS ATTENTION[/bold red]")
+        console.print(
+            f"  [red]{result.errors} blocking issue{'s' if result.errors != 1 else ''}[/red] "
+            "could prevent reliable Kavita scanning."
+        )
+
+    if result.canonical:
+        console.print("[bold green]✓ kavita-ingest layout: CANONICAL[/bold green]")
+        console.print("  Filenames, folders and checked metadata match the current policy.")
+    elif result.warnings:
+        console.print("[bold orange3]⚠ kavita-ingest layout: CLEANUP RECOMMENDED[/bold orange3]")
+        console.print(
+            f"  [orange3]{result.warnings} warning{'s' if result.warnings != 1 else ''}[/orange3] "
+            f"across {len(affected_paths)} file{'s' if len(affected_paths) != 1 else ''}. "
+            "These are not blocking Kavita errors."
+        )
+    else:
+        console.print("[bold red]✗ kavita-ingest layout: NEEDS ATTENTION[/bold red]")
+        console.print("  Fix the blocking readiness problems before judging canonical layout.")
+
+    if result.findings:
+        console.print("\n[bold]What needs attention[/bold]")
+        grouped: dict[Path, list[LibraryFinding]] = defaultdict(list)
+        for finding in result.findings:
+            grouped[finding.path].append(finding)
+        for path in sorted(grouped, key=lambda item: str(item).casefold()):
+            findings = grouped[path]
+            worst = "error" if any(item.severity == "error" for item in findings) else "warning"
+            colour = "red" if worst == "error" else "orange3"
+            symbol = "✗" if worst == "error" else "⚠"
+            relative = _display_library_path(path, result.scopes)
+            console.print(f"\n[{colour} bold]{symbol} {relative}[/{colour} bold]")
+            for finding in findings:
+                label = _FINDING_LABELS.get(finding.code, finding.message)
+                console.print(f"  • {label}")
+                if details and label != finding.message:
+                    console.print(f"    [dim]{finding.message}[/dim]")
+                if finding.expected:
+                    expected = _display_expected_path(path, finding.expected, result.scopes)
+                    console.print(f"    [bold]Recommended:[/bold] {expected}")
+                if details:
+                    console.print(f"    [dim]Diagnostic code: {finding.code}[/dim]")
+    else:
+        console.print(
+            "\n[bold green]✓ No problems found. "
+            "The checked library is ready and canonical.[/bold green]"
+        )
+
+    if details and result.media:
+        console.print("\n[bold]Checked media[/bold]")
+        for item in result.media:
+            state = "[green]✓[/green]" if item.canonical else "[orange3]•[/orange3]"
+            console.print(f"  {state} {_display_library_path(item.path, result.scopes)}")
+
+    if show_read_only_note:
+        console.print(
+            "\n[dim]Read-only check: no files, metadata or database state were changed.[/dim]"
+        )
+
+
+def _display_library_path(path: Path, scopes: tuple[LibraryScope, ...]) -> str:
+    for scope in scopes:
+        try:
+            relative = path.relative_to(scope.library_root)
+        except ValueError:
+            continue
+        return f"{scope.kind.title()}/{relative.as_posix()}"
+    return str(path)
+
+
+def _display_expected_path(
+    actual: Path,
+    expected: str,
+    scopes: tuple[LibraryScope, ...],
+) -> str:
+    for scope in scopes:
+        try:
+            actual.relative_to(scope.library_root)
+        except ValueError:
+            continue
+        return f"{scope.kind.title()}/{expected}"
+    return expected

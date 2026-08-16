@@ -6,6 +6,7 @@ All notable release-level changes to Kavita Ingest are recorded here.
 
 ### Fixed
 
+- Make `library-check` output human-first and colour-coded: red blocking readiness errors, orange cleanup warnings, green pass states, grouped per-file findings, plain-language labels and recommended paths; also fix the library-check strict-typing regression for non-PDF comic containers.
 - Harden collected-edition identification around real catalogue conventions: parse corrected `Series, Vol. N` filenames even over stale embedded metadata, search deterministic `Volume`/`Vol.` punctuation variants, preserve creator-free recall, and treat large edition-year mismatches as material conflicts instead of weak penalties.
 - Preserve real collection-volume semantics through acceptance and planning: integer collection sequence now resolves to canonical `collection_volume`, ComicInfo `Volume` is written while issue `Number` is cleared, and Kavita Flexible filenames use `vNN` inside the existing `Specials/` model.
 - Preserve richer non-conflicting local descriptive metadata when a sparse provider title collapses to the series name, including collected-edition subtitles and meaningful issue titles.
@@ -14,6 +15,7 @@ All notable release-level changes to Kavita Ingest are recorded here.
 
 ### Added
 
+- Integrate the read-only library health check into the guided wizard home screen and post-ingest finish menu via `[L] Check libraries`.
 - Add `library-check [ROOT]`, a provider-free and database-free destination audit that distinguishes Kavita-readiness errors from kavita-ingest canonical naming/layout drift. It can check all configured libraries, an ancestor such as `~/Libraries`, or a configured subdirectory; reports expected canonical paths, duplicate comic slots, mixed/split series folders, root-level media, signature/extension mismatches, missing metadata, `Specials/` placement, collection `vNN` naming and noncanonical CBR containers; and supports `--details`, `--strict`, and versioned `--json`.
 - Add `reset-published` to atomically return an unchanged, hash-verified completed publication to a configured Incoming path for correction while retaining journal history.
 - Add `reopen-review` to append an auditable pending-review marker for a current Incoming source without changing media bytes or deleting prior decisions.
