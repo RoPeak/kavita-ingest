@@ -248,6 +248,7 @@ kavita-ingest wizard
 kavita-ingest scan /path/to/incoming
 kavita-ingest audit /path/to/incoming
 kavita-ingest library-check ~/Libraries
+kavita-ingest library-fix ~/Libraries
 kavita-ingest review /path/to/incoming
 kavita-ingest plan create /path/to/incoming
 kavita-ingest plan show 1
@@ -281,7 +282,25 @@ paths and embedded metadata with the active kavita-ingest naming policy: book
 folder/file naming, comic series folders, `Specials/` placement, issue padding,
 collection `vNN` naming, CBZ canonical containers, and metadata/path agreement.
 Warnings mean the media may still be readable by Kavita but does not match what
-kavita-ingest would publish today. The checker never renames or rewrites media.
+kavita-ingest would publish today. `library-check` itself remains strictly read-only.
+After the report, the wizard separates findings into safe automatic repairs and
+items that require human judgement. Safe repairs are limited to transformations
+whose result is fully determined by existing local metadata, such as an exact
+canonical move/rename, CBR-to-CBZ normalization, or migrating a collected edition
+from integer `Number` to integer `Volume` while clearing `Number`. The wizard shows
+the complete repair plan first and requires typed `APPLY N FIXES` confirmation.
+The standalone `library-fix [ROOT]` command provides the same plan/apply workflow;
+without `--yes` it asks before changing anything. Sources are SHA-256 bound to the
+plan, destinations are no-clobber, metadata rewrites are staged and verified before
+publication, and originals are removed only after verified publication. If a batch
+stops part-way through, completed per-file repairs remain valid and a fresh
+`library-check` is the source of truth for what remains.
+
+Ambiguous findings are never guessed. Duplicate slots, missing or unreadable
+metadata, mixed/split series, suspicious titles such as a bare edition label,
+symlinks, invalid issue/volume values, and identity/library-kind conflicts receive
+plain manual guidance instead. `library-fix` will not delete a duplicate, invent a
+title, or overwrite an existing destination.
 `review` records explicit append-only decisions. Manual identity entry covers
 book authors/series/edition fields and comic run year, type, sequence, and
 collection volume. A high confidence score means

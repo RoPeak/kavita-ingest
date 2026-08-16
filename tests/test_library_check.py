@@ -300,3 +300,290 @@ def test_library_check_clean_human_output_has_green_pass_message(tmp_path: Path)
     assert "kavita-ingest layout: CANONICAL" in rendered
     assert "No problems found" in rendered
     assert "\x1b[" in rendered
+
+
+def test_library_repair_plan_separates_safe_repairs_from_human_judgement(tmp_path: Path) -> None:
+    from kavita_ingest.library_repair import plan_library_repairs
+
+    config = _config(tmp_path)
+    assert config.comics_root is not None
+    legacy = config.comics_root / "Saga" / "Specials" / "Saga - 001 - Saga Vol. 1.cbz"
+    _comic(
+        legacy,
+        series="Saga",
+        number="1",
+        title="Saga Vol. 1",
+        format_="Trade Paperback",
+    )
+    ambiguous = (
+        config.comics_root
+        / "Spider-Man - Life Story"
+        / "Specials"
+        / "Spider-Man - Life Story - 2nd edition.cbz"
+    )
+    _comic(
+        ambiguous,
+        series="Spider-Man - Life Story",
+        number="",
+        title="2nd edition",
+        format_="Trade Paperback",
+    )
+
+    result = check_library(config.comics_root, config)
+    plan = plan_library_repairs(result, config)
+
+    assert len(plan.actions) == 1
+    action = plan.actions[0]
+    assert action.source == legacy
+    assert action.destination.name == "Saga - v01 - Saga Vol. 1.cbz"
+    assert action.kind == "rewrite_cbz"
+    assert dict(action.set_fields) == {"Volume": "1"}
+    assert action.clear_fields == ("Number",)
+    assert len(plan.manual) == 1
+    assert plan.manual[0].path == ambiguous
+    assert any("human decision" in line for line in plan.manual[0].guidance)
+
+
+def test_library_repair_applies_legacy_collection_migration_and_rechecks_clean(
+    tmp_path: Path,
+) -> None:
+    import zipfile
+
+    from kavita_ingest.library_repair import apply_library_repairs, plan_library_repairs
+
+    config = _config(tmp_path)
+    assert config.comics_root is not None
+    legacy = config.comics_root / "Saga" / "Specials" / "Saga - 001 - Saga Vol. 1.cbz"
+    _comic(
+        legacy,
+        series="Saga",
+        number="1",
+        title="Saga Vol. 1",
+        format_="Trade Paperback",
+    )
+    expected = config.comics_root / "Saga" / "Specials" / "Saga - v01 - Saga Vol. 1.cbz"
+
+    result = check_library(config.comics_root, config)
+    plan = plan_library_repairs(result, config)
+    outcome = apply_library_repairs(plan, config)
+
+    assert len(outcome.completed) == 1
+    assert not legacy.exists()
+    assert expected.is_file()
+    with zipfile.ZipFile(expected) as archive:
+        xml = archive.read("ComicInfo.xml").decode("utf-8")
+    assert "<Volume>1</Volume>" in xml
+    assert "<Number>" not in xml
+    refreshed = check_library(config.comics_root, config)
+    assert refreshed.canonical is True
+    assert refreshed.findings == ()
+
+
+def test_library_repair_moves_noncanonical_book_without_rewriting_bytes(tmp_path: Path) -> None:
+    from kavita_ingest.filesystem import sha256_file
+    from kavita_ingest.library_repair import apply_library_repairs, plan_library_repairs
+
+    config = _config(tmp_path)
+    assert config.books_root is not None
+    canonical = config.books_root / "Fixture Series" / "Fixture Series - 1.5 - Fixture Book.epub"
+    canonical.parent.mkdir(parents=True)
+    create_epub(canonical)
+    wrong = config.books_root / "Wrong Folder" / "Wrong Name.epub"
+    wrong.parent.mkdir(parents=True)
+    canonical.rename(wrong)
+    original_hash = sha256_file(wrong)
+
+    result = check_library(config.books_root, config)
+    plan = plan_library_repairs(result, config)
+
+    assert len(plan.actions) == 1
+    assert plan.actions[0].kind == "move"
+    assert plan.actions[0].destination == canonical
+    apply_library_repairs(plan, config)
+    assert canonical.is_file()
+    assert sha256_file(canonical) == original_hash
+    assert not wrong.exists()
+
+
+def test_library_repair_refuses_destination_collision(tmp_path: Path) -> None:
+    from kavita_ingest.library_repair import plan_library_repairs
+
+    config = _config(tmp_path)
+    assert config.comics_root is not None
+    legacy = config.comics_root / "Saga" / "Specials" / "Saga - 001 - Saga Vol. 1.cbz"
+    expected = config.comics_root / "Saga" / "Specials" / "Saga - v01 - Saga Vol. 1.cbz"
+    _comic(
+        legacy,
+        series="Saga",
+        number="1",
+        title="Saga Vol. 1",
+        format_="Trade Paperback",
+    )
+    _comic(
+        expected,
+        series="Saga",
+        number="",
+        volume="1",
+        title="Saga Vol. 1",
+        format_="Trade Paperback",
+    )
+
+    plan = plan_library_repairs(check_library(config.comics_root, config), config)
+
+    assert plan.actions == ()
+    assert any(advice.path == legacy for advice in plan.manual)
+    assert any(
+        "duplicate" in line.casefold()
+        for advice in plan.manual
+        for line in advice.guidance
+    )
+
+
+def test_library_repair_refuses_source_changed_after_plan(tmp_path: Path) -> None:
+    import pytest
+
+    from kavita_ingest.library_repair import apply_library_repairs, plan_library_repairs
+
+    config = _config(tmp_path)
+    assert config.comics_root is not None
+    legacy = config.comics_root / "Saga" / "Specials" / "Saga - 001 - Saga Vol. 1.cbz"
+    _comic(
+        legacy,
+        series="Saga",
+        number="1",
+        title="Saga Vol. 1",
+        format_="Trade Paperback",
+    )
+    plan = plan_library_repairs(check_library(config.comics_root, config), config)
+    legacy.write_bytes(legacy.read_bytes() + b"changed")
+
+    with pytest.raises(ValueError, match="changed since the plan"):
+        apply_library_repairs(plan, config)
+
+
+def test_library_fix_cli_applies_safe_repairs_and_leaves_manual_issue(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    assert config.comics_root is not None
+    legacy = config.comics_root / "Saga" / "Specials" / "Saga - 001 - Saga Vol. 1.cbz"
+    _comic(
+        legacy,
+        series="Saga",
+        number="1",
+        title="Saga Vol. 1",
+        format_="Trade Paperback",
+    )
+    ambiguous = (
+        config.comics_root
+        / "Spider-Man - Life Story"
+        / "Specials"
+        / "Spider-Man - Life Story - 2nd edition.cbz"
+    )
+    _comic(
+        ambiguous,
+        series="Spider-Man - Life Story",
+        number="",
+        title="2nd edition",
+        format_="Trade Paperback",
+    )
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        f'[paths]\nbooks = "{config.books_root}"\ncomics = "{config.comics_root}"\n',
+        encoding="utf-8",
+    )
+
+    result = CliRunner().invoke(
+        app,
+        ["library-fix", str(config.comics_root), "--config", str(config_path), "--yes"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Applied 1 safe repair" in result.output
+    assert "Comic title contains only an edition label" in result.output
+    assert (config.comics_root / "Saga" / "Specials" / "Saga - v01 - Saga Vol. 1.cbz").is_file()
+    assert ambiguous.is_file()
+
+
+def test_library_repair_current_drift_shape_offers_six_safe_and_one_manual(tmp_path: Path) -> None:
+    from kavita_ingest.library_repair import plan_library_repairs
+
+    config = _config(tmp_path)
+    assert config.books_root is not None
+    assert config.comics_root is not None
+
+    canonical_book = (
+        config.books_root
+        / "Fixture Series"
+        / "Fixture Series - 1.5 - Fixture Book.epub"
+    )
+    canonical_book.parent.mkdir(parents=True)
+    create_epub(canonical_book)
+    wrong_book = config.books_root / "Old Fixture" / "Old Fixture.epub"
+    wrong_book.parent.mkdir(parents=True)
+    canonical_book.rename(wrong_book)
+
+    for series, count in (("Animal Man", 2), ("New X-Men", 3)):
+        for volume in range(1, count + 1):
+            path = (
+                config.comics_root
+                / series
+                / "Specials"
+                / f"{series} - {volume:03d} - {series} Vol. {volume}.cbz"
+            )
+            _comic(
+                path,
+                series=series,
+                number=str(volume),
+                title=f"{series} Vol. {volume}",
+                format_="Trade Paperback",
+            )
+
+    spider = (
+        config.comics_root
+        / "Spider-Man - Life Story"
+        / "Specials"
+        / "Spider-Man - Life Story - 2nd edition.cbz"
+    )
+    _comic(
+        spider,
+        series="Spider-Man - Life Story",
+        number="",
+        title="2nd edition",
+        format_="Trade Paperback",
+    )
+
+    result = check_library(tmp_path / "Libraries", config)
+    plan = plan_library_repairs(result, config)
+
+    assert len(plan.actions) == 6
+    assert len(plan.manual) == 1
+    assert plan.manual[0].path == spider
+
+
+def test_library_fix_cli_decline_keeps_library_unchanged(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    assert config.comics_root is not None
+    legacy = config.comics_root / "Saga" / "Specials" / "Saga - 001 - Saga Vol. 1.cbz"
+    _comic(
+        legacy,
+        series="Saga",
+        number="1",
+        title="Saga Vol. 1",
+        format_="Trade Paperback",
+    )
+    before = legacy.read_bytes()
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        f'[paths]\nbooks = "{config.books_root}"\ncomics = "{config.comics_root}"\n',
+        encoding="utf-8",
+    )
+
+    result = CliRunner().invoke(
+        app,
+        ["library-fix", str(config.comics_root), "--config", str(config_path)],
+        input="n\n",
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "No changes made" in result.output
+    assert legacy.read_bytes() == before
+    assert not (config.comics_root / "Saga" / "Specials" / "Saga - v01 - Saga Vol. 1.cbz").exists()

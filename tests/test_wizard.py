@@ -1277,3 +1277,47 @@ offline = true
     assert "Kavita readiness: PASS" in result.output
     assert "No problems found" in result.output
     assert "No changes made" in result.output
+
+
+def test_wizard_library_check_can_review_and_apply_safe_repairs(tmp_path: Path) -> None:
+    incoming = tmp_path / "incoming"
+    books = tmp_path / "books"
+    comics = tmp_path / "comics"
+    for directory in (incoming, books, comics):
+        directory.mkdir()
+    legacy = comics / "Saga" / "Specials" / "Saga - 001 - Saga Vol. 1.cbz"
+    legacy.parent.mkdir(parents=True)
+    with zipfile.ZipFile(legacy, "w") as archive:
+        archive.writestr("001.jpg", b"image")
+        archive.writestr(
+            "ComicInfo.xml",
+            "<ComicInfo><Title>Saga Vol. 1</Title><Series>Saga</Series>"
+            "<Number>1</Number><Format>Trade Paperback</Format></ComicInfo>",
+        )
+    config = tmp_path / "library-fix-wizard.toml"
+    config.write_text(
+        f'''[paths]
+incoming = ["{incoming}"]
+books = "{books}"
+comics = "{comics}"
+database = "{tmp_path / 'state.sqlite3'}"
+
+[providers]
+offline = true
+''',
+        encoding="utf-8",
+    )
+
+    result = CliRunner().invoke(
+        app,
+        ["wizard", "--config", str(config)],
+        input="l\ny\nAPPLY 1 FIXES\nq\n",
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "can be repaired automatically" in result.output
+    assert "Safe library repair plan" in result.output
+    assert "Applied 1 safe repair" in result.output
+    assert "kavita-ingest layout: CANONICAL" in result.output
+    assert (comics / "Saga" / "Specials" / "Saga - v01 - Saga Vol. 1.cbz").is_file()
+    assert not legacy.exists()

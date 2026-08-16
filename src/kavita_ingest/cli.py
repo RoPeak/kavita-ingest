@@ -19,6 +19,13 @@ from .decisions import DecisionRepository, reopen_review
 from .discovery import inspect_source
 from .doctor import checks
 from .library_check import check_library, render_library_check
+from .library_repair import (
+    apply_library_repairs,
+    plan_library_repairs,
+    render_library_repair_plan,
+    render_library_repair_summary,
+    render_manual_guidance,
+)
 from .locking import LockUnavailable
 from .logging_config import configure_logging, provider_secrets, set_console_verbosity
 from .matching import CandidateScore, usable_identity_scores
@@ -50,6 +57,9 @@ ROOT_EPILOG = """Common commands:
 
   kavita-ingest library-check [ROOT]
       Read-only audit of configured Kavita libraries and naming/layout drift.
+
+  kavita-ingest library-fix [ROOT]
+      Review and explicitly apply only safe, locally determined library repairs.
 
   kavita-ingest apply-status PLAN_ID --details
       Show per-item apply/recovery evidence and failure details.
@@ -269,10 +279,82 @@ def library_check_command(
     if as_json:
         _emit_json("library-check", result.to_dict())
     else:
-        render_library_check(result, Console(), details=details)
+        console = Console()
+        render_library_check(result, console, details=details)
+        repair_plan = plan_library_repairs(result, settings)
+        render_library_repair_summary(repair_plan, console)
+        render_manual_guidance(repair_plan, console)
+        if repair_plan.actions:
+            console.print("\n[dim]Run `ki library-fix` to review the safe automatic repairs.[/dim]")
 
     if result.errors or (strict and result.warnings):
         raise typer.Exit(1)
+
+
+@app.command("library-fix")
+def library_fix_command(
+    root: Annotated[
+        Path | None,
+        typer.Argument(
+            help=(
+                "Directory to repair. Omit to use all configured destination libraries; "
+                "an ancestor such as ~/Libraries is also accepted."
+            )
+        ),
+    ] = None,
+    config: Annotated[
+        Path | None, typer.Option("--config", help="TOML configuration path.")
+    ] = None,
+    yes: Annotated[
+        bool,
+        typer.Option(
+            "--yes",
+            help="Apply the displayed safe repair plan without the final confirmation prompt.",
+        ),
+    ] = False,
+) -> None:
+    """Review and apply conservative, no-clobber repairs derived from library-check."""
+    settings = load_config(config)
+    configure_logging(settings.log_level, secrets=provider_secrets(settings))
+    console = Console()
+    try:
+        result = check_library(root, settings)
+        plan = plan_library_repairs(result, settings)
+    except (OSError, ValueError) as exc:
+        typer.echo(f"REFUSED: {exc}", err=True)
+        raise typer.Exit(2) from exc
+
+    render_library_check(result, console, show_read_only_note=False)
+    render_library_repair_summary(plan, console)
+    render_manual_guidance(plan, console)
+    if not plan.actions:
+        console.print("\nNo safe automatic repairs are available. No changes made.")
+        return
+    render_library_repair_plan(plan, console)
+    if not yes and not typer.confirm(
+        f"Apply these {len(plan.actions)} safe repair(s)?", default=False
+    ):
+        typer.echo("No changes made.")
+        return
+    try:
+        outcome = apply_library_repairs(plan, settings)
+        refreshed = check_library(root, settings)
+    except (OSError, ValueError) as exc:
+        typer.echo(f"REPAIR STOPPED: {exc}", err=True)
+        typer.echo(
+            "Any earlier completed file repairs remain valid. "
+            "Rerun library-check before continuing.",
+            err=True,
+        )
+        raise typer.Exit(2) from exc
+    console.print(
+        f"\n[bold green]✓ Applied {len(outcome.completed)} safe "
+        f"repair{'s' if len(outcome.completed) != 1 else ''}.[/bold green]"
+    )
+    render_library_check(refreshed, console)
+    remaining = plan_library_repairs(refreshed, settings)
+    render_library_repair_summary(remaining, console)
+    render_manual_guidance(remaining, console)
 
 
 @app.command("audit")

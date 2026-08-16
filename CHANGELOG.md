@@ -15,6 +15,7 @@ All notable release-level changes to Kavita Ingest are recorded here.
 
 ### Added
 
+- Add conservative library remediation planning: the wizard now classifies library-check findings into safe automatic repairs versus human-judgement items, displays a full repair plan, requires typed confirmation before applying it, reruns the health check afterwards, and provides plain manual guidance when automation would require a guess. Add the equivalent `library-fix [ROOT]` command with explicit confirmation/`--yes`.
 - Integrate the read-only library health check into the guided wizard home screen and post-ingest finish menu via `[L] Check libraries`.
 - Add `library-check [ROOT]`, a provider-free and database-free destination audit that distinguishes Kavita-readiness errors from kavita-ingest canonical naming/layout drift. It can check all configured libraries, an ancestor such as `~/Libraries`, or a configured subdirectory; reports expected canonical paths, duplicate comic slots, mixed/split series folders, root-level media, signature/extension mismatches, missing metadata, `Specials/` placement, collection `vNN` naming and noncanonical CBR containers; and supports `--details`, `--strict`, and versioned `--json`.
 - Add `reset-published` to atomically return an unchanged, hash-verified completed publication to a configured Incoming path for correction while retaining journal history.
@@ -22,7 +23,7 @@ All notable release-level changes to Kavita Ingest are recorded here.
 
 ### Safety
 
-- `library-check` is intentionally read-only: it performs local signature/metadata inspection only, makes no provider requests, hashes or rewrites no media, writes no SQLite state, follows no symlink directories, and offers diagnoses/expected paths without an automatic fix mode.
+- `library-check` remains intentionally read-only. Automatic remediation is a separate, explicit plan/apply step: only unambiguous local repairs are eligible; source SHA-256 is bound before change; destinations are no-clobber; CBZ/CBR metadata/container transformations are staged and verified before originals are removed; collisions and ambiguous identity/metadata findings remain guidance-only.
 - Material collection conflicts now require typed `ACCEPT <rank>` acknowledgement at review, and any immutable plan carrying such overrides requires typed `APPROVE RISKY PLAN` acknowledgement before approval.
 - Published reset refuses unrecorded, modified, colliding, outside-Incoming, or cross-filesystem targets; review reopening is append-only and invalidates dependent plans through the normal decision-head mechanism.
 - Comic plans created before the explicit ComicInfo compatibility profile remain auditable but must be regenerated and re-approved before Apply, preventing old immutable plan bytes from silently authorizing changed writer semantics.

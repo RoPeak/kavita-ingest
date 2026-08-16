@@ -22,6 +22,13 @@ from .db import connect, migrate
 from .decisions import DecisionRepository, decision_needs_review
 from .doctor import Check, checks
 from .library_check import check_library, render_library_check
+from .library_repair import (
+    apply_library_repairs,
+    plan_library_repairs,
+    render_library_repair_plan,
+    render_library_repair_summary,
+    render_manual_guidance,
+)
 from .paths import AppPaths
 from .plan_store import PlanStore, StoredPlan
 from .planning_service import NoActionableItems, PlanBuilder, PlanBuildResult
@@ -769,10 +776,65 @@ def _diagnostics(config: AppConfig, config_path: Path | None, output: Console) -
 def _library_health_check(config: AppConfig, output: Console) -> None:
     try:
         result = check_library(None, config)
+        repair_plan = plan_library_repairs(result, config)
     except (OSError, ValueError) as exc:
         output.print(f"[bold red]Library check could not run:[/bold red] {exc}")
-    else:
-        render_library_check(result, output)
+        _reader_pause(output, "Press Enter to return to the wizard")
+        return
+
+    render_library_check(result, output, show_read_only_note=False)
+    render_library_repair_summary(repair_plan, output)
+    render_manual_guidance(repair_plan, output)
+    if not repair_plan.actions:
+        output.print("\n[dim]No safe automatic repairs are currently available.[/dim]")
+        _reader_pause(output, "Press Enter to return to the wizard")
+        return
+
+    output.print(
+        "\n[dim]Nothing has changed yet. Automatic repair is optional and will never "
+        "overwrite an existing destination.[/dim]"
+    )
+    if not typer.confirm(
+        "Review the safe automatic repair plan now?", default=False
+    ):
+        output.print("No files changed. You can run `ki library-fix` later.")
+        _reader_pause(output, "Press Enter to return to the wizard")
+        return
+
+
+    render_library_repair_plan(repair_plan, output)
+    phrase = f"APPLY {len(repair_plan.actions)} FIXES"
+    entered = typer.prompt(
+        f"Type '{phrase}' to apply exactly these safe repairs",
+        default="",
+        show_default=False,
+    ).strip()
+    if entered != phrase:
+        output.print("Confirmation did not match. No files changed.")
+        _reader_pause(output, "Press Enter to return to the wizard")
+        return
+
+    try:
+        outcome = apply_library_repairs(repair_plan, config)
+        refreshed = check_library(None, config)
+        remaining = plan_library_repairs(refreshed, config)
+    except (OSError, ValueError) as exc:
+        output.print(f"[bold red]Library repair stopped:[/bold red] {exc}")
+        output.print(
+            "Earlier completed file repairs, if any, remain valid. "
+            "Run the library check again before continuing."
+        )
+        _reader_pause(output, "Press Enter to return to the wizard")
+        return
+
+    output.print(
+        f"\n[bold green]✓ Applied {len(outcome.completed)} safe "
+        f"repair{'s' if len(outcome.completed) != 1 else ''}.[/bold green]"
+    )
+    render_library_check(refreshed, output, show_read_only_note=False)
+    render_library_repair_summary(remaining, output)
+    render_manual_guidance(remaining, output)
+    output.print("\n[dim]Only the explicitly confirmed repairs above were changed.[/dim]")
     _reader_pause(output, "Press Enter to return to the wizard")
 
 
