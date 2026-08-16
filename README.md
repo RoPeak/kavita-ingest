@@ -284,13 +284,34 @@ publication date components, and language. Ordinary comic issues and run context
 use Comic Vine. Collected editions are not guessed from same-titled Comic Vine
 volumes: edition-capable book providers may supply a true edition record, which
 is then adapted into the comic-collection domain. Provider lookup uses a bounded
-query ladder for catalogue conventions that embed creator credits in the title
-and spell collection numbers as either digits or words, then falls back to a
-relaxed series/creator search only when the precise variants find nothing. A
-numbered local collection must still have independent provider title/sequence
+query ladder for catalogue conventions that embed creator credits in the title,
+spell collection numbers as either digits or words, and vary between `Volume N`,
+`Vol. N`, and `Series, Vol. N` punctuation. Creator-free variants remain in the
+ladder when a creator hint is present, so a typo cannot remove all recall. A
+confirmed writer from one accepted collection can be used as a search-only hint
+for remaining collections in the same review pass; it is never silently promoted
+to local identity evidence.
+
+A numbered local collection must still have independent provider title/sequence
 evidence for the same Book/Volume number before adaptation; the local number is
-never silently copied onto a sequence-less or contradictory edition. Regular
-issue records still cannot satisfy a collected-edition identity.
+never silently copied onto a sequence-less or contradictory edition. Explicit
+local collection years are strong edition evidence: an exact year supports
+automatic eligibility, while a difference of two or more years is a material
+edition conflict. Publisher conflicts, incompatible/missing distinctive edition
+qualifiers, and material title conflicts are likewise surfaced rather than
+hidden by a high aggregate score. Regular issue records still cannot satisfy a
+collected-edition identity.
+
+For accepted numbered collections, canonical `collection_volume` is derived from
+an independently verified integer collection sequence. Kavita Flexible projection
+writes that value to ComicInfo `Volume`, clears issue `Number`, and uses a `vNN`
+filename token while retaining the deliberate `Specials/` representation. Review
+labels the value as `Collection volume`, not `Issue`. Structured collection
+filenames also outrank stale embedded collection title/series fields during local
+parsing, which allows a previously published file to be renamed accurately and
+returned to Incoming for clean re-review without trusting metadata written by a
+bad earlier acceptance. Sparse provider identity may still prove an edition
+without erasing richer non-conflicting local descriptive titles.
 
 PDF comics use a separate Calibre/XMP projection rather than ComicInfo fields.
 The canonical issue number remains in the filename for Comic (Flexible) parsing;
@@ -320,6 +341,15 @@ requirements, source lifecycle, naming policy, archive safety limits, and CBR
 conversion policy. Apply re-detects that signature instead of trusting a filename
 extension, so ZIP-backed comics carrying a `.cbr` suffix can be normalized safely
 to `.cbz` without weakening source preconditions.
+
+Review diagnostics are available for every item with `[D]`, even when candidates
+exist, so provider strategies and filtered-result reasons remain inspectable.
+Accepting an ordinary low-confidence candidate still requires explicit
+confirmation. If the selected collection candidate has a material evidence
+conflict, review instead requires typing `ACCEPT <rank>`. The compact plan preview
+lists every low-confidence override and its material conflicts; a plan containing
+material-conflict overrides requires the exact typed acknowledgement
+`APPROVE RISKY PLAN` before its immutable digest can be approved.
 
 `plan create ROOT` consumes only persisted scan/classification evidence and the
 latest explicit review decisions under `ROOT`. It re-fingerprints every source,
@@ -394,6 +424,19 @@ before publication, so the published inode has the planned mode. Existing
 directories and source modes are not changed.
 
 ## Recovery and rollback preview
+
+A completed publication that was later determined to have the wrong identity can
+be returned to Incoming without editing SQLite or weakening the historical
+journal. `kavita-ingest reset-published DESTINATION --to Comics/Corrected.cbz`
+first requires the current destination bytes to match a durable completed Apply
+hash, requires the target to stay under a configured Incoming root, refuses
+collisions and cross-filesystem moves, then atomically moves the verified output
+back for normal review. The historical Apply record remains unchanged.
+
+An explicit unresolved/rejected/accepted decision for a source that is still in
+Incoming can be deliberately reopened with `kavita-ingest reopen-review SOURCE`.
+This appends a `review_reopened` marker rather than deleting history or changing
+media bytes, causing the next wizard run to treat that source as pending review.
 
 Use `kavita-ingest apply-status PLAN_ID` for a human summary, add `--details` to
 inspect per-item recovery evidence, and use

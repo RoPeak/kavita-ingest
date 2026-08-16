@@ -102,9 +102,13 @@ def project_comic(
     item_type = identity.item_type or "issue"
     collection_like = item_type in {"trade", "collected-edition", "omnibus"}
     number = (
-        identity.sequence.normalized
-        if identity.sequence
-        else ("" if collection_like else "1")
+        ""
+        if collection_like and identity.collection_volume is not None
+        else (
+            identity.sequence.normalized
+            if identity.sequence
+            else ("" if collection_like else "1")
+        )
     )
     comic_format = _FORMATS.get(item_type, "")
     volume = identity.collection_volume if identity.collection_volume is not None else ""
@@ -135,7 +139,11 @@ def project_comic(
         "title": identity.title or None,
         "series": series,
         "series_or_title": series,
-        "number": render_sequence(identity.sequence, policy.integer_padding),
+        "number": (
+            f"v{identity.collection_volume:02d}"
+            if identity.collection_volume is not None
+            else render_sequence(identity.sequence, policy.integer_padding)
+        ),
         "year": identity.run_start_year,
         "author": identity.creators[0] if identity.creators else None,
         "format": comic_format or None,
@@ -187,7 +195,11 @@ def project_comic_pdf(
         "title": identity.title or None,
         "series": series,
         "series_or_title": series,
-        "number": render_sequence(identity.sequence, policy.integer_padding),
+        "number": (
+            f"v{identity.collection_volume:02d}"
+            if identity.collection_volume is not None
+            else render_sequence(identity.sequence, policy.integer_padding)
+        ),
         "year": identity.run_start_year,
         "author": identity.creators[0] if identity.creators else None,
         "format": comic_format or None,

@@ -13,6 +13,7 @@ from kavita_ingest.apply_journal import ItemState, RunState
 from kavita_ingest.db import connect
 from kavita_ingest.plan_store import PlanStore, StoredPlan
 from kavita_ingest.presentation import (
+    plan_acceptance_risks,
     render_apply_summary,
     render_completed_apply,
     render_plan_details,
@@ -199,3 +200,47 @@ def test_failed_apply_summary_surfaces_item_error_and_safe_next_action() -> None
     assert "retry staging only" in text
     assert "ki apply-status <plan> --details" in text
     assert len(max((line for line in text.splitlines() if "Error:" in line), key=len)) < 340
+
+
+def test_compact_plan_preview_surfaces_low_confidence_and_material_conflicts() -> None:
+    base = _display_plan_with_sequences([1, 2])
+    document = json.loads(base.canonical_json)
+    document["items"][0]["provenance"] = {
+        "acceptance": {
+            "eligible_at_acceptance": False,
+            "low_confidence_override": True,
+            "score": 21.0,
+            "runner_up_margin": 11.0,
+            "material_conflicts": [
+                "collection edition years disagree materially",
+            ],
+        }
+    }
+    payload = json.dumps(document, sort_keys=True).encode()
+    plan = StoredPlan(
+        base.id,
+        base.schema_version,
+        payload,
+        len(payload),
+        hashlib.sha256(payload).hexdigest(),
+        base.status,
+        base.created_at,
+        base.approved_at,
+        base.approval_digest,
+    )
+    stream = io.StringIO()
+
+    render_plan_summary(
+        plan,
+        Console(file=stream, width=100, force_terminal=False),
+        technical_header=False,
+        compact=True,
+    )
+
+    risks = plan_acceptance_risks(document)
+    text = stream.getvalue()
+    assert len(risks) == 1
+    assert risks[0]["source"] == "Watchmen #1.pdf"
+    assert "1 explicit low-confidence override" in text
+    assert "MATERIAL CONFLICT" in text
+    assert "collection edition years disagree materially" in text

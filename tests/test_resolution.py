@@ -11,7 +11,7 @@ from kavita_ingest.decisions import (
     add_manual_override,
 )
 from kavita_ingest.domain import MediaKind, SequenceNumber, SourceFormat, SourceRecord
-from kavita_ingest.matching import CandidateScore, Reconciliation
+from kavita_ingest.matching import CandidateScore, LocalIdentity, Reconciliation
 from kavita_ingest.projection import project_book, project_comic
 from kavita_ingest.providers.models import (
     Contributor,
@@ -210,3 +210,135 @@ def test_historical_complete_book_work_decision_still_resolves_work_only(tmp_pat
         "language",
         "identifiers",
     }
+
+
+def test_accepted_collection_sequence_becomes_canonical_collection_volume(tmp_path: Path) -> None:
+    database = tmp_path / "state.sqlite3"
+    migrate(database)
+    source = _source()
+    candidate = NormalizedCandidate(
+        ProviderName.OPEN_LIBRARY,
+        "OL-SAGA-2",
+        RecordType.COMIC_COLLECTION,
+        MediaKind.COMIC,
+        "Saga, Vol. 2",
+        creators=(Contributor("Brian K. Vaughan", "writer"),),
+        publisher="Image Comics",
+        publication_date="2013-06-19",
+        series_title="Saga",
+        sequence=SequenceNumber.parse("2"),
+        item_type="collected-edition",
+    )
+    local = LocalIdentity(
+        MediaKind.COMIC,
+        "collected-edition",
+        0.98,
+        "Volume 2",
+        series_title="Saga",
+        sequence=SequenceNumber.parse("2"),
+        year=2013,
+    )
+    score = CandidateScore(candidate, 99, 0.98, (), (), False, True, eligible=True)
+    with connect(database) as connection:
+        repository = DecisionRepository(connection)
+        accept_candidate(
+            repository,
+            source,
+            score,
+            Reconciliation(None, None, (), ()),
+            local.evidence_hash(),
+            local_identity=local,
+        )
+        resolved = resolve_explicit_identity(repository, source, MediaKind.COMIC)
+
+    assert resolved.identity is not None
+    assert resolved.identity.collection_volume == 2
+    assert resolved.identity.sequence is not None
+    assert resolved.identity.sequence.normalized == "2"
+
+
+def test_sparse_collection_provider_title_preserves_descriptive_local_title(tmp_path: Path) -> None:
+    database = tmp_path / "state.sqlite3"
+    migrate(database)
+    source = _source()
+    candidate = NormalizedCandidate(
+        ProviderName.OPEN_LIBRARY,
+        "OL-BONE",
+        RecordType.COMIC_COLLECTION,
+        MediaKind.COMIC,
+        "Bone",
+        creators=(Contributor("Jeff Smith", "writer"),),
+        publisher="Cartoon Books",
+        publication_date="2004",
+        series_title="Bone",
+        item_type="collected-edition",
+    )
+    local = LocalIdentity(
+        MediaKind.COMIC,
+        "collected-edition",
+        0.98,
+        "The Complete Cartoon Epic in One Volume",
+        series_title="Bone",
+        year=2004,
+        edition_qualifiers=("The Complete Cartoon Epic in One Volume",),
+    )
+    score = CandidateScore(candidate, 99, 0.98, (), (), False, True, eligible=True)
+    with connect(database) as connection:
+        repository = DecisionRepository(connection)
+        accept_candidate(
+            repository,
+            source,
+            score,
+            Reconciliation(None, None, (), ()),
+            local.evidence_hash(),
+            local_identity=local,
+        )
+        resolved = resolve_explicit_identity(repository, source, MediaKind.COMIC)
+
+    assert resolved.identity is not None
+    assert resolved.identity.title == "The Complete Cartoon Epic in One Volume"
+    assert resolved.identity.provenance["title_source"] == "local_descriptive_title"
+
+
+def test_generic_provider_issue_title_preserves_richer_local_issue_title(tmp_path: Path) -> None:
+    database = tmp_path / "state.sqlite3"
+    migrate(database)
+    source = _source()
+    candidate = NormalizedCandidate(
+        ProviderName.COMIC_VINE,
+        "4000-oblivion-1",
+        RecordType.COMIC_ISSUE,
+        MediaKind.COMIC,
+        "Oblivion Song",
+        creators=(Contributor("Robert Kirkman", "writer"),),
+        series_title="Oblivion Song",
+        sequence=SequenceNumber.parse("1"),
+        run_start_year=2018,
+        item_type="issue",
+        run_id="4050-oblivion",
+    )
+    local = LocalIdentity(
+        MediaKind.COMIC,
+        "issue",
+        0.98,
+        "Chapter One",
+        series_title="Oblivion Song",
+        sequence=SequenceNumber.parse("1"),
+        year=2018,
+    )
+    score = CandidateScore(candidate, 99, 0.98, (), (), False, True, eligible=True)
+    with connect(database) as connection:
+        repository = DecisionRepository(connection)
+        accept_candidate(
+            repository,
+            source,
+            score,
+            Reconciliation(None, None, (), ()),
+            local.evidence_hash(),
+            local_identity=local,
+        )
+        resolved = resolve_explicit_identity(repository, source, MediaKind.COMIC)
+
+    assert resolved.identity is not None
+    assert resolved.identity.title == "Chapter One"
+    assert resolved.identity.provenance["title_source"] == "local_descriptive_title"

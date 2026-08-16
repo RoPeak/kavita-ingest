@@ -6,10 +6,21 @@ All notable release-level changes to Kavita Ingest are recorded here.
 
 ### Fixed
 
+- Harden collected-edition identification around real catalogue conventions: parse corrected `Series, Vol. N` filenames even over stale embedded metadata, search deterministic `Volume`/`Vol.` punctuation variants, preserve creator-free recall, and treat large edition-year mismatches as material conflicts instead of weak penalties.
+- Preserve real collection-volume semantics through acceptance and planning: integer collection sequence now resolves to canonical `collection_volume`, ComicInfo `Volume` is written while issue `Number` is cleared, and Kavita Flexible filenames use `vNN` inside the existing `Specials/` model.
+- Preserve richer non-conflicting local descriptive metadata when a sparse provider title collapses to the series name, including collected-edition subtitles and meaningful issue titles.
+- Keep search diagnostics available even when candidates exist, reuse a confirmed collection writer as a search-only sibling hint, and surface every low-confidence/material-conflict override in the compact immutable plan preview.
 - Preserve existing ComicInfo `Page@ImageHash` extension metadata under an explicit plan-frozen compatibility profile, while continuing to reject unrelated schema incompatibilities and independently verifying that ImageHash values survive publication unchanged.
+
+### Added
+
+- Add `reset-published` to atomically return an unchanged, hash-verified completed publication to a configured Incoming path for correction while retaining journal history.
+- Add `reopen-review` to append an auditable pending-review marker for a current Incoming source without changing media bytes or deleting prior decisions.
 
 ### Safety
 
+- Material collection conflicts now require typed `ACCEPT <rank>` acknowledgement at review, and any immutable plan carrying such overrides requires typed `APPROVE RISKY PLAN` acknowledgement before approval.
+- Published reset refuses unrecorded, modified, colliding, outside-Incoming, or cross-filesystem targets; review reopening is append-only and invalidates dependent plans through the normal decision-head mechanism.
 - Comic plans created before the explicit ComicInfo compatibility profile remain auditable but must be regenerated and re-approved before Apply, preventing old immutable plan bytes from silently authorizing changed writer semantics.
 
 ## [1.1.0] - 2026-08-14

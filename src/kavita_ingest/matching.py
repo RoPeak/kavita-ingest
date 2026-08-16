@@ -72,6 +72,7 @@ class CandidateScore:
     contradictions: tuple[str, ...]
     hard_contradiction: bool
     identity_fields_high: bool
+    material_conflicts: tuple[str, ...] = ()
     rank: int = 0
     runner_up_margin: float = 0.0
     eligible: bool = False
@@ -88,6 +89,7 @@ class CandidateScore:
             for item in self.comparisons
         )
         lines.extend(f"CONTRADICTION: {item}" for item in self.contradictions)
+        lines.extend(f"MATERIAL CONFLICT: {item}" for item in self.material_conflicts)
         lines.append(f"Eligible for explicit acceptance: {'yes' if self.eligible else 'no'}")
         return tuple(lines)
 
@@ -165,17 +167,18 @@ def score_candidates(
         )
         output.append(
             CandidateScore(
-                item.candidate,
-                item.score,
-                item.classification_confidence,
-                item.comparisons,
-                item.contradictions,
-                item.hard_contradiction,
-                item.identity_fields_high,
-                index + 1,
-                margin,
-                eligible,
-                item.suppressed,
+                candidate=item.candidate,
+                score=item.score,
+                classification_confidence=item.classification_confidence,
+                comparisons=item.comparisons,
+                contradictions=item.contradictions,
+                hard_contradiction=item.hard_contradiction,
+                identity_fields_high=item.identity_fields_high,
+                material_conflicts=item.material_conflicts,
+                rank=index + 1,
+                runner_up_margin=margin,
+                eligible=eligible,
+                suppressed=item.suppressed,
             )
         )
     return output
@@ -556,7 +559,13 @@ def _score(local: LocalIdentity, candidate: NormalizedCandidate) -> CandidateSco
         if difference == 0:
             comparisons.append(
                 _comparison(
-                    "year", local.year, candidate_year, ComparisonKind.EXACT, 8, 1, "years agree"
+                    "year",
+                    local.year,
+                    candidate_year,
+                    ComparisonKind.EXACT,
+                    20 if collected else 8,
+                    1,
+                    "collection edition years agree" if collected else "years agree",
                 )
             )
         elif difference == 1:
@@ -566,9 +575,13 @@ def _score(local: LocalIdentity, candidate: NormalizedCandidate) -> CandidateSco
                     local.year,
                     candidate_year,
                     ComparisonKind.SUPPORTING,
-                    3,
+                    2 if collected else 3,
                     0.6,
-                    "years differ by one",
+                    (
+                        "collection edition years differ by one"
+                        if collected
+                        else "years differ by one"
+                    ),
                 )
             )
         else:
@@ -578,9 +591,11 @@ def _score(local: LocalIdentity, candidate: NormalizedCandidate) -> CandidateSco
                     local.year,
                     candidate_year,
                     ComparisonKind.CONFLICT,
-                    -7,
+                    -35 if collected else -7,
                     min(difference / 10, 1),
-                    "years disagree",
+                    "collection edition years disagree materially"
+                    if collected
+                    else "years disagree",
                 )
             )
     if local.run_start_year and candidate.run_start_year:
@@ -622,15 +637,53 @@ def _score(local: LocalIdentity, candidate: NormalizedCandidate) -> CandidateSco
             for qualifier in local.edition_qualifiers
         )
     )
-    return CandidateScore(
-        candidate,
-        total,
-        local.classification_confidence,
-        tuple(comparisons),
-        tuple(contradictions),
-        hard,
-        title_high and sequence_high and publisher_high and qualifier_high,
+    year_high = (
+        not collected
+        or local.year is None
+        or candidate_year is None
+        or any(
+            item.field == "year" and item.kind is ComparisonKind.EXACT
+            for item in comparisons
+        )
     )
+    material_conflicts = _material_conflicts(comparisons, collected=collected)
+    return CandidateScore(
+        candidate=candidate,
+        score=total,
+        classification_confidence=local.classification_confidence,
+        comparisons=tuple(comparisons),
+        contradictions=tuple(contradictions),
+        hard_contradiction=hard,
+        identity_fields_high=(
+            title_high and sequence_high and publisher_high and qualifier_high and year_high
+        ),
+        material_conflicts=material_conflicts,
+    )
+
+
+def _material_conflicts(
+    comparisons: list[FieldComparison], *, collected: bool
+) -> tuple[str, ...]:
+    if not collected:
+        return ()
+    reasons: list[str] = []
+    for item in comparisons:
+        publisher_conflict = (
+            item.field == "publisher" and item.kind is ComparisonKind.CONFLICT
+        )
+        qualifier_conflict = item.field == "edition_qualifier" and item.kind in {
+            ComparisonKind.CONFLICT,
+            ComparisonKind.MISSING,
+        }
+        year_conflict = (
+            item.field == "year"
+            and item.kind is ComparisonKind.CONFLICT
+            and "materially" in item.reason
+        )
+        title_conflict = item.field == "title" and item.kind is ComparisonKind.CONFLICT
+        if publisher_conflict or qualifier_conflict or year_conflict or title_conflict:
+            reasons.append(item.reason)
+    return tuple(dict.fromkeys(reasons))
 
 
 def _identifier_score(

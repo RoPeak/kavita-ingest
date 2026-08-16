@@ -60,6 +60,7 @@ def interactive_review(
         key: 0 for key in ("accepted", "work_only", "manual", "rejected", "unresolved", "skipped")
     }
     decided_this_pass: set[str] = set()
+    collection_search_hints: dict[str, tuple[str, ...]] = {}
     restart_requested = False
     try:
         for item in audit.items:
@@ -68,8 +69,22 @@ def interactive_review(
                 and item.scan.source.sha256 not in review_fingerprints
             ):
                 continue
-            current = item
             source_evidence_hash = item.local.evidence_hash()
+            current = item
+            hint = collection_search_hints.get(_collection_hint_key(item.local))
+            if hint and item.local.subtype == "collected-edition" and not item.local.creators:
+                current = _search_review_item(
+                    item,
+                    replace(item.local, creators=hint),
+                    providers,
+                    repository,
+                    config,
+                    source_evidence_hash,
+                )
+                output.print(
+                    "Using confirmed collection search hint for this series: "
+                    + ", ".join(hint)
+                )
             advanced = not wizard_mode
             selected_rank = (
                 _displayed_scores(current)[0].rank if _displayed_scores(current) else None
@@ -101,6 +116,9 @@ def interactive_review(
                     advanced = True
                     output.print("Advanced review actions are now available for this item.")
                     render_needed = True
+                    continue
+                if action == "D":
+                    _show_candidate_diagnostics(output, current)
                     continue
                 if action == "V" and selected is None:
                     _show_candidate_diagnostics(output, current)
@@ -158,35 +176,13 @@ def interactive_review(
                             if current.local.kind.value == "comic"
                             else replace(current.local, title=query)
                         )
-                    generated = generate_candidates(search_local, providers)
-                    scores = score_candidates(
-                        current.local, list(generated.candidates), config.matching
-                    )
-                    scores = [
-                        replace(
-                            score,
-                            suppressed=repository.rejection_suppresses(
-                                current.scan.source,
-                                score.candidate.key,
-                                source_evidence_hash,
-                                score.candidate.data_hash(),
-                            ),
-                            eligible=score.eligible
-                            and not repository.rejection_suppresses(
-                                current.scan.source,
-                                score.candidate.key,
-                                source_evidence_hash,
-                                score.candidate.data_hash(),
-                            ),
-                        )
-                        for score in scores
-                    ]
-                    current = ReviewItem(
-                        current.scan,
-                        current.local,
-                        generated,
-                        tuple(scores),
-                        reconcile(current.local, scores[0] if scores else None),
+                    current = _search_review_item(
+                        current,
+                        search_local,
+                        providers,
+                        repository,
+                        config,
+                        source_evidence_hash,
                     )
                     displayed = _displayed_scores(current)
                     selected_rank = displayed[0].rank if displayed else None
@@ -261,8 +257,8 @@ def interactive_review(
                             "be accepted into a plan yet. Choose [G]roup-run first."
                         )
                         continue
-                    if not selected.eligible and not typer.confirm(
-                        _low_confidence_message(selected)
+                    if not selected.eligible and not _confirm_noneligible_candidate(
+                        selected, output
                     ):
                         output.print("Not accepted; no decision was saved.")
                         continue
@@ -284,8 +280,19 @@ def interactive_review(
                         source_evidence_hash,
                         work_only=work_only,
                         hydration=hydration.to_dict(),
+                        local_identity=current.local,
                     )
                     output.print("Decision saved.")
+                    if current.local.subtype == "collected-edition":
+                        writers = _candidate_writer_names(selected.candidate)
+                        hint_key = _collection_hint_key(current.local)
+                        if writers and hint_key not in collection_search_hints and typer.confirm(
+                            "Use " + writers[0] + " as a search hint for remaining "
+                            + (current.local.series_title or current.local.title)
+                            + " collections?",
+                            default=True,
+                        ):
+                            collection_search_hints[hint_key] = (writers[0],)
                     counts["work_only" if work_only else "accepted"] += 1
                     decided_this_pass.add(current.scan.source.sha256)
                     decided = True
@@ -387,6 +394,9 @@ def interactive_review(
                             hydrated_items,
                             confirmed_count=len(hydrated_items),
                             hydration=hydration_records,
+                            local_identities={
+                                item.scan.source.sha256: item.local for item in audit.items
+                            },
                         )
                         counts["accepted"] += len(hydrated_items)
                         output.print(f"Decisions saved: {len(hydrated_items)}.")
@@ -418,6 +428,52 @@ def interactive_review(
         return audit
     finally:
         connection.close()
+
+
+def _search_review_item(
+    current: ReviewItem,
+    search_local: LocalIdentity,
+    providers: tuple[Provider, ...],
+    repository: DecisionRepository,
+    config: AppConfig,
+    source_evidence_hash: str,
+) -> ReviewItem:
+    generated = generate_candidates(search_local, providers)
+    scores = score_candidates(current.local, list(generated.candidates), config.matching)
+    scored = []
+    for score in scores:
+        suppressed = repository.rejection_suppresses(
+            current.scan.source,
+            score.candidate.key,
+            source_evidence_hash,
+            score.candidate.data_hash(),
+        )
+        scored.append(
+            replace(
+                score,
+                suppressed=suppressed,
+                eligible=score.eligible and not suppressed,
+            )
+        )
+    return ReviewItem(
+        current.scan,
+        current.local,
+        generated,
+        tuple(scored),
+        reconcile(current.local, scored[0] if scored else None),
+    )
+
+
+def _collection_hint_key(local: LocalIdentity) -> str:
+    return run_group_key(local.series_title or local.title)
+
+
+def _candidate_writer_names(candidate: NormalizedCandidate) -> tuple[str, ...]:
+    return tuple(
+        dict.fromkeys(
+            item.name for item in candidate.creators if item.role.casefold() == "writer"
+        )
+    )
 
 
 def _batch_items(
@@ -541,9 +597,13 @@ def _show_item(
         f"({item.local.classification_confidence:.2f})"
     )
     if item.local.kind.value == "comic":
+        sequence_label = (
+            "Collection volume" if item.local.subtype == "collected-edition" else "Issue"
+        )
         local_evidence = (
             f"Series: {item.local.series_title or item.local.title}\n"
-            f"Issue: {item.local.sequence.normalized if item.local.sequence else 'unresolved'}"
+            f"{sequence_label}: "
+            f"{item.local.sequence.normalized if item.local.sequence else 'unresolved'}"
         )
         if item.local.subtype == "collected-edition":
             local_evidence += f"\nEdition year evidence: {item.local.year or 'none'}"
@@ -888,7 +948,7 @@ def _action_prompt(
     )
     if wizard_mode:
         if displayed:
-            actions = ["[V] View why"]
+            actions = ["[V] View why", "[D] Search diagnostics"]
             if candidate_planning_context_ready(item.local, displayed[0].candidate):
                 actions.insert(0, "[A] Accept")
             if len(group_batch) > 1:
@@ -907,6 +967,7 @@ def _action_prompt(
             [
                 "[S] Search",
                 "[V] Why no matches?",
+                "[D] Search diagnostics",
                 "[I] Enter identity",
                 "[U] Unresolved",
                 "[N] Next",
@@ -922,7 +983,7 @@ def _action_prompt(
     if displayed:
         actions.insert(0, "[A]ccept")
         actions.extend(["[R]eject", "[C]hoose candidate"])
-    actions.extend(["[S]earch", "[E]dit", "[I]dentity"])
+    actions.extend(["[S]earch", "[D]iagnostics", "[E]dit", "[I]dentity"])
     if displayed:
         if any(score.candidate.run_id for score in displayed):
             actions.append("[G]roup-run")
@@ -934,6 +995,28 @@ def _action_prompt(
     actions.extend(["[U]nresolved", "[K]skip", "[Q]uit"])
     return " ".join(actions)
 
+
+
+def _confirm_noneligible_candidate(score: CandidateScore, output: Console) -> bool:
+    if not score.material_conflicts:
+        return typer.confirm(_low_confidence_message(score))
+    output.print(
+        "[bold red]WARNING: candidate materially conflicts with local edition evidence.[/]"
+    )
+    output.print(
+        f"Score: {score.score:.1f}; runner-up margin: {score.runner_up_margin:.1f}"
+    )
+    for reason in score.material_conflicts:
+        output.print(f"  - {reason}")
+    token = f"ACCEPT {score.rank}"
+    response = str(
+        typer.prompt(
+            f"Type '{token}' to accept this conflicting candidate",
+            default="",
+            show_default=False,
+        )
+    ).strip().upper()
+    return response == token
 
 
 def _low_confidence_message(score: CandidateScore) -> str:

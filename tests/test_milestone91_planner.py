@@ -440,6 +440,8 @@ def test_incremental_absolute_batman_14_cli_journey_creates_plan_without_issue_o
     )
     document = json.loads(shown.stdout)["document"]
     item = document["items"][0]
+    assert item["provenance"]["acceptance"]["eligible_at_acceptance"] is True
+    assert item["provenance"]["acceptance"]["low_confidence_override"] is False
     assert item["canonical"]["provider_identity"]["run_id"] == "4050-160294"
     assert item["canonical"]["run_start_year"] == 2024
     assert item["canonical"]["sequence"]["normalized"] == "14"

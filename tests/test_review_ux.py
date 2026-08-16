@@ -30,12 +30,15 @@ from kavita_ingest.providers.models import (
 from kavita_ingest.review import (
     _action_prompt,
     _batch_items,
+    _candidate_writer_names,
     _candidate_writers,
     _choose_comic_vine_run,
     _collection_search_text,
+    _confirm_noneligible_candidate,
     _current_group_fingerprints,
     _hydrate_for_acceptance,
     _mark_incompatible_group_decisions,
+    _show_item,
     interactive_review,
 )
 from kavita_ingest.run_groups import run_group_key
@@ -870,3 +873,74 @@ def test_no_match_diagnostics_explain_provider_filtering(
     assert "3 returned, 0 usable" in text
     assert "collection sequence" in text and "conflict" in text
     assert "provider cannot prove collection" in text and "format" in text
+
+
+def test_search_diagnostics_action_is_available_even_with_candidates(tmp_path: Path) -> None:
+    audit = _audit(tmp_path, eligible=True)
+
+    prompt = _action_prompt(audit.items[0], audit, wizard_mode=True)
+
+    assert "[D] Search diagnostics" in prompt
+
+
+def test_collection_review_labels_sequence_as_collection_volume(tmp_path: Path) -> None:
+    audit = _audit(tmp_path, eligible=True)
+    item = audit.items[0]
+    local = LocalIdentity(
+        MediaKind.COMIC,
+        "collected-edition",
+        0.98,
+        "Volume 2",
+        series_title="Saga",
+        sequence=SequenceNumber.parse("2"),
+        year=2013,
+    )
+    output = io.StringIO()
+
+    _show_item(
+        Console(file=output, force_terminal=False),
+        replace(item, local=local),
+        selected_rank=None,
+        compact=True,
+    )
+
+    text = output.getvalue()
+    assert "Collection volume: 2" in text
+    assert "Issue: 2" not in text
+
+
+def test_material_conflict_requires_exact_typed_acceptance(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    score = replace(
+        _audit(tmp_path).items[0].scores[0],
+        rank=2,
+        eligible=False,
+        material_conflicts=("collection edition years disagree materially",),
+    )
+    output = io.StringIO()
+    answers = iter(["yes", "ACCEPT 2"])
+    monkeypatch.setattr(
+        "kavita_ingest.review.typer.prompt", lambda *args, **kwargs: next(answers)
+    )
+
+    assert not _confirm_noneligible_candidate(
+        score, Console(file=output, force_terminal=False)
+    )
+    assert _confirm_noneligible_candidate(
+        score, Console(file=output, force_terminal=False)
+    )
+    assert "WARNING: candidate materially conflicts" in output.getvalue()
+
+
+def test_collection_search_hint_uses_writer_role_only() -> None:
+    candidate = replace(
+        _candidate("hint", 2018, "2018-01-01"),
+        creators=(
+            Contributor("Brian K. Vaughan", "writer"),
+            Contributor("Brian K. Vaughan", "writer"),
+            Contributor("Fiona Staples", "artist"),
+        ),
+    )
+
+    assert _candidate_writer_names(candidate) == ("Brian K. Vaughan",)

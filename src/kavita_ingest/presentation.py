@@ -68,6 +68,7 @@ def render_plan_summary(
                     default="",
                     show_default=False,
                 )
+    _render_acceptance_risks(items, console)
     policy = document.get("planning_policy", {})
     permissions = policy.get("permissions", {}) if isinstance(policy, dict) else {}
     if permissions:
@@ -82,6 +83,31 @@ def render_plan_summary(
         )
     console.print(f"Blocking conflicts: {len(_conflicts(document))}")
     return document
+
+
+def plan_acceptance_risks(document: dict[str, Any]) -> list[dict[str, Any]]:
+    risks: list[dict[str, Any]] = []
+    for item in _display_items(document):
+        provenance = _mapping(item.get("provenance"))
+        acceptance = _mapping(provenance.get("acceptance"))
+        material = [
+            str(value)
+            for value in acceptance.get("material_conflicts", [])
+            if isinstance(value, str)
+        ]
+        if not acceptance.get("low_confidence_override") and not material:
+            continue
+        source = Path(str(_mapping(item.get("source")).get("path", "-"))).name
+        risks.append(
+            {
+                "source": source,
+                "score": acceptance.get("score"),
+                "runner_up_margin": acceptance.get("runner_up_margin"),
+                "material_conflicts": material,
+                "destination": _relative_destination(item).replace("\n", ""),
+            }
+        )
+    return risks
 
 
 def render_plan_details(plan: StoredPlan, console: Console) -> dict[str, Any]:
@@ -296,6 +322,32 @@ def render_human_status(
             ["", f"Invalidated plans    {invalidated}", f"Superseded plans     {superseded}"]
         )
     console.print(Text("\n".join(line for line in lines if line is not None)))
+
+
+def _render_acceptance_risks(items: list[dict[str, Any]], console: Console) -> None:
+    document = {"items": items}
+    risks = plan_acceptance_risks(document)
+    if not risks:
+        return
+    material_count = sum(bool(item["material_conflicts"]) for item in risks)
+    console.print("Acceptance review:")
+    console.print(
+        f"  {len(risks)} explicit low-confidence override"
+        f"{'s' if len(risks) != 1 else ''}"
+    )
+    if material_count:
+        console.print(
+            f"  {material_count} override{'s' if material_count != 1 else ''} "
+            "contain material evidence conflicts"
+        )
+    for item in risks:
+        score = item.get("score")
+        score_text = f"{float(score):.1f}" if isinstance(score, (int, float)) else "?"
+        suffix = " [MATERIAL CONFLICT]" if item["material_conflicts"] else ""
+        console.print(f"  {item['source']}  score {score_text}{suffix}")
+        for reason in item["material_conflicts"]:
+            console.print(f"    - {reason}")
+    console.print("Review these items with [V] before approving the plan.")
 
 
 def _render_compact_plan_items(items: list[dict[str, Any]], console: Console) -> None:

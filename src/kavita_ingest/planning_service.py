@@ -189,6 +189,14 @@ class PlanBuilder:
                 "run_group_key": run_key,
                 "run_group_decision_id": run_decision_id,
                 "planning_policy_digest": policy.digest(),
+                **(
+                    {"acceptance": acceptance}
+                    if isinstance(
+                        (acceptance := resolution.authorization.payload.get("acceptance")),
+                        dict,
+                    )
+                    else {}
+                ),
             }
             snapshot = build_snapshot(
                 item_id=f"source-{int(row['id'])}-{current.sha256[:12]}",

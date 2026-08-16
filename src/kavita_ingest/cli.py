@@ -15,6 +15,8 @@ from .apply_engine import ApplyEngine, ApplyPreview, ApplyRefused, ApplySummary
 from .audit import run_audit
 from .config import load_config, write_initial_config
 from .db import connect
+from .decisions import DecisionRepository, reopen_review
+from .discovery import inspect_source
 from .doctor import checks
 from .locking import LockUnavailable
 from .logging_config import configure_logging, provider_secrets, set_console_verbosity
@@ -24,6 +26,7 @@ from .plan_store import PlanStore
 from .planning_service import PlanBuilder
 from .presentation import render_human_status, render_plan_summary
 from .providers.models import NormalizedCandidate, ProviderName, RecordType
+from .repair import reset_verified_publication
 from .review import interactive_review
 from .rollback import preview_rollback
 from .run_groups import RunGroupRepository
@@ -52,6 +55,12 @@ ROOT_EPILOG = """Common commands:
 
   kavita-ingest abandon PLAN_ID
       Close a safely abandonable run, preserving journal history and media.
+
+  kavita-ingest reset-published DESTINATION --to Comics/NEW_NAME.cbz
+      Safely move a verified publication back to Incoming for re-review.
+
+  kavita-ingest reopen-review SOURCE
+      Reopen an explicit current review decision without modifying the source.
 
   kavita-ingest plan list
       List immutable plans and their status.
@@ -546,6 +555,130 @@ def apply_status_command(
             )
             if item.detail:
                 typer.echo(f"  detail: {item.detail}")
+
+
+
+@app.command("reopen-review")
+def reopen_review_command(
+    source: Annotated[
+        Path, typer.Argument(exists=True, dir_okay=False, resolve_path=True)
+    ],
+    config: Annotated[
+        Path | None, typer.Option("--config", help="TOML configuration path.")
+    ] = None,
+    yes: Annotated[
+        bool, typer.Option("--yes", help="Confirm reopening this review decision.")
+    ] = False,
+) -> None:
+    """Append an auditable marker that returns one current source to review."""
+    settings = load_config(config)
+    if settings.database_path is None:
+        typer.echo("REFUSED: state database is not configured", err=True)
+        raise typer.Exit(2)
+    resolved = source.expanduser().resolve(strict=True)
+    incoming_roots = tuple(
+        root.expanduser().resolve(strict=False) for root in settings.incoming_roots
+    )
+    if not any(resolved == root or resolved.is_relative_to(root) for root in incoming_roots):
+        typer.echo("REFUSED: source is not inside a configured incoming root", err=True)
+        raise typer.Exit(2)
+    if not yes and not typer.confirm(
+        f"Reopen review for {resolved.name}? No media bytes will be changed.",
+        default=False,
+    ):
+        typer.echo("No changes made.")
+        return
+    try:
+        record = inspect_source(resolved)
+        with connect(settings.database_path) as connection:
+            decision = reopen_review(DecisionRepository(connection), record)
+    except (OSError, ValueError) as exc:
+        typer.echo(f"REFUSED: {exc}", err=True)
+        raise typer.Exit(2) from exc
+    typer.echo(f"Review reopened: {resolved}")
+    typer.echo(f"Decision marker: {decision.id}")
+    typer.echo("Source bytes were not modified; the next wizard run will review this item again.")
+
+@app.command("reset-published")
+def reset_published_command(
+    destination: Annotated[
+        Path, typer.Argument(exists=True, dir_okay=False, resolve_path=True)
+    ],
+    target_relative: Annotated[
+        str,
+        typer.Option(
+            "--to",
+            help="Corrected path relative to the configured Incoming root, e.g. Comics/Name.cbz.",
+        ),
+    ],
+    incoming_root: Annotated[
+        Path | None,
+        typer.Option("--incoming-root", help="Configured incoming root when more than one exists."),
+    ] = None,
+    config: Annotated[
+        Path | None, typer.Option("--config", help="TOML configuration path.")
+    ] = None,
+    yes: Annotated[
+        bool, typer.Option("--yes", help="Confirm the verified publication reset.")
+    ] = False,
+) -> None:
+    """Move one hash-verified completed publication back to Incoming for re-review."""
+    settings = load_config(config)
+    if settings.database_path is None:
+        typer.echo("REFUSED: state database is not configured", err=True)
+        raise typer.Exit(2)
+    relative = Path(target_relative)
+    if (
+        relative.is_absolute()
+        or not relative.parts
+        or any(part in {"", ".", ".."} for part in relative.parts)
+    ):
+        typer.echo(
+            "REFUSED: --to must be a safe relative path beneath the configured incoming root",
+            err=True,
+        )
+        raise typer.Exit(2)
+
+    configured_roots = tuple(
+        root.expanduser().resolve(strict=False) for root in settings.incoming_roots
+    )
+    if incoming_root is None:
+        if len(configured_roots) != 1:
+            typer.echo(
+                "REFUSED: multiple incoming roots are configured; pass --incoming-root",
+                err=True,
+            )
+            raise typer.Exit(2)
+        root = configured_roots[0]
+    else:
+        root = incoming_root.expanduser().resolve(strict=True)
+        if root not in configured_roots:
+            typer.echo("REFUSED: --incoming-root is not a configured incoming root", err=True)
+            raise typer.Exit(2)
+    target = root / relative
+    if not target.parent.is_dir():
+        typer.echo(f"REFUSED: incoming target directory does not exist: {target.parent}", err=True)
+        raise typer.Exit(2)
+    if not yes and not typer.confirm(
+        f"Move verified publication back to Incoming as {target.relative_to(root)}?",
+        default=False,
+    ):
+        typer.echo("No changes made.")
+        return
+    try:
+        with connect(settings.database_path) as connection:
+            result = reset_verified_publication(
+                connection,
+                destination,
+                target,
+                allowed_incoming_roots=configured_roots,
+            )
+    except (OSError, ValueError) as exc:
+        typer.echo(f"REFUSED: {exc}", err=True)
+        raise typer.Exit(2) from exc
+    typer.echo(f"Reset publication: {result.source_destination}")
+    typer.echo(f"Incoming: {result.incoming_path}")
+    typer.echo("Historical apply journal preserved; run the wizard to review it as current work.")
 
 
 @app.command("rollback")

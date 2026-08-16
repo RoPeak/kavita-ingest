@@ -230,6 +230,55 @@ def collection_number_word(number: SequenceNumber | None) -> str | None:
     return next(word for word, value in _COLLECTION_NUMBER_WORDS.items() if int(value) == integer)
 
 
+def collection_query_titles(
+    series_title: str | None,
+    collection_title: str,
+    sequence: SequenceNumber | None,
+    edition_qualifiers: tuple[str, ...] = (),
+) -> tuple[tuple[str, str], ...]:
+    """Return bounded catalogue-title variants for a collected edition.
+
+    Book catalogues are inconsistent about ``Volume`` versus ``Vol.`` and about
+    punctuation before the volume marker.  Generate only deterministic variants
+    that preserve the same series and explicit local collection number.  For an
+    unnumbered edition with a distinctive qualifier, also include the bare series
+    title so sparse catalogue records can still be discovered and then judged by
+    the scorer.
+    """
+    series = (series_title or "").strip()
+    title = collection_title.strip()
+    output: list[tuple[str, str]] = []
+    seen: set[str] = set()
+
+    def add(label: str, value: str) -> None:
+        normalized = re.sub(r"\s+", " ", value).strip(" ,:-")
+        key = normalized.casefold()
+        if not normalized or key in seen:
+            return
+        seen.add(key)
+        output.append((label, normalized))
+
+    if series and title and not title.casefold().startswith(series.casefold()):
+        add("structured", f"{series} {title}")
+    else:
+        add("structured", title or series)
+
+    if (
+        series
+        and sequence is not None
+        and sequence.normalized.isdigit()
+        and re.search(r"\b(?:volume|vol\.?)\b", title, re.IGNORECASE)
+    ):
+        number = str(int(sequence.normalized))
+        add("vol", f"{series} Vol. {number}")
+        add("vol-comma", f"{series}, Vol. {number}")
+
+    if series and sequence is None and edition_qualifiers:
+        add("series-only", series)
+
+    return tuple(output)
+
+
 def _adapt_collection_contributors(
     contributors: tuple[Contributor, ...],
 ) -> tuple[tuple[Contributor, ...], tuple[str, ...]]:

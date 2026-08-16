@@ -573,3 +573,37 @@ def test_local_identity_carries_structured_edition_qualifiers() -> None:
     local = local_identity(classification, {})
 
     assert local.edition_qualifiers == ("DC Black Label Edition",)
+
+
+def test_spider_man_extra_is_material_conflict_for_2021_second_edition() -> None:
+    local = LocalIdentity(
+        MediaKind.COMIC,
+        "collected-edition",
+        0.98,
+        "2nd edition",
+        series_title="Spider-Man - Life Story",
+        year=2021,
+        edition_qualifiers=("2nd edition",),
+    )
+    candidate = NormalizedCandidate(
+        ProviderName.GOOGLE_BOOKS,
+        "life-story-extra",
+        RecordType.COMIC_COLLECTION,
+        MediaKind.COMIC,
+        "Spider-Man: Life Story - Extra!",
+        creators=(Contributor("Chip Zdarsky", "writer"),),
+        publisher="Marvel",
+        publication_date="2023-05-02",
+        series_title="Spider-Man - Life Story",
+        item_type="collected-edition",
+    )
+
+    score = score_candidates(local, [candidate], SETTINGS)[0]
+
+    assert not score.eligible
+    assert not score.identity_fields_high
+    assert "collection edition years disagree materially" in score.material_conflicts
+    assert (
+        "distinctive local edition qualifier is absent from provider title"
+        in score.material_conflicts
+    )

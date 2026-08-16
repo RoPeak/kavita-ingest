@@ -118,7 +118,11 @@ def test_integer_collection_volume_is_explicit_and_separate_from_run_year() -> N
     )
     projection = project_comic(identity)
     assert projection.metadata["Volume"] == 1
+    assert projection.metadata["Number"] == ""
+    assert "Number" in projection.ownership.clear_fields
     assert projection.metadata["Series"] == "Saga (2012)"
+    assert projection.destination_folder == PurePosixPath("Saga (2012)/Specials")
+    assert " - v01 - " in projection.filename
     assert not identity.provider_identity
 
 

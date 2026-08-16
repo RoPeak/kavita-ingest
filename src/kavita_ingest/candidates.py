@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from collections import Counter
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from difflib import SequenceMatcher
 from typing import Self
 
@@ -10,6 +10,7 @@ from .collection_candidates import (
     adapt_collection_candidate,
     collection_candidate_rejection_reason,
     collection_number_word,
+    collection_query_titles,
 )
 from .domain import MediaKind, SequenceNumber
 from .matching import LocalIdentity
@@ -586,12 +587,13 @@ def _diagnostic_identity_candidates(
 
 
 def _collection_book_query(local: LocalIdentity) -> SearchQuery:
-    series = (local.series_title or "").strip()
-    title = local.title.strip()
-    if series and title and not title.casefold().startswith(series.casefold()):
-        title = f"{series} {title}"
-    elif not title:
-        title = series
+    variants = collection_query_titles(
+        local.series_title,
+        local.title,
+        local.sequence,
+        local.edition_qualifiers,
+    )
+    title = variants[0][1] if variants else (local.series_title or local.title)
     return SearchQuery(
         MediaKind.BOOK,
         title,
@@ -602,28 +604,32 @@ def _collection_book_query(local: LocalIdentity) -> SearchQuery:
 
 
 def _collection_book_queries(local: LocalIdentity) -> tuple[tuple[str, SearchQuery], ...]:
-    """Build a small high-precision query ladder for provider title conventions.
+    """Build a bounded catalogue query ladder for collected editions.
 
-    Comic collections are frequently catalogued with creator credits embedded in
-    the title (``Animal Man by Grant Morrison Book One``) even when the local
-    release filename separates creator evidence from the title. Providers also
-    vary between numeric and word-spelled collection numbers. Search those
-    documented title forms without weakening identity scoring or silently
-    importing a collection number from local evidence.
+    Besides creator-inline forms, issue deterministic ``Volume``/``Vol.`` and
+    punctuation variants because Google Books and Open Library commonly catalogue
+    the same trade under different title punctuation.  Creator-free variants are
+    retained even when a creator hint is present so a typo cannot zero recall.
     """
-    primary = _collection_book_query(local)
-    variants: list[tuple[str, SearchQuery]] = [("structured", primary)]
-    seen = {(primary.title.casefold(), primary.creators, primary.relaxed)}
-    if local.creators:
-        title_only = SearchQuery(
-            MediaKind.BOOK,
-            primary.title,
-            creators=(),
-            identifiers=local.identifiers,
-            item_type="collected-edition",
-        )
-        variants.append(("title-only", title_only))
-        seen.add((title_only.title.casefold(), title_only.creators, title_only.relaxed))
+    title_variants = collection_query_titles(
+        local.series_title,
+        local.title,
+        local.sequence,
+        local.edition_qualifiers,
+    )
+    variants: list[tuple[str, SearchQuery]] = []
+    seen: set[tuple[str, tuple[str, ...], bool]] = set()
+
+    for label, title in title_variants:
+        _append_collection_query(variants, seen, label, title, local)
+        if local.creators:
+            _append_collection_query(
+                variants,
+                seen,
+                f"{label}-title-only",
+                title,
+                replace(local, creators=()),
+            )
 
     series = (local.series_title or "").strip()
     creator = local.creators[0].strip() if local.creators else ""

@@ -18,6 +18,8 @@ from kavita_ingest.decisions import (
     add_manual_override,
     batch_accept,
     clear_manual_override,
+    decision_needs_review,
+    reopen_review,
     validate_manual_override,
 )
 from kavita_ingest.domain import MediaKind, SequenceNumber, SourceFormat, SourceRecord
@@ -1202,8 +1204,9 @@ def test_collected_edition_query_ladder_recovers_creator_inline_catalog_title() 
     assert candidate.sequence == SequenceNumber.parse("1")
     assert candidate.provider_metadata["collection_sequence_source"] == "provider_title"
     score = score_candidates(local, [candidate], MatchingSettings())[0]
-    assert score.score >= 90.0
+    assert score.score < 90.0
     assert not score.hard_contradiction
+    assert "collection edition years disagree materially" in score.material_conflicts
 
 
 def test_collected_edition_query_ladder_survives_one_transient_provider_failure() -> None:
@@ -1528,3 +1531,173 @@ def test_collection_generation_records_intentional_comic_vine_skip() -> None:
     assert provider.operations == []
     assert result.attempts[0].outcome == "skipped"
     assert result.attempts[0].detail == "unsupported_collection_format"
+
+
+def test_saga_official_vol_punctuation_query_recovers_original_edition() -> None:
+    edition = NormalizedCandidate(
+        ProviderName.GOOGLE_BOOKS,
+        "saga-vol-1-2012",
+        RecordType.BOOK_EDITION,
+        MediaKind.BOOK,
+        "Saga, Vol. 1",
+        creators=(
+            Contributor("Brian K. Vaughan", "author"),
+            Contributor("Fiona Staples", "author"),
+        ),
+        publisher="Image Comics",
+        publication_date="2012-10-10",
+        edition_id="saga-vol-1-2012",
+    )
+    provider = QuerySensitiveCollectionProvider(
+        ProviderName.GOOGLE_BOOKS,
+        {"Saga, Vol. 1": [edition]},
+    )
+    local = LocalIdentity(
+        MediaKind.COMIC,
+        "collected-edition",
+        0.98,
+        "Volume 1",
+        series_title="Saga",
+        sequence=SequenceNumber.parse("1"),
+        year=2012,
+    )
+
+    result = generate_candidates(local, (provider,))
+
+    assert [query.title for query in provider.queries] == [
+        "Saga Volume 1",
+        "Saga Vol. 1",
+        "Saga, Vol. 1",
+    ]
+    assert len(result.candidates) == 1
+    score = score_candidates(local, list(result.candidates), MatchingSettings())[0]
+    assert score.score == 92.0
+    assert score.eligible
+    assert not score.material_conflicts
+
+
+def test_collection_reprint_year_cannot_outrank_original_year() -> None:
+    local = LocalIdentity(
+        MediaKind.COMIC,
+        "collected-edition",
+        0.98,
+        "Volume 2",
+        series_title="Saga",
+        sequence=SequenceNumber.parse("2"),
+        year=2013,
+    )
+    original = adapt_collection_candidate(
+        NormalizedCandidate(
+            ProviderName.OPEN_LIBRARY,
+            "saga-2013",
+            RecordType.BOOK_EDITION,
+            MediaKind.BOOK,
+            "Saga, Vol. 2",
+            publisher="Image Comics",
+            publication_date="2013-06-19",
+            edition_id="saga-2013",
+        ),
+        series_title="Saga",
+        sequence=SequenceNumber.parse("2"),
+    )
+    reprint = adapt_collection_candidate(
+        NormalizedCandidate(
+            ProviderName.OPEN_LIBRARY,
+            "saga-2025",
+            RecordType.BOOK_EDITION,
+            MediaKind.BOOK,
+            "Saga, Vol. 2",
+            publisher="Image Comics",
+            publication_date="2025",
+            edition_id="saga-2025",
+        ),
+        series_title="Saga",
+        sequence=SequenceNumber.parse("2"),
+    )
+    assert original is not None and reprint is not None
+
+    scores = score_candidates(local, [reprint, original], MatchingSettings())
+
+    assert scores[0].candidate.provider_id == "saga-2013"
+    assert scores[0].eligible
+    assert scores[1].score < 50
+    assert "collection edition years disagree materially" in scores[1].material_conflicts
+
+
+def test_batch_accept_preserves_local_presentation_for_collection_resolution(
+    tmp_path: Path,
+) -> None:
+    repository, connection = _repository(tmp_path)
+    local = LocalIdentity(
+        MediaKind.COMIC,
+        "collected-edition",
+        0.98,
+        "Volume 2",
+        series_title="Saga",
+        sequence=SequenceNumber.parse("2"),
+        year=2013,
+    )
+    candidate = NormalizedCandidate(
+        ProviderName.OPEN_LIBRARY,
+        "saga-2",
+        RecordType.COMIC_COLLECTION,
+        MediaKind.COMIC,
+        "Saga, Vol. 2",
+        creators=(Contributor("Brian K. Vaughan", "writer"),),
+        series_title="Saga",
+        sequence=SequenceNumber.parse("2"),
+        publication_date="2013-06-19",
+        item_type="collected-edition",
+    )
+    score = CandidateScore(
+        candidate,
+        99,
+        0.98,
+        (),
+        (),
+        False,
+        True,
+        rank=1,
+        runner_up_margin=99,
+        eligible=True,
+    )
+    source = _source("/incoming/Saga, Vol. 2 (2013).cbz")
+    accepted = batch_accept(
+        repository,
+        [(source, score, reconcile(local, score), local.evidence_hash())],
+        confirmed_count=1,
+        local_identities={source.sha256: local},
+    )
+
+    assert accepted[0].payload["local_presentation"]["series_title"] == "Saga"
+    assert accepted[0].payload["local_presentation"]["sequence"] == "2"
+    connection.close()
+
+
+def test_reopen_review_marker_is_append_only_and_returns_source_to_pending(tmp_path: Path) -> None:
+    repository, connection = _repository(tmp_path)
+    source = _source("/incoming/Saga v04.cbr")
+    local = LocalIdentity(
+        MediaKind.COMIC,
+        "collected-edition",
+        0.98,
+        "Volume 4",
+        series_title="Saga",
+        sequence=SequenceNumber.parse("4"),
+        year=2014,
+    )
+    original = repository.add(
+        source,
+        DecisionType.UNRESOLVED,
+        local.evidence_hash(),
+        payload={"explicit": True},
+    )
+
+    reopened = reopen_review(repository, source)
+
+    assert reopened.id > original.id
+    assert reopened.payload["reason"] == "review_reopened"
+    assert reopened.payload["explicit"] is False
+    assert decision_needs_review(reopened, local.evidence_hash())
+    assert len(repository.history(source)) == 2
+    connection.close()

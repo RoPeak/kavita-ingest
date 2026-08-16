@@ -11,7 +11,7 @@ from enum import StrEnum
 from typing import Any
 
 from .domain import SequenceNumber, SourceRecord
-from .matching import CandidateScore, Reconciliation
+from .matching import CandidateScore, LocalIdentity, Reconciliation
 from .providers.models import RecordType
 
 LOGGER = logging.getLogger(__name__)
@@ -70,7 +70,7 @@ def decision_needs_review(
         return True
     if (
         decision.decision_type is DecisionType.UNRESOLVED
-        and decision.payload.get("reason") == "run_group_changed"
+        and decision.payload.get("reason") in {"run_group_changed", "review_reopened"}
     ):
         return True
     return require_newer and decision.id == required_newer_than
@@ -215,6 +215,19 @@ class DecisionRepository:
         )
 
 
+
+def reopen_review(repository: DecisionRepository, source: SourceRecord) -> DecisionRecord:
+    """Append an auditable marker that makes an existing current decision review-pending."""
+    previous = repository.latest(source)
+    if previous is None:
+        raise ValueError("source has no current review decision to reopen")
+    return repository.add(
+        source,
+        DecisionType.UNRESOLVED,
+        previous.source_evidence_hash,
+        payload={"reason": "review_reopened", "explicit": False},
+    )
+
 def accept_candidate(
     repository: DecisionRepository,
     source: SourceRecord,
@@ -225,6 +238,7 @@ def accept_candidate(
     work_only: bool = False,
     batch_id: str | None = None,
     hydration: dict[str, Any] | None = None,
+    local_identity: LocalIdentity | None = None,
 ) -> DecisionRecord:
     if score.candidate.record_type is RecordType.COMIC_RUN:
         raise ValueError(
@@ -244,10 +258,34 @@ def accept_candidate(
             "score": score.score,
             "reconciliation": asdict(reconciliation),
             "hydration": hydration or {"status": "not_requested"},
+            "acceptance": {
+                "eligible_at_acceptance": score.eligible,
+                "low_confidence_override": not score.eligible,
+                "score": score.score,
+                "runner_up_margin": score.runner_up_margin,
+                "material_conflicts": list(score.material_conflicts),
+            },
+            **(
+                {"local_presentation": _local_presentation(local_identity)}
+                if local_identity is not None
+                else {}
+            ),
             "explicit": True,
         },
         batch_id=batch_id,
     )
+
+
+def _local_presentation(local: LocalIdentity) -> dict[str, Any]:
+    return {
+        "kind": local.kind.value,
+        "subtype": local.subtype,
+        "title": local.title,
+        "series_title": local.series_title,
+        "sequence": local.sequence.normalized if local.sequence else None,
+        "year": local.year,
+        "edition_qualifiers": list(local.edition_qualifiers),
+    }
 
 
 def add_manual_override(
@@ -307,6 +345,7 @@ def batch_accept(
     *,
     confirmed_count: int,
     hydration: dict[str, dict[str, Any]] | None = None,
+    local_identities: dict[str, LocalIdentity] | None = None,
 ) -> list[DecisionRecord]:
     eligible = batch_eligible_items(items)
     if confirmed_count != len(eligible):
@@ -321,6 +360,7 @@ def batch_accept(
             evidence_hash,
             batch_id=batch_id,
             hydration=(hydration or {}).get(score.candidate.key),
+            local_identity=(local_identities or {}).get(source.sha256),
         )
         for source, score, reconciliation, evidence_hash in eligible
     ]

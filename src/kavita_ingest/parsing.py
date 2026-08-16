@@ -278,16 +278,36 @@ def _comic_hypothesis(
                 "embedded ComicInfo Series is retained as conflicting edition-label evidence"
             )
     elif re.search(
-        r"\b(?:TPB|Omnibus|Ultimate Collection|Collected Edition)\b", stem, re.IGNORECASE
+        r"\b(?:TPB|Omnibus|Ultimate Collection|Collected Edition)\b"
+        r"|\b(?:Volume|Vol\.?)\s*(?:\d+(?:\.\d+)?|[IVXLCDM]+)\b",
+        stem,
+        re.IGNORECASE,
     ):
         subtype = "collected-edition"
-        match = re.search(r"\b(?:Book|TPB|Volume|Vol\.?)\s*([\w.-]+)", stem, re.IGNORECASE)
+        match = re.search(
+            r"\b(?:Book|TPB|Volume|Vol\.?)\s*([\w.-]+)", stem, re.IGNORECASE
+        )
         if match:
             sequence = sequence or SequenceNumber.parse(match.group(1))
-        series = series or _clean_title(
-            re.split(r"\b(?:TPB|Omnibus|Ultimate Collection)\b", stem, flags=re.IGNORECASE)[0]
-        )
-        title = title or _clean_title(stem)
+            filename_series = _clean_title(stem[: match.start()].rstrip(" ,-"))
+            if filename_series:
+                series = filename_series
+            title = (
+                f"Volume {int(match.group(1))}"
+                if match.group(1).isdigit()
+                else _clean_title(stem)
+            )
+        else:
+            filename_series = _clean_title(
+                re.split(
+                    r"\b(?:TPB|Omnibus|Ultimate Collection|Collected Edition)\b",
+                    stem,
+                    flags=re.IGNORECASE,
+                )[0]
+            )
+            if filename_series:
+                series = filename_series
+            title = _clean_title(stem)
         qualifier = _first_edition_qualifier(stem)
         if qualifier:
             edition_qualifiers = _merge_qualifiers(edition_qualifiers, qualifier)
@@ -308,12 +328,12 @@ def _comic_hypothesis(
             series_text, number = volume.groups()
             series = _clean_title(series_text)
             sequence = sequence or SequenceNumber.parse(number)
-            title = title or f"Volume {int(number)}"
+            title = f"Volume {int(number)}"
             subtype = "collected-edition"
         elif one_volume:
             series_text, qualifier = one_volume.groups()
             series = _clean_title(series_text)
-            title = title or _clean_title(qualifier)
+            title = _clean_title(qualifier)
             edition_qualifiers = _merge_qualifiers(edition_qualifiers, qualifier)
             subtype = "collected-edition"
         elif match:
@@ -342,8 +362,8 @@ def _comic_hypothesis(
             elif edition_qualifiers:
                 subtype = "collected-edition"
                 base, qualifier = _split_edition_qualified_title(stem, edition_qualifiers)
-                series = series or base
-                title = title or qualifier or base
+                series = base
+                title = qualifier or base
             else:
                 subtype = "one-shot"
                 series = series or _clean_title(stem)

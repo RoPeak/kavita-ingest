@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, replace
 from typing import Any
 
@@ -77,14 +78,17 @@ def _candidate_identity(decision: DecisionRecord) -> CanonicalIdentity:
         else contributors.get("authors", ())
     )
     identifiers = {} if work_only else {item.scheme: item.value for item in candidate.identifiers}
+    collection_volume = _candidate_collection_volume(candidate)
+    title, title_source = _resolved_candidate_title(decision, candidate)
     return CanonicalIdentity(
         media_kind=candidate.media_kind,
-        title=candidate.title,
+        title=title,
         creators=creators,
         series_title=candidate.series_title,
         sequence=candidate.sequence,
         run_start_year=candidate.run_start_year,
         item_type=candidate.item_type,
+        collection_volume=collection_volume,
         publisher=None if work_only else candidate.publisher,
         publication_date=None if work_only else candidate.publication_date,
         release_date=None if work_only else candidate.release_date,
@@ -104,6 +108,7 @@ def _candidate_identity(decision: DecisionRecord) -> CanonicalIdentity:
         provenance={
             "decision_id": str(decision.id),
             "decision_type": decision.decision_type.value,
+            "title_source": title_source,
             **(
                 {"provider_format": candidate.provider_metadata["raw_format"]}
                 if candidate.provider_metadata.get("raw_format")
@@ -116,6 +121,76 @@ def _candidate_identity(decision: DecisionRecord) -> CanonicalIdentity:
             },
         },
     )
+
+
+def _candidate_collection_volume(candidate: NormalizedCandidate) -> int | None:
+    if candidate.record_type is not RecordType.COMIC_COLLECTION or candidate.sequence is None:
+        return None
+    if candidate.item_type not in {"trade", "collected-edition", "omnibus"}:
+        return None
+    if not candidate.sequence.normalized.isdigit():
+        return None
+    value = int(candidate.sequence.normalized)
+    return value if value > 0 else None
+
+
+def _resolved_candidate_title(
+    decision: DecisionRecord, candidate: NormalizedCandidate
+) -> tuple[str, str]:
+    presentation = decision.payload.get("local_presentation")
+    if not isinstance(presentation, dict) or candidate.media_kind is not MediaKind.COMIC:
+        return candidate.title, "provider"
+    local_title = str(presentation.get("title") or "").strip()
+    local_series = str(presentation.get("series_title") or "").strip()
+    subtype = str(presentation.get("subtype") or "")
+    if not local_title:
+        return candidate.title, "provider"
+
+    if subtype == "collected-edition":
+        local_key = _title_key(local_title)
+        series_key = _title_key(local_series)
+        candidate_key = _title_key(candidate.title)
+        label_only = _is_collection_label_only(local_title)
+        if (
+            not label_only
+            and local_key not in {"", series_key}
+            and candidate_key == series_key
+        ):
+            return local_title, "local_descriptive_title"
+        return candidate.title, "provider"
+
+    if (
+        local_series
+        and _title_key(candidate.title) == _title_key(local_series)
+        and _title_key(local_title) != _title_key(local_series)
+    ):
+        return local_title, "local_descriptive_title"
+    return candidate.title, "provider"
+
+
+
+def _is_collection_label_only(value: str) -> bool:
+    normalized = _title_key(value)
+    return bool(
+        re.fullmatch(
+            r"(?:volume|vol|book)\s*\d+"
+            r"|\d+(?:st|nd|rd|th)\s+edition"
+            r"|(?:dc\s+)?black\s+label\s+edition"
+            r"|ultimate\s+collection"
+            r"|deluxe\s+edition"
+            r"|essential\s+edition"
+            r"|absolute\s+edition"
+            r"|complete\s+collection"
+            r"|compact\s+comics"
+            r"|collected\s+edition"
+            r"|trade\s+paperback"
+            r"|hardcover|omnibus|compendium",
+            normalized,
+        )
+    )
+
+def _title_key(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", value.casefold()).strip()
 
 
 def _manual_identity(decision: DecisionRecord, kind: MediaKind) -> CanonicalIdentity:

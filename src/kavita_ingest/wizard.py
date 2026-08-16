@@ -25,6 +25,7 @@ from .paths import AppPaths
 from .plan_store import PlanStore, StoredPlan
 from .planning_service import NoActionableItems, PlanBuilder, PlanBuildResult
 from .presentation import (
+    plan_acceptance_risks,
     plan_document,
     render_apply_summary,
     render_completed_apply,
@@ -663,6 +664,32 @@ def _plan_approval_menu(
             ):
                 output.print("The persisted plan changed and must be displayed again.")
                 return "quit"
+            risks = plan_acceptance_risks(plan_document(current))
+            if risks:
+                material = [item for item in risks if item["material_conflicts"]]
+                if material:
+                    token = "APPROVE RISKY PLAN"
+                    output.print(
+                        f"This exact plan contains {len(risks)} low-confidence override(s), "
+                        f"including {len(material)} with material evidence conflicts."
+                    )
+                    response = str(
+                        typer.prompt(
+                            f"Type '{token}' to approve this exact risky plan",
+                            default="",
+                            show_default=False,
+                        )
+                    ).strip().upper()
+                    if response != token:
+                        output.print("Plan was not approved.")
+                        continue
+                elif not typer.confirm(
+                    f"This plan contains {len(risks)} explicit low-confidence override(s). "
+                    "Approve them as part of this exact plan?",
+                    default=False,
+                ):
+                    output.print("Plan was not approved.")
+                    continue
             try:
                 _approve(config, current)
             except ValueError as exc:

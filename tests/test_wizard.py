@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import zipfile
@@ -25,7 +26,7 @@ from kavita_ingest.decisions import (
     add_manual_override,
 )
 from kavita_ingest.domain import SourceRecord
-from kavita_ingest.plan_store import PlanStore
+from kavita_ingest.plan_store import PlanStore, StoredPlan
 from kavita_ingest.planning_service import PlanBuilder
 from kavita_ingest.review import _mark_incompatible_group_decisions
 from kavita_ingest.run_groups import run_group_key
@@ -33,6 +34,7 @@ from kavita_ingest.scanner import scan
 from kavita_ingest.wizard import (
     DiscoverySelection,
     _incomplete_review_items,
+    _plan_approval_menu,
     _render_build_result,
     _select_discovered_sources,
     _select_root,
@@ -1179,3 +1181,65 @@ def test_reprocess_plan_preserves_destination_no_clobber_conflict(tmp_path: Path
     assert result.conflicts == 1
     assert result.document.items[0].conflicts[0].code == "destination_exists"
     assert fixture.destination.exists()
+
+
+def test_material_conflict_plan_requires_typed_risky_approval(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    document = {
+        "schema_version": 3,
+        "items": [
+            {
+                "source": {"path": "/incoming/Spider-Man.cbz"},
+                "kavita_projection": {"destination": "Spider-Man/Specials/item.cbz"},
+                "provenance": {
+                    "acceptance": {
+                        "low_confidence_override": True,
+                        "score": 21.0,
+                        "runner_up_margin": 11.0,
+                        "material_conflicts": [
+                            "collection edition years disagree materially",
+                        ],
+                    }
+                },
+            }
+        ],
+        "conflicts": [],
+        "planning_policy": {},
+    }
+    payload = json.dumps(document, sort_keys=True).encode()
+    plan = StoredPlan(
+        77,
+        3,
+        payload,
+        len(payload),
+        hashlib.sha256(payload).hexdigest(),
+        "draft",
+        "2026-08-15T00:00:00+00:00",
+        None,
+        None,
+    )
+    choices = iter(["A", "A"])
+    typed = iter(["nope", "APPROVE RISKY PLAN"])
+    approvals: list[int] = []
+    monkeypatch.setattr("kavita_ingest.wizard._choice", lambda default: next(choices))
+    monkeypatch.setattr("kavita_ingest.wizard._get_plan", lambda config, plan_id: plan)
+    monkeypatch.setattr(
+        "kavita_ingest.wizard._approve",
+        lambda config, current: approvals.append(current.id) or current,
+    )
+    monkeypatch.setattr(
+        "kavita_ingest.wizard.typer.prompt", lambda *args, **kwargs: next(typed)
+    )
+    output = io.StringIO()
+
+    outcome = _plan_approval_menu(
+        AppConfig(database_path=tmp_path / "unused.sqlite3"),
+        plan,
+        Console(file=output, force_terminal=False),
+    )
+
+    assert outcome == "approved"
+    assert approvals == [77]
+    assert "Plan was not approved." in output.getvalue()
+    assert "material" in output.getvalue() and "evidence conflicts" in output.getvalue()

@@ -434,3 +434,67 @@ def test_genuine_by_title_is_not_reinterpreted_as_creator_alias() -> None:
     )
 
     assert result.hypotheses[0].series == "Batman by Gaslight"
+
+
+def test_corrected_collection_filename_overrides_stale_written_comicinfo() -> None:
+    inspection = InspectionResult(
+        InspectionStatus.OK,
+        SourceFormat.CBZ,
+        metadata={
+            "comicinfo": {
+                "Series": "Spider-Man - Life Story",
+                "Title": "Spider-Man: Life Story - Extra!",
+            }
+        },
+    )
+
+    result = classify(
+        Path("Spider-Man - Life Story (2021, 2nd edition).cbz"),
+        SourceFormat.CBZ,
+        inspection,
+    )
+
+    hypothesis = result.hypotheses[0]
+    assert hypothesis.subtype == "collected-edition"
+    assert hypothesis.series == "Spider-Man - Life Story"
+    assert hypothesis.title == "2nd edition"
+    assert hypothesis.year == 2021
+    assert hypothesis.edition_qualifiers == ("2nd edition",)
+
+
+def test_official_vol_punctuation_parses_collection_series_and_sequence() -> None:
+    inspection = InspectionResult(
+        InspectionStatus.OK,
+        SourceFormat.CBZ,
+        metadata={"comicinfo": {"Series": "Saga", "Title": "Saga Volume 2"}},
+    )
+
+    result = classify(Path("Saga, Vol. 2 (2013).cbz"), SourceFormat.CBZ, inspection)
+
+    hypothesis = result.hypotheses[0]
+    assert hypothesis.subtype == "collected-edition"
+    assert hypothesis.series == "Saga"
+    assert hypothesis.title == "Volume 2"
+    assert hypothesis.sequence is not None
+    assert hypothesis.sequence.normalized == "2"
+    assert hypothesis.year == 2013
+
+
+def test_complete_one_volume_filename_overrides_sparse_written_title() -> None:
+    inspection = InspectionResult(
+        InspectionStatus.OK,
+        SourceFormat.CBZ,
+        metadata={"comicinfo": {"Series": "Bone", "Title": "Bone"}},
+    )
+
+    result = classify(
+        Path("Bone - The Complete Cartoon Epic in One Volume (2004).cbz"),
+        SourceFormat.CBZ,
+        inspection,
+    )
+
+    hypothesis = result.hypotheses[0]
+    assert hypothesis.subtype == "collected-edition"
+    assert hypothesis.series == "Bone"
+    assert hypothesis.title == "The Complete Cartoon Epic in One Volume"
+    assert hypothesis.year == 2004
