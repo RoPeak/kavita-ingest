@@ -18,6 +18,7 @@ from .db import connect
 from .decisions import DecisionRepository, reopen_review
 from .discovery import inspect_source
 from .doctor import checks
+from .library_check import check_library
 from .locking import LockUnavailable
 from .logging_config import configure_logging, provider_secrets, set_console_verbosity
 from .matching import CandidateScore, usable_identity_scores
@@ -46,6 +47,9 @@ ROOT_EPILOG = """Common commands:
 
   kavita-ingest audit ROOT --details --metrics
       Inspect provider matching without accepting or modifying media.
+
+  kavita-ingest library-check [ROOT]
+      Read-only audit of configured Kavita libraries and naming/layout drift.
 
   kavita-ingest apply-status PLAN_ID --details
       Show per-item apply/recovery evidence and failure details.
@@ -219,6 +223,89 @@ def scan(
         if item.inspection.error_message:
             typer.echo(f"    {item.inspection.status.value}: {item.inspection.error_message}")
     typer.echo(f"Scanned {len(results)} supported source(s); source files were not modified.")
+
+
+@app.command("library-check")
+def library_check_command(
+    root: Annotated[
+        Path | None,
+        typer.Argument(
+            help=(
+                "Directory to audit. Omit to check all configured destination libraries; "
+                "an ancestor such as ~/Libraries is also accepted."
+            )
+        ),
+    ] = None,
+    config: Annotated[
+        Path | None, typer.Option("--config", help="TOML configuration path.")
+    ] = None,
+    details: Annotated[
+        bool,
+        typer.Option(
+            "--details",
+            help="List every checked media path as well as findings.",
+        ),
+    ] = False,
+    strict: Annotated[
+        bool,
+        typer.Option(
+            "--strict",
+            help="Exit non-zero for canonical-layout warnings as well as readiness errors.",
+        ),
+    ] = False,
+    as_json: Annotated[
+        bool, typer.Option("--json", help="Emit versioned machine-readable JSON.")
+    ] = False,
+) -> None:
+    """Read-only check of Kavita readiness and kavita-ingest naming/layout conformity."""
+    settings = load_config(config)
+    configure_logging(settings.log_level, secrets=provider_secrets(settings))
+    try:
+        result = check_library(root, settings)
+    except (OSError, ValueError) as exc:
+        typer.echo(f"REFUSED: {exc}", err=True)
+        raise typer.Exit(2) from exc
+
+    if as_json:
+        _emit_json("library-check", result.to_dict())
+    else:
+        typer.echo("Kavita library check")
+        for scope in result.scopes:
+            typer.echo(
+                f"  {scope.kind:6} {scope.scan_root}"
+                + (
+                    f"  (library root: {scope.library_root})"
+                    if scope.scan_root != scope.library_root
+                    else ""
+                )
+            )
+        typer.echo("")
+        typer.echo(f"Media files:          {len(result.media)}")
+        typer.echo(f"Readiness errors:     {result.errors}")
+        typer.echo(f"Canonical warnings:   {result.warnings}")
+        typer.echo(
+            "Kavita readiness:     " + ("READY" if result.kavita_ready else "NEEDS ATTENTION")
+        )
+        typer.echo("kavita-ingest layout: " + ("CANONICAL" if result.canonical else "DRIFT FOUND"))
+        if result.findings:
+            typer.echo("\nFindings")
+            for finding in result.findings:
+                marker = "ERROR" if finding.severity == "error" else "WARN "
+                typer.echo(f"{marker} {finding.code}: {finding.path}")
+                typer.echo(f"      {finding.message}")
+                if finding.expected:
+                    typer.echo(f"      expected: {finding.expected}")
+        else:
+            typer.echo("\nNo readiness or canonical-layout findings.")
+        if details and result.media:
+            typer.echo("\nChecked media")
+            for item in result.media:
+                state = "canonical" if item.canonical else "finding"
+                typer.echo(f"{state:9} {item.kind:6} {item.path}")
+        typer.echo("\nRead-only check complete; no media or database state was modified.")
+
+    if result.errors or (strict and result.warnings):
+        raise typer.Exit(1)
 
 
 @app.command("audit")

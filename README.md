@@ -247,6 +247,7 @@ kavita-ingest doctor
 kavita-ingest wizard
 kavita-ingest scan /path/to/incoming
 kavita-ingest audit /path/to/incoming
+kavita-ingest library-check ~/Libraries
 kavita-ingest review /path/to/incoming
 kavita-ingest plan create /path/to/incoming
 kavita-ingest plan show 1
@@ -260,6 +261,24 @@ kavita-ingest status
 
 `scan` fingerprints and inspects sources without modifying them. `audit` queries
 enabled providers or their caches and ranks candidates, but accepts nothing.
+`library-check` is a separate read-only destination audit: it makes no provider
+calls and writes no database state. With no argument it checks the configured
+Books and Comics roots; an ancestor such as `~/Libraries` checks every configured
+destination below it, while a configured library or series subdirectory narrows
+the scan. It distinguishes Kavita-readiness errors from kavita-ingest canonical
+layout drift and can emit stable `--json` output. Use `--details` to list every
+checked media path and `--strict` when automation should fail on warnings as well
+as readiness errors.
+
+The readiness layer checks local conditions that materially affect Kavita scans,
+including supported content signatures, inspectability, no media directly at a
+library root, one embedded comic series identity per top-level series folder, and
+no duplicate comic issue/volume slots. The canonical layer then compares local
+paths and embedded metadata with the active kavita-ingest naming policy: book
+folder/file naming, comic series folders, `Specials/` placement, issue padding,
+collection `vNN` naming, CBZ canonical containers, and metadata/path agreement.
+Warnings mean the media may still be readable by Kavita but does not match what
+kavita-ingest would publish today. The checker never renames or rewrites media.
 `review` records explicit append-only decisions. Manual identity entry covers
 book authors/series/edition fields and comic run year, type, sequence, and
 collection volume. A high confidence score means
@@ -466,8 +485,8 @@ remain available with `status --metrics`; additional plan-state counts use
 
 ## JSON and logging
 
-`doctor`, `scan`, `audit`, `status`, `plan show`, `apply`, `apply-status`, and
-`recover` provide `--json`. Their top-level object includes `output_version` and
+`doctor`, `scan`, `audit`, `library-check`, `status`, `plan show`, `apply`,
+`apply-status`, and `recover` provide `--json`. Their top-level object includes `output_version` and
 `command`. JSON never includes provider credentials or environment values.
 
 Normal operations write a rotating human-readable log beside the state database.
