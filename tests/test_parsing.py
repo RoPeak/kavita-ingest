@@ -93,6 +93,24 @@ EMPTY = InspectionResult(InspectionStatus.OK, SourceFormat.UNKNOWN)
             "Grant Morrison",
         ),
         (
+            "Comics/Green Lantern by Geoff Johns Book 02 (2019) - risky metadata recheck.cbz",
+            SourceFormat.CBZ,
+            MediaKind.COMIC,
+            "collected-edition",
+            "Green Lantern",
+            "2",
+            "Geoff Johns",
+        ),
+        (
+            "Comics/DC - The New Frontier Deluxe Edition (2015).cbz",
+            SourceFormat.CBZ,
+            MediaKind.COMIC,
+            "collected-edition",
+            "DC - The New Frontier",
+            None,
+            None,
+        ),
+        (
             "Comics/New X-Men by Grant Morrison Ultimate Collection Book 1 "
             "(2019) (Digital) (Asgard-Empire).cbz",
             SourceFormat.CBZ,
@@ -223,6 +241,33 @@ def test_structured_collection_filename_outweighs_overloaded_embedded_series() -
         item.source == "comicinfo" and item.raw == "Animal Man by Grant Morrison Book One"
         for item in result.hypotheses[0].evidence
     )
+
+
+def test_plain_tpb_number_is_not_collection_volume() -> None:
+    inspection = InspectionResult(
+        InspectionStatus.OK,
+        SourceFormat.CBZ,
+        metadata={
+            "comicinfo": {
+                "Title": "The New Frontier",
+                "Series": "DC: The New Frontier Deluxe Edition",
+                "Number": "TPB",
+                "Volume": "2015",
+                "Format": "Trade Paper Back",
+            }
+        },
+    )
+
+    result = classify(
+        Path("DC - The New Frontier Deluxe Edition (2015).cbz"),
+        SourceFormat.CBZ,
+        inspection,
+    )
+    hypothesis = result.hypotheses[0]
+
+    assert hypothesis.subtype == "collected-edition"
+    assert hypothesis.sequence is None
+    assert hypothesis.series == "DC - The New Frontier"
 
 
 def test_long_unnumbered_comic_archive_is_not_confidently_called_a_one_shot() -> None:

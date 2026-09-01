@@ -19,7 +19,8 @@ from .audit import AuditResult, run_audit
 from .completed_sources import CompletedSourceAssessment, assess_completed_sources
 from .config import AppConfig
 from .db import connect, migrate
-from .decisions import DecisionRepository, decision_needs_review
+from .decisions import DecisionRepository, decision_needs_review, reopen_review
+from .discovery import inspect_source
 from .doctor import Check, checks
 from .library_check import (
     LibraryCheckResult,
@@ -589,6 +590,10 @@ def _resume(config: AppConfig, state: ResumeState, output: Console) -> str | Non
     if state.kind == "review":
         if state.root is None:
             return None
+        reopened = _reopen_unresolved_review(config, state.root)
+        if reopened:
+            noun = "item" if reopened == 1 else "items"
+            output.print(f"Reopened {reopened} unresolved {noun} for review.")
         return _run_new(config, state.root, None, output)
     if state.kind == "reviewed":
         if state.root is None:
@@ -1202,6 +1207,36 @@ def _narrow_resume_scope(
         )
     )
     return common, len(candidates)
+
+
+def _reopen_unresolved_review(config: AppConfig, root: Path) -> int:
+    root = root.expanduser().resolve(strict=False)
+    with _connection(config) as connection:
+        rows = connection.execute(
+            """
+            SELECT DISTINCT s.path
+            FROM sources s
+            JOIN decisions d
+              ON d.source_fingerprint=s.sha256
+             AND d.media_signature=(s.format || ':' || s.size)
+            WHERE d.id=(
+                SELECT max(d2.id)
+                FROM decisions d2
+                WHERE d2.source_fingerprint=d.source_fingerprint
+                  AND d2.media_signature=d.media_signature
+            )
+              AND d.decision_type='unresolved'
+            """
+        ).fetchall()
+        repository = DecisionRepository(connection)
+        reopened = 0
+        for row in rows:
+            path = Path(str(row["path"])).expanduser().resolve(strict=False)
+            if not path.exists() or not path.is_relative_to(root):
+                continue
+            reopen_review(repository, inspect_source(path))
+            reopened += 1
+        return reopened
 
 
 

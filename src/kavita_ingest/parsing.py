@@ -10,6 +10,7 @@ from .domain import (
     InspectionResult,
     MediaKind,
     ParseHypothesis,
+    SequenceKind,
     SequenceNumber,
     SourceFormat,
 )
@@ -257,7 +258,8 @@ def _comic_hypothesis(
     identity_reasons: list[str] = []
 
     collection = re.match(
-        r"^(.*?)\s+by\s+(.+?)\s+(?:(Ultimate Collection)\s+)?Book\s+([\w.-]+)$",
+        r"^(.*?)\s+by\s+(.+?)\s+(?:(Ultimate Collection)\s+)?Book\s+([\w.-]+)"
+        r"(?:\s+-\s+.+)?$",
         stem,
         re.IGNORECASE,
     )
@@ -278,7 +280,7 @@ def _comic_hypothesis(
                 "embedded ComicInfo Series is retained as conflicting edition-label evidence"
             )
     elif re.search(
-        r"\b(?:TPB|Omnibus|Ultimate Collection|Collected Edition)\b"
+        r"\b(?:TPB|Omnibus|Ultimate Collection|Collected Edition|Deluxe Edition)\b"
         r"|\b(?:Volume|Vol\.?)\s*(?:\d+(?:\.\d+)?|[IVXLCDM]+)\b",
         stem,
         re.IGNORECASE,
@@ -300,7 +302,7 @@ def _comic_hypothesis(
         else:
             filename_series = _clean_title(
                 re.split(
-                    r"\b(?:TPB|Omnibus|Ultimate Collection|Collected Edition)\b",
+                    r"\b(?:TPB|Omnibus|Ultimate Collection|Collected Edition|Deluxe Edition)\b",
                     stem,
                     flags=re.IGNORECASE,
                 )[0]
@@ -368,6 +370,16 @@ def _comic_hypothesis(
                 subtype = "one-shot"
                 series = series or _clean_title(stem)
                 title = title or _clean_title(stem)
+    if (
+        subtype == "collected-edition"
+        and sequence is not None
+        and sequence.kind is SequenceKind.SYMBOLIC
+        and sequence.normalized in {"TPB", "HC", "SC"}
+    ):
+        sequence = None
+        identity_reasons.append(
+            "plain collection format marker in ComicInfo Number is not a volume index"
+        )
     if not series and path.parent.name and path.parent.name not in {".", path.anchor}:
         series = _clean_title(path.parent.name)
     return ParseHypothesis(
@@ -468,6 +480,7 @@ def _first_edition_qualifier(value: str) -> str | None:
     patterns = (
         r"Ultimate Collection",
         r"Collected Edition",
+        r"Deluxe Edition",
         r"Omnibus",
         r"TPB",
     )

@@ -547,6 +547,48 @@ def test_unresolved_new_head_after_consumed_acceptance_resumes_review(
     assert state.item_count == 1
 
 
+def test_resume_review_reopens_current_unresolved_item(tmp_path: Path) -> None:
+    settings, incoming, source = _decision_resume_fixture(tmp_path)
+    database = settings.database_path
+    assert database is not None
+
+    _consume_current_decision(settings, incoming, status="complete")
+
+    with connect(database) as connection:
+        DecisionRepository(connection).add(
+            source,
+            DecisionType.UNRESOLVED,
+            "unresolved-evidence",
+        )
+
+    config = tmp_path / "wizard.toml"
+    config.write_text(
+        f'''[paths]
+database = "{settings.database_path}"
+incoming = ["{incoming}"]
+books = "{settings.books_root}"
+comics = "{settings.comics_root}"
+
+[source]
+lifecycle = "preserve"
+
+[providers]
+offline = true
+
+[providers.comic_vine]
+enabled = false
+''',
+        encoding="utf-8",
+    )
+
+    result = CliRunner().invoke(app, ["wizard", "--config", str(config)], input="r\nq\nq\n")
+
+    assert result.exit_code == 0, result.output
+    assert "Reopened 1 unresolved item for review." in result.output
+    assert "Reviewed Book.pdf" in result.output
+    assert "[3/7] Review       current" in result.output
+
+
 def test_build_result_collapses_historical_missing_exclusions() -> None:
     buffer = io.StringIO()
     output = Console(

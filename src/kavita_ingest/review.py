@@ -6,6 +6,7 @@ from pathlib import Path
 import typer
 from rich.console import Console
 from rich.table import Table
+from rich.text import Text
 
 from .audit import AuditResult, ReviewItem, run_audit
 from .candidates import comic_run_context, generate_candidates
@@ -738,15 +739,17 @@ def _show_candidate_diagnostics(console: Console, item: ReviewItem) -> None:
                     for reason, count in attempt.rejection_counts
                 )
                 line += f"; rejected: {rejected}"
-            console.print(line)
+            console.print(Text(line))
             continue
         reason = labels.get(
             attempt.detail or "",
             (attempt.detail or attempt.outcome).replace("_", " "),
         )
         console.print(
-            f"  {attempt.provider.value} / {attempt.strategy}: "
-            f"{attempt.outcome} ({reason})"
+            Text(
+                f"  {attempt.provider.value} / {attempt.strategy}: "
+                f"{attempt.outcome} ({reason})"
+            )
         )
 
 

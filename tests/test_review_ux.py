@@ -870,6 +870,8 @@ def test_no_match_diagnostics_explain_provider_filtering(
 
     text = output.getvalue()
     assert "[V] Why no matches?" in _action_prompt(item, audit, wizard_mode=True)
+    assert "open_library / collection:structured: 3 returned, 0 usable" in text
+    assert "collection☺" not in text
     assert "3 returned, 0 usable" in text
     assert "collection sequence" in text and "conflict" in text
     assert "provider cannot prove collection" in text and "format" in text
