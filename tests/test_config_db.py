@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.resources
 import sqlite3
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -73,6 +74,14 @@ level = "debug"
         Path("/srv/staging"),
         Path("/srv/ignore"),
     } == set(config.excluded_roots())
+
+
+def test_console_entrypoints_include_short_ki_alias() -> None:
+    project = Path(__file__).parents[1] / "pyproject.toml"
+    with project.open("rb") as handle:
+        scripts = tomllib.load(handle)["project"]["scripts"]
+    assert scripts["kavita-ingest"] == "kavita_ingest.cli:app"
+    assert scripts["ki"] == "kavita_ingest.cli:app"
 
 
 @pytest.mark.parametrize(

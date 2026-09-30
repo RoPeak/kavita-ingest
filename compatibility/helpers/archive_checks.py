@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Iterable
 
 from lxml import etree
 
@@ -39,7 +39,8 @@ def normalized_member_name(name: str) -> str:
     return path.as_posix()
 
 
-def validate_inventory(infos: Iterable[object], limits: ArchiveLimits = ArchiveLimits()) -> list[str]:
+def validate_inventory(infos: Iterable[object], limits: ArchiveLimits | None = None) -> list[str]:
+    limits = limits or ArchiveLimits()
     entries = list(infos)
     if len(entries) > limits.max_entries:
         raise ValueError("archive entry-count limit exceeded")
@@ -48,7 +49,7 @@ def validate_inventory(infos: Iterable[object], limits: ArchiveLimits = ArchiveL
     folded: set[str] = set()
     total = 0
     for info in entries:
-        name = normalized_member_name(str(getattr(info, "filename")))
+        name = normalized_member_name(str(info.filename))  # type: ignore[attr-defined]
         if len(PurePosixPath(name).parts) > limits.max_path_depth:
             raise ValueError(f"archive path-depth limit exceeded: {name}")
         key = name.casefold()
@@ -56,9 +57,9 @@ def validate_inventory(infos: Iterable[object], limits: ArchiveLimits = ArchiveL
             raise ValueError(f"duplicate or case-colliding archive path: {name}")
         folded.add(key)
 
-        size = int(getattr(info, "file_size", 0))
-        compressed = int(getattr(info, "compress_size", 0))
-        if bool(getattr(info, "is_symlink")()):
+        size = int(info.file_size)  # type: ignore[attr-defined]
+        compressed = int(info.compress_size)  # type: ignore[attr-defined]
+        if bool(info.is_symlink()):  # type: ignore[attr-defined]
             raise ValueError(f"archive links are not supported: {name}")
         if size > limits.max_entry_size:
             raise ValueError(f"archive entry-size limit exceeded: {name}")
@@ -72,17 +73,17 @@ def validate_inventory(infos: Iterable[object], limits: ArchiveLimits = ArchiveL
 
 
 def safe_extract_regular_files(rar: object, destination: Path) -> dict[str, str]:
-    infos = list(getattr(rar, "infolist")())
+    infos = list(rar.infolist())  # type: ignore[attr-defined]
     names = validate_inventory(infos)
     destination.mkdir(parents=True, exist_ok=True)
     hashes: dict[str, str] = {}
     for info, name in zip(infos, names, strict=True):
-        if bool(getattr(info, "is_dir")()):
+        if bool(info.is_dir()):  # type: ignore[attr-defined]
             continue
         target = destination.joinpath(*PurePosixPath(name).parts)
         target.parent.mkdir(parents=True, exist_ok=True)
         digest = hashlib.sha256()
-        with getattr(rar, "open")(info) as source, target.open("xb") as output:
+        with rar.open(info) as source, target.open("xb") as output:  # type: ignore[attr-defined]
             while chunk := source.read(1024 * 1024):
                 digest.update(chunk)
                 output.write(chunk)

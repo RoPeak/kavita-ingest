@@ -27,6 +27,7 @@ dependencies = [
 
 [project.scripts]
 kavita-ingest = "kavita_ingest.cli:app"
+ki = "kavita_ingest.cli:app"
 
 [project.optional-dependencies]
 compatibility-test = [
@@ -62,6 +63,7 @@ select = ["E", "F", "I", "UP", "B", "SIM"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/compatibility/*" = ["E501", "SIM117"]
+"compatibility/helpers/*" = ["E501"]
 
 [tool.mypy]
 python_version = "3.12"

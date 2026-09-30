@@ -1081,16 +1081,32 @@ def _render_build_result(result: PlanBuildResult, output: Console) -> None:
 
 
 def _configuration_summary(config: AppConfig) -> str:
-    incoming = ", ".join(str(path) for path in config.incoming_roots) or "choose at runtime"
+    incoming = tuple(str(path) for path in config.incoming_roots)
+    books_incoming = next(
+        (path for path in incoming if Path(path).name.casefold() == "books"), None
+    )
+    comics_incoming = next(
+        (path for path in incoming if Path(path).name.casefold() == "comics"), None
+    )
+    identified = {books_incoming, comics_incoming}
+    other_incoming = tuple(path for path in incoming if path not in identified)
     lifecycle = {
         "preserve": "Preserve",
         "move_after_verify": "Remove after verify",
         "archive_after_verify": "Archive after verify",
     }.get(config.source_lifecycle, config.source_lifecycle)
-    return (
-        f"Incoming   {incoming}\nComics     {config.comics_root or 'not configured'}\n"
-        f"Books      {config.books_root or 'not configured'}\nSource     {lifecycle}"
-    )
+    lines = [
+        f"Books incoming   {books_incoming or 'not configured'}",
+        f"Books library    {config.books_root or 'not configured'}",
+        f"Comics incoming  {comics_incoming or 'not configured'}",
+        f"Comics library   {config.comics_root or 'not configured'}",
+    ]
+    if other_incoming:
+        lines.append(f"Other incoming   {', '.join(other_incoming)}")
+    if not incoming:
+        lines.append("Incoming         choose at runtime")
+    lines.append(f"Operation        planning/review until explicit approval; source: {lifecycle}")
+    return "\n".join(lines)
 
 
 def _reviewed_without_plan(
