@@ -327,13 +327,13 @@ def _provider_checks(config: AppConfig) -> list[Check]:
             "comic-vine",
             "INFO"
             if not config.providers.comic_vine_enabled
-            else ("OK" if config.providers.comic_vine_api_key else "BLOCKED"),
+            else ("OK" if config.providers.comic_vine_api_key else "INFO"),
             "disabled"
             if not config.providers.comic_vine_enabled
             else (
                 "API key present"
                 if config.providers.comic_vine_api_key
-                else "COMIC_VINE_API_KEY is missing"
+                else "not configured; local metadata, filenames, and manual review remain available"
             ),
         ),
     ]
