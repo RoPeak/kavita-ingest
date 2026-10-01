@@ -15,6 +15,22 @@ _VOLUME_PATTERNS = (
 )
 
 
+def is_filesystem_metadata(path: Path) -> bool:
+    """Return true only for well-known non-media sidecars/directories.
+
+    This deliberately does not discard arbitrary dotfiles: callers may keep
+    meaningful application files beside media.  It is shared at discovery
+    boundaries so a resource fork can never reach inspection or providers.
+    """
+    names = {part.casefold() for part in path.parts}
+    name = path.name.casefold()
+    return (
+        name.startswith("._")
+        or name in {".ds_store", "thumbs.db", "desktop.ini"}
+        or "__macosx" in names
+    )
+
+
 def discover(root: Path, excluded_roots: tuple[Path, ...] = ()) -> Iterator[Path]:
     root = root.expanduser().resolve(strict=True)
     excluded = tuple(path.expanduser().resolve(strict=False) for path in excluded_roots)
@@ -25,10 +41,11 @@ def discover(root: Path, excluded_roots: tuple[Path, ...] = ()) -> Iterator[Path
             for name in directories
             if not _is_excluded(current_path / name, excluded)
             and not (current_path / name).is_symlink()
+            and not is_filesystem_metadata(current_path / name)
         )
         for name in sorted(files, key=_natural_name_key):
             path = current_path / name
-            if path.is_symlink() or _is_excluded(path, excluded):
+            if path.is_symlink() or _is_excluded(path, excluded) or is_filesystem_metadata(path):
                 continue
             if path.suffix.casefold() in SUPPORTED_EXTENSIONS or is_multivolume_name(path.name):
                 yield path

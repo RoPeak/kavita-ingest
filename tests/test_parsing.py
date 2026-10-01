@@ -543,3 +543,16 @@ def test_complete_one_volume_filename_overrides_sparse_written_title() -> None:
     assert hypothesis.series == "Bone"
     assert hypothesis.title == "The Complete Cartoon Epic in One Volume"
     assert hypothesis.year == 2004
+
+
+def test_explicit_issue_marker_wins_over_run_volume() -> None:
+    result = classify(
+        Path("Green Lantern Vol. 4 #039.cbz"),
+        SourceFormat.CBZ,
+        InspectionResult(InspectionStatus.OK, SourceFormat.CBZ),
+    )
+    hypothesis = result.hypotheses[0]
+    assert hypothesis.subtype == "issue"
+    assert hypothesis.series == "Green Lantern"
+    assert hypothesis.sequence and hypothesis.sequence.normalized == "39"
+    assert hypothesis.run_number and hypothesis.run_number.normalized == "4"

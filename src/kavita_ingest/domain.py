@@ -101,6 +101,9 @@ class ParseHypothesis:
     evidence: tuple[Evidence, ...] = ()
     reasons: tuple[str, ...] = ()
     edition_qualifiers: tuple[str, ...] = ()
+    # A comic run/series-volume is context for an issue, not the issue number
+    # and not evidence that the file is a collected edition.
+    run_number: SequenceNumber | None = None
 
 
 @dataclass(frozen=True, slots=True)

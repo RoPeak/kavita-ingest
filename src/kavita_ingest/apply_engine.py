@@ -353,7 +353,10 @@ class ApplyEngine:
                 self._mark_failure(journal, run.id, item.item_id, exc)
             finally:
                 self.progress(index, total, item.source.name)
-        return self._finalize(journal, run.id)
+        summary = self._finalize(journal, run.id)
+        if summary.status is RunState.COMPLETE:
+            _write_publication_report(connection, plan, journal.get_run(run.id), document)
+        return summary
 
     def recover(self, plan_id: int) -> ApplySummary:
         with ProcessLock(lock_path(self.database_path)):
@@ -389,7 +392,10 @@ class ApplyEngine:
                 self._mark_stale(journal, run.id, recorded.item_id, str(exc))
             except (OSError, ValueError, ApplyRefused, subprocess.SubprocessError) as exc:
                 self._mark_failure(journal, run.id, recorded.item_id, exc)
-        return self._finalize(journal, run.id)
+        summary = self._finalize(journal, run.id)
+        if summary.status is RunState.COMPLETE:
+            _write_publication_report(connection, plan, journal.get_run(run.id), document)
+        return summary
 
     def abandon(self, plan_id: int, *, reason: str) -> ApplySummary:
         """Close a safely abandonable apply run without touching media."""
@@ -1217,6 +1223,86 @@ class ApplyEngine:
         else:
             run = journal.set_run_state(run_id, RunState.FAILED)
         return _summary(journal, run)
+
+
+def _write_publication_report(
+    connection: sqlite3.Connection,
+    plan: StoredPlan,
+    run: ApplyRun,
+    document: dict[str, Any],
+) -> Path:
+    """Materialize immutable completed-journal evidence for ingest-cleanup.
+
+    The SQLite journal remains authoritative.  This report is a read-only
+    bridge for a separate tool, written only after every item and the run are
+    complete; historical runs are never reconstructed or guessed.
+    """
+    if run.status is not RunState.COMPLETE or run.completed_at is None:
+        raise ApplyRefused("cannot publish cleanup evidence for an incomplete apply run")
+    journal = JournalRepository(connection)
+    by_id = {str(item["item_id"]): item for item in document["items"]}
+    items: list[dict[str, Any]] = []
+    for recorded in journal.items(run.id):
+        planned = by_id.get(recorded.item_id)
+        if planned is None or recorded.state is not ItemState.COMPLETE:
+            raise ApplyRefused("completed journal does not match immutable plan")
+        if recorded.lifecycle_policy != "preserve":
+            # Other lifecycle modes are intentionally not cleanup evidence.
+            return Path()
+        source = planned["source"]
+        projection = planned["kavita_projection"]
+        source_path = str(source["path"])
+        destination_path = str(projection["absolute_destination"])
+        if recorded.source_path != source_path or recorded.destination_path != destination_path:
+            raise ApplyRefused("journal paths do not match immutable plan")
+        if recorded.planned_source_hash != str(source["sha256"]):
+            raise ApplyRefused("journal source hash does not match immutable plan")
+        if not recorded.destination_hash or not recorded.verification:
+            raise ApplyRefused("completed journal lacks destination verification")
+        transforms: list[str] = []
+        if str(source["media_format"]) == "cbr":
+            transforms.append("cbr-to-cbz")
+        if planned.get("ownership_manifest", {}).get("set"):
+            transforms.append("metadata-write")
+        items.append({
+            "item_id": recorded.item_id,
+            "source": source_path,
+            "source_relative_path": str(source.get("relative_path") or ""),
+            "source_size_bytes": int(source["size"]),
+            "source_sha256": str(source["sha256"]),
+            "source_media_type": str(source["media_format"]),
+            "source_lifecycle": recorded.lifecycle_policy,
+            "transformations": transforms,
+            "destination": destination_path,
+            "destination_relative_path": str(projection.get("destination") or ""),
+            "destination_size_bytes": int(recorded.staged_size or 0),
+            "destination_sha256": recorded.destination_hash,
+            "staged_verification": bool(recorded.verification),
+            "destination_verification": True,
+            "recovery_state": "complete",
+            "completed_at": run.completed_at,
+        })
+    state_root = Path(connection.execute("PRAGMA database_list").fetchone()[2]).parent
+    directory = state_root / "kavita-reports"
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    target = directory / f"{run.id}.json"
+    payload = {
+        "report_schema": "kavita-ingest-publication-v1",
+        "operation_id": run.id,
+        "plan_id": plan.id,
+        "plan_digest": plan.sha256,
+        "approved_apply": True,
+        "status": "completed",
+        "source_lifecycle": "preserved",
+        "verification_completed": True,
+        "recovery_required": False,
+        "completed_at": run.completed_at,
+        "items": items,
+    }
+    temporary = target.with_suffix(".json.tmp")
+    temporary.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    os.replace(temporary, target)
+    return target
 
 
 def _journal_seed(item: PreparedItem) -> dict[str, str | None]:

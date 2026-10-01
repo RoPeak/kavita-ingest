@@ -43,3 +43,14 @@ def test_multivolume_patterns_are_detected() -> None:
     assert is_multivolume_name("comic.part01.rar")
     assert is_multivolume_name("comic.r00")
     assert not is_multivolume_name("comic.cbr")
+
+
+def test_discovery_ignores_appledouble_and_filesystem_metadata(tmp_path: Path) -> None:
+    incoming = tmp_path / "incoming"
+    nested = incoming / "__MACOSX"
+    nested.mkdir(parents=True)
+    (incoming / "real.cbz").write_bytes(b"PK\x03\x04")
+    (incoming / "._real.cbz").write_bytes(b"PK\x03\x04")
+    (incoming / ".DS_Store").write_bytes(b"x")
+    (nested / "._nested.cbz").write_bytes(b"PK\x03\x04")
+    assert [path.name for path in discover(incoming)] == ["real.cbz"]

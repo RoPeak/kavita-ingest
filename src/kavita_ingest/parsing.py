@@ -35,6 +35,11 @@ _EDITION_QUALIFIER = re.compile(
     re.IGNORECASE,
 )
 _COLLECTION_VOLUME_SHORTHAND = re.compile(r"^(.*?)\s+[vV](\d{1,4})$")
+_EXPLICIT_ISSUE = re.compile(
+    r"^(.*?)\s+(?:#\s*|issue\s*|no\.?(?:\s*)?)(\d+(?:\.\d+)?[A-Za-z]?)$",
+    re.IGNORECASE,
+)
+_RUN_VOLUME = re.compile(r"\b(?:vol(?:ume)?\.?|v)\s*(\d{1,4})\b", re.IGNORECASE)
 _COMPLETE_ONE_VOLUME_SUFFIX = re.compile(
     r"^(.*?)\s+-\s+((?:The\s+)?Complete\b.+\bin\s+One\s+Volume)$",
     re.IGNORECASE,
@@ -255,15 +260,32 @@ def _comic_hypothesis(
     sequence = SequenceNumber.parse(str(comicinfo["Number"])) if comicinfo.get("Number") else None
     creators: tuple[str, ...] = ()
     subtype = "issue"
+    run_number: SequenceNumber | None = None
     identity_reasons: list[str] = []
 
-    collection = re.match(
+    # An explicit issue marker is stronger than a nearby volume marker.  In
+    # e.g. "Green Lantern Vol. 4 #039", Vol. 4 identifies the run and #039
+    # identifies the issue; it must not become a trade-volume classification.
+    explicit_issue = _EXPLICIT_ISSUE.match(stem)
+    if explicit_issue:
+        prefix, number = explicit_issue.groups()
+        run_match = _RUN_VOLUME.search(prefix)
+        if run_match:
+            run_number = SequenceNumber.parse(run_match.group(1))
+            prefix = _RUN_VOLUME.sub(" ", prefix)
+        filename_series = _clean_title(prefix)
+        series = series or filename_series
+        sequence = sequence or SequenceNumber.parse(number)
+        title = title or None
+        identity_reasons.append("explicit filename issue marker takes precedence over run volume")
+    else:
+      collection = re.match(
         r"^(.*?)\s+by\s+(.+?)\s+(?:(Ultimate Collection)\s+)?Book\s+([\w.-]+)"
         r"(?:\s+-\s+.+)?$",
         stem,
         re.IGNORECASE,
     )
-    if collection:
+      if collection:
         series_text, creator, collection_label, number = collection.groups()
         series = _clean_title(series_text)
         title = title or (
@@ -279,7 +301,7 @@ def _comic_hypothesis(
                 "structured collection filename separates series, creator, and book index; "
                 "embedded ComicInfo Series is retained as conflicting edition-label evidence"
             )
-    elif re.search(
+      elif re.search(
         r"\b(?:TPB|Omnibus|Ultimate Collection|Collected Edition|Deluxe Edition)\b"
         r"|\b(?:Volume|Vol\.?)\s*(?:\d+(?:\.\d+)?|[IVXLCDM]+)\b",
         stem,
@@ -313,7 +335,7 @@ def _comic_hypothesis(
         qualifier = _first_edition_qualifier(stem)
         if qualifier:
             edition_qualifiers = _merge_qualifiers(edition_qualifiers, qualifier)
-    else:
+      else:
         volume = _COLLECTION_VOLUME_SHORTHAND.match(stem)
         one_volume = _COMPLETE_ONE_VOLUME_SUFFIX.match(stem)
         patterns = (
@@ -394,6 +416,7 @@ def _comic_hypothesis(
         evidence=evidence,
         reasons=("comic archive or strong issue/folder evidence", *identity_reasons),
         edition_qualifiers=edition_qualifiers,
+        run_number=run_number,
     )
 
 
