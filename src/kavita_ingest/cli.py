@@ -11,7 +11,13 @@ import typer
 from rich.console import Console
 
 from . import __version__
-from .apply_engine import ApplyEngine, ApplyPreview, ApplyRefused, ApplySummary, backfill_publication_reports
+from .apply_engine import (
+    ApplyEngine,
+    ApplyPreview,
+    ApplyRefused,
+    ApplySummary,
+    backfill_publication_reports,
+)
 from .audit import run_audit
 from .config import load_config, write_initial_config
 from .db import connect
@@ -80,6 +86,7 @@ ROOT_EPILOG = """Common commands:
       List immutable plans and their status.
 
   kavita-ingest provenance-backfill --dry-run
+  kavita-ingest provenance-backfill --apply --yes
       Inspect whether historical completed preserve runs can safely emit reports.
 
 Use `kavita-ingest COMMAND --help` for command-specific arguments and options.
@@ -104,7 +111,11 @@ OUTPUT_VERSION = "1"
 @app.command("provenance-backfill")
 def provenance_backfill(
     config: Annotated[Path | None, typer.Option("--config")] = None,
-    dry_run: Annotated[bool, typer.Option("--dry-run")] = True,
+    dry_run: Annotated[
+        bool,
+        typer.Option("--dry-run", help="Preview eligible reports without writing (the default)."),
+    ] = False,
+    apply: Annotated[bool, typer.Option("--apply", help="Write eligible trusted reports.")] = False,
     yes: Annotated[bool, typer.Option("--yes", help="Write only fully evidenced reports.")] = False,
 ) -> None:
     """Backfill cleanup reports from immutable historical records only."""
@@ -112,13 +123,19 @@ def provenance_backfill(
     if settings.database_path is None:
         typer.echo("REFUSED: state database is not configured", err=True)
         raise typer.Exit(2)
-    if not dry_run and not yes:
-        typer.echo("REFUSED: use --yes with --no-dry-run to write reports", err=True)
+    if dry_run and apply:
+        typer.echo("REFUSED: choose either --dry-run or --apply", err=True)
+        raise typer.Exit(2)
+    if not apply and yes:
+        typer.echo("REFUSED: --yes requires --apply", err=True)
+        raise typer.Exit(2)
+    if apply and not yes:
+        typer.echo("REFUSED: use --apply --yes to write reports", err=True)
         raise typer.Exit(2)
     with connect(settings.database_path) as connection:
-        report_ids = backfill_publication_reports(connection, dry_run=dry_run)
+        report_ids = backfill_publication_reports(connection, dry_run=not apply)
     if report_ids:
-        action = "Would backfill" if dry_run else "Backfilled"
+        action = "Backfilled" if apply else "Would backfill"
         typer.echo(f"{action} {len(report_ids)} trusted provenance report(s).")
     else:
         typer.echo("Cannot safely backfill this historical operation.")

@@ -110,6 +110,24 @@ includes `comicinfoxml`, which those experiments found unsuitable for production
 round-trip preservation; production ComicInfo writing uses the hardened `lxml`
 implementation included in the normal package.
 
+### Cleanup provenance reports
+
+Completed `preserve` publications write an immutable
+`kavita-ingest-publication-v1` report below the directory containing the active
+state database, at `kavita-reports/<operation-id>.json`. With the default XDG
+database this is `~/.local/state/kavita-ingest/kavita-reports/`. A custom
+`[paths].database` therefore also changes the report root.
+
+Historical reports are previewed by default and require explicit write intent:
+
+```bash
+kavita-ingest provenance-backfill --dry-run
+kavita-ingest provenance-backfill --apply --yes
+```
+
+The backfill reads immutable plans and completed journals; it never changes
+media or manufactures evidence by hashing current files.
+
 ### Safe source bundles
 
 Do not ZIP the working directory directly: local clones may contain ignored

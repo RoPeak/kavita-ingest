@@ -1315,7 +1315,8 @@ def backfill_publication_reports(connection: sqlite3.Connection, *, dry_run: boo
     plans = PlanStore(connection)
     result: list[str] = []
     rows = connection.execute(
-        "SELECT id, plan_id, plan_digest, status, completed_at FROM apply_runs WHERE status='complete'"
+        "SELECT id, plan_id, plan_digest, status, completed_at "
+        "FROM apply_runs WHERE status='complete'"
     ).fetchall()
     state_root = Path(connection.execute("PRAGMA database_list").fetchone()[2]).parent
     for row in rows:

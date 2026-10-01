@@ -84,6 +84,30 @@ def test_cli_refuses_unapproved_plan_without_convenience_override(tmp_path: Path
     assert "not explicitly approved" in result.output
 
 
+def test_provenance_backfill_requires_explicit_apply_and_writes_to_state_root(
+    tmp_path: Path,
+) -> None:
+    fixture = make_apply_fixture(tmp_path, "cbz", lifecycle="preserve")
+    config = _config(tmp_path, fixture)
+    assert ApplyEngine(fixture.config).apply(fixture.plan_id).status.value == "complete"
+    reports = fixture.config.database_path.parent / "kavita-reports"  # type: ignore[union-attr]
+    for report in reports.glob("*.json"):
+        report.unlink()
+    runner = CliRunner()
+    preview = runner.invoke(app, ["provenance-backfill", "--dry-run", "--config", str(config)])
+    assert preview.exit_code == 0, preview.output
+    assert "Would backfill 1 trusted provenance report(s)." in preview.output
+    refused = runner.invoke(app, ["provenance-backfill", "--apply", "--config", str(config)])
+    assert refused.exit_code == 2
+    assert "--apply --yes" in refused.output
+    written = runner.invoke(
+        app, ["provenance-backfill", "--apply", "--yes", "--config", str(config)]
+    )
+    assert written.exit_code == 0, written.output
+    assert "Backfilled 1 trusted provenance report(s)." in written.output
+    assert len(list(reports.glob("*.json"))) == 1
+
+
 def test_doctor_reports_recovery_required_apply_state(tmp_path: Path) -> None:
     fixture = make_apply_fixture(tmp_path, "cbz")
     config = _config(tmp_path, fixture)
