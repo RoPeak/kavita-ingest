@@ -340,6 +340,21 @@ def _run_new(
         return None
     _stage(output, 3, "Review", "current")
     decision_heads = _decision_heads(config, audit) if selection.reprocess else {}
+    if not selection.reprocess:
+        saved = _reusable_decision_heads(config, audit)
+        if saved:
+            output.print(
+                f"\n{len(saved)} current source file"
+                f"{' has' if len(saved) == 1 else 's have'} saved review decisions.\n"
+                "[U] Use saved decisions   [R] Re-review all current sources   [Q] Quit"
+            )
+            choice = _choice("R")
+            if choice == "Q":
+                return None
+            if choice == "R":
+                # A newer decision supersedes the current projection but never
+                # removes the append-only historical decision.
+                decision_heads = saved
     while True:
         incomplete = _incomplete_review_items(
             config, audit, required_newer_than=decision_heads
@@ -434,7 +449,7 @@ def _select_discovered_sources(
 ) -> DiscoverySelection | str | None:
     total = len(assessment.current) + len(assessment.completed)
     output.print(f"Found {total} supported file{'s' if total != 1 else ''}\n")
-    output.print(f"New                 {len(assessment.current)}")
+    output.print(f"Pending ingest      {len(assessment.current)}")
     output.print(f"Already ingested    {len(assessment.completed)}")
     for warning in assessment.warnings:
         label = (
@@ -494,6 +509,34 @@ def _decision_heads(config: AppConfig, audit: AuditResult) -> dict[str, int | No
             )) else None
             for item in audit.items
         }
+    finally:
+        connection.close()
+
+
+def _reusable_decision_heads(config: AppConfig, audit: AuditResult) -> dict[str, int | None]:
+    """Return current terminal decisions that an operator may explicitly reuse."""
+    if config.database_path is None:
+        return {}
+    connection = _connection(config)
+    try:
+        decisions = DecisionRepository(connection)
+        reusable = {
+            "accepted",
+            "work_accepted",
+            "manual_identity",
+            "rejected",
+            "skipped",
+        }
+        output: dict[str, int | None] = {}
+        for item in audit.items:
+            scan = getattr(item, "scan", None)
+            source = getattr(scan, "source", None)
+            if source is None:
+                continue
+            decision = decisions.latest(source)
+            if decision is not None and decision.decision_type.value in reusable:
+                output[source.sha256] = decision.id
+        return output
     finally:
         connection.close()
 

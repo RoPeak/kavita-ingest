@@ -475,7 +475,7 @@ def review_command(
         Path | None, typer.Option("--config", help="TOML configuration path.")
     ] = None,
 ) -> None:
-    """Interactively review candidates and record explicit decisions."""
+    """Re-review current candidates; new decisions supersede, never erase, history."""
     settings = load_config(config)
     configure_logging(
         settings.log_level,
