@@ -1305,6 +1305,48 @@ def _write_publication_report(
     return target
 
 
+def backfill_publication_reports(connection: sqlite3.Connection, *, dry_run: bool) -> list[str]:
+    """Materialize only fully evidenced historical completed preserve runs.
+
+    This deliberately reads recorded hashes and paths from immutable plan/journal
+    state; it never hashes current media to manufacture historical provenance.
+    """
+    journal = JournalRepository(connection)
+    plans = PlanStore(connection)
+    result: list[str] = []
+    rows = connection.execute(
+        "SELECT id, plan_id, plan_digest, status, completed_at FROM apply_runs WHERE status='complete'"
+    ).fetchall()
+    state_root = Path(connection.execute("PRAGMA database_list").fetchone()[2]).parent
+    for row in rows:
+        run = journal.get_run(str(row[0]))
+        plan = plans.get(int(row[1]))
+        if (
+            run.completed_at is None
+            or plan.status != "approved"
+            or plan.approval_digest != plan.sha256
+            or run.plan_digest != plan.sha256
+            or any(
+                item.state is not ItemState.COMPLETE
+                or item.lifecycle_policy != "preserve"
+                or len(item.planned_source_hash) != 64
+                or not item.destination_hash
+                or not item.verification
+                for item in journal.items(run.id)
+            )
+        ):
+            continue
+        target = state_root / "kavita-reports" / f"{run.id}.json"
+        if target.exists():
+            continue
+        # `_write_publication_report` additionally cross-checks the immutable
+        # canonical plan item identities against every journal row.
+        if not dry_run:
+            _write_publication_report(connection, plan, run, json.loads(plan.canonical_json))
+        result.append(run.id)
+    return result
+
+
 def _journal_seed(item: PreparedItem) -> dict[str, str | None]:
     return {
         "item_id": item.item_id,

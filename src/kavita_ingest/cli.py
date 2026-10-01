@@ -11,7 +11,7 @@ import typer
 from rich.console import Console
 
 from . import __version__
-from .apply_engine import ApplyEngine, ApplyPreview, ApplyRefused, ApplySummary
+from .apply_engine import ApplyEngine, ApplyPreview, ApplyRefused, ApplySummary, backfill_publication_reports
 from .audit import run_audit
 from .config import load_config, write_initial_config
 from .db import connect
@@ -79,6 +79,9 @@ ROOT_EPILOG = """Common commands:
   kavita-ingest plan list
       List immutable plans and their status.
 
+  kavita-ingest provenance-backfill --dry-run
+      Inspect whether historical completed preserve runs can safely emit reports.
+
 Use `kavita-ingest COMMAND --help` for command-specific arguments and options.
 """
 
@@ -96,6 +99,29 @@ app.add_typer(plan_app, name="plan")
 app.add_typer(run_group_app, name="run-group")
 
 OUTPUT_VERSION = "1"
+
+
+@app.command("provenance-backfill")
+def provenance_backfill(
+    config: Annotated[Path | None, typer.Option("--config")] = None,
+    dry_run: Annotated[bool, typer.Option("--dry-run")] = True,
+    yes: Annotated[bool, typer.Option("--yes", help="Write only fully evidenced reports.")] = False,
+) -> None:
+    """Backfill cleanup reports from immutable historical records only."""
+    settings = load_config(config)
+    if settings.database_path is None:
+        typer.echo("REFUSED: state database is not configured", err=True)
+        raise typer.Exit(2)
+    if not dry_run and not yes:
+        typer.echo("REFUSED: use --yes with --no-dry-run to write reports", err=True)
+        raise typer.Exit(2)
+    with connect(settings.database_path) as connection:
+        report_ids = backfill_publication_reports(connection, dry_run=dry_run)
+    if report_ids:
+        action = "Would backfill" if dry_run else "Backfilled"
+        typer.echo(f"{action} {len(report_ids)} trusted provenance report(s).")
+    else:
+        typer.echo("Cannot safely backfill this historical operation.")
 
 
 def _version_callback(value: bool) -> None:

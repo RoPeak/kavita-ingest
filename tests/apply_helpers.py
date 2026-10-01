@@ -235,7 +235,9 @@ def _versions(media_format: str) -> dict[str, str]:
         "comicinfo_schema": "2.1",
         "comicinfo_profile": PLANNED_COMICINFO_PROFILE,
         "rarfile": "4.5",
-        "unrar": "7.00",
+        # Match the supported local UnRAR release; apply validation still
+        # compares the immutable plan value with the real executable.
+        "unrar": "7.20",
     }
 
 
