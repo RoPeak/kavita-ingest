@@ -332,7 +332,7 @@ def _run_new(
     if selection is None:
         _stage(output, 2, "Discover", "complete")
         return None
-    audit = run_audit(root, config, mode="wizard", scans_override=selection.scans)
+    audit = _run_audit_with_progress(root, config, selection.scans, output)
     _render_audit(audit, output)
     _stage(output, 2, "Discover", "complete")
     if not audit.items:
@@ -358,7 +358,7 @@ def _run_new(
         )
         if _run_group_heads(config, audit) != run_group_heads:
             output.print("\nRun choice changed; refreshing this review inside the selected run.\n")
-            audit = run_audit(root, config, mode="wizard", scans_override=selection.scans)
+            audit = _run_audit_with_progress(root, config, selection.scans, output)
             _render_audit(audit, output)
             continue
         incomplete = _incomplete_review_items(config, audit, required_newer_than=decision_heads)
@@ -382,7 +382,7 @@ def _run_new(
                 return _plan_reviewed(config, root, output)
             continue
         if choice == "R":
-            audit = run_audit(root, config, mode="wizard", scans_override=selection.scans)
+            audit = _run_audit_with_progress(root, config, selection.scans, output)
             _render_audit(audit, output)
             continue
         output.print("Review decisions saved. Resume later to finish review.")
@@ -1024,6 +1024,35 @@ def _confirm_lifecycle(document: dict[str, Any]) -> None:
         default=False,
     ):
         raise typer.Abort()
+
+
+def _run_audit_with_progress(
+    root: Path, config: AppConfig, scans: tuple[ScanResult, ...], output: Console
+) -> AuditResult:
+    """Keep provider lookups observable; they can be rate-limited or time out."""
+    if not output.is_terminal or not scans:
+        return run_audit(root, config, mode="wizard", scans_override=scans)
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("{task.description}"),
+        BarColumn(),
+        MofNCompleteColumn(),
+        console=output,
+        transient=False,
+    ) as progress:
+        task = progress.add_task("Preparing metadata lookup", total=len(scans))
+
+        def update(completed: int, total: int, source_name: str) -> None:
+            progress.update(
+                task,
+                completed=completed,
+                total=total,
+                description=f"Checking metadata: {_short_progress_name(source_name)}",
+            )
+
+        return run_audit(
+            root, config, mode="wizard", scans_override=scans, progress=update
+        )
 
 
 def _render_audit(audit: AuditResult, output: Console) -> None:

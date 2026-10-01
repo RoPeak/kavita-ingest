@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -52,6 +53,7 @@ def run_audit(
     mode: str = "audit",
     providers_override: tuple[Provider, ...] | None = None,
     scans_override: tuple[ScanResult, ...] | None = None,
+    progress: Callable[[int, int, str], None] | None = None,
 ) -> AuditResult:
     if config.database_path is None:
         raise ValueError("audit requires a database path for cache and match evidence")
@@ -81,7 +83,10 @@ def run_audit(
                     # Invalid history remains auditable but cannot influence matching.
                     continue
         items = []
-        for scanned, local in zip(scans, local_values, strict=True):
+        total = len(scans)
+        if progress and scans:
+            progress(0, total, scans[0].source.path.name)
+        for index, (scanned, local) in enumerate(zip(scans, local_values, strict=True), 1):
             generated = generate_candidates(local, providers, candidate_session)
             scores = score_candidates(local, list(generated.candidates), config.matching)
             scores = [
@@ -107,6 +112,11 @@ def run_audit(
             source_id = _source_id(connection, scanned)
             matches.add_scores(run_id, source_id, local, scores)
             items.append(ReviewItem(scanned, local, generated, tuple(scores), resolved))
+            if progress:
+                next_label = (
+                    scans[index].source.path.name if index < total else "Metadata lookup complete"
+                )
+                progress(index, total, next_label)
         summary = _summary(items)
         matches.complete_run(run_id, len(items), summary)
         LOGGER.info("audit complete run=%s sources=%s summary=%s", run_id, len(items), summary)

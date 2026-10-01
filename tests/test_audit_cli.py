@@ -67,6 +67,30 @@ def test_synthetic_audit_persists_candidates_but_no_approval(tmp_path: Path) -> 
         assert connection.execute("SELECT count(*) FROM decisions").fetchone() == (0,)
 
 
+def test_audit_reports_per_item_progress_without_changing_sources(tmp_path: Path) -> None:
+    incoming = tmp_path / "incoming"
+    incoming.mkdir()
+    create_epub(incoming / "Fixture Book.epub")
+    create_epub(incoming / "Second Book.epub")
+    updates: list[tuple[int, int, str]] = []
+    candidate = NormalizedCandidate(
+        ProviderName.GOOGLE_BOOKS,
+        "progress-fixture",
+        RecordType.BOOK_EDITION,
+        media_kind=MediaKind.BOOK,
+        title="Fixture Book",
+    )
+    run_audit(
+        incoming,
+        AppConfig(database_path=tmp_path / "state.sqlite3"),
+        providers_override=(FakeProvider(candidate),),
+        progress=lambda completed, total, name: updates.append((completed, total, name)),
+    )
+    assert updates[0] == (0, 2, "Fixture Book.epub")
+    assert updates[1] == (1, 2, "Second Book.epub")
+    assert updates[-1] == (2, 2, "Metadata lookup complete")
+
+
 def test_offline_audit_command_reports_unresolved_without_network(tmp_path: Path) -> None:
     incoming = tmp_path / "incoming"
     incoming.mkdir()
