@@ -62,6 +62,9 @@ def interactive_review(
         key: 0 for key in ("accepted", "work_only", "manual", "rejected", "unresolved", "skipped")
     }
     decided_this_pass: set[str] = set()
+    summary_total = (
+        len(review_fingerprints) if review_fingerprints is not None else len(audit.items)
+    )
     collection_search_hints: dict[str, tuple[str, ...]] = {}
     restart_requested = False
     try:
@@ -429,18 +432,20 @@ def interactive_review(
                     _show_summary(
                         output,
                         counts,
-                        len(audit.items),
+                        summary_total,
                         repository=repository,
                         audit=audit,
+                        current_review=review_fingerprints is not None,
                     )
                     return audit
                 if action == "Q":
                     _show_summary(
                         output,
                         counts,
-                        len(audit.items),
+                        summary_total,
                         repository=repository,
                         audit=audit,
+                        current_review=review_fingerprints is not None,
                     )
                     return audit
                 if action == "N":
@@ -450,7 +455,14 @@ def interactive_review(
                 break
             if not decided:
                 continue
-        _show_summary(output, counts, len(audit.items), repository=repository, audit=audit)
+        _show_summary(
+            output,
+            counts,
+            summary_total,
+            repository=repository,
+            audit=audit,
+            current_review=review_fingerprints is not None,
+        )
         return audit
     finally:
         connection.close()
@@ -979,13 +991,11 @@ def _action_prompt(
             actions = ["[V] View why", "[D] Search diagnostics"]
             if candidate_planning_context_ready(item.local, displayed[0].candidate):
                 actions.insert(0, "[A] Accept")
+            elif _can_confirm_local_run_year(item, displayed[0]):
+                actions.insert(0, "[A] Accept using local year")
             if len(group_batch) > 1:
                 actions.append(f"[B] Accept eligible group ({len(group_batch)})")
-            if any(
-                score.candidate.run_id
-                and not candidate_planning_context_ready(item.local, score.candidate)
-                for score in displayed
-            ):
+            if any(score.candidate.run_id for score in displayed):
                 actions.append("[G] Choose run")
             if len(displayed) > 1 or not displayed[0].eligible:
                 actions.append("[C] Choose candidate")
@@ -1022,6 +1032,20 @@ def _action_prompt(
         actions.append("[V]why-no-matches")
     actions.extend(["[U]nresolved", "[K]skip", "[Q]uit"])
     return " ".join(actions)
+
+
+def _can_confirm_local_run_year(item: ReviewItem, score: CandidateScore) -> bool:
+    """Whether the compact review can offer the explicit local-year escape hatch."""
+    if item.local.year is None or score.candidate.run_start_year is not None:
+        return False
+    exact = {
+        comparison.field
+        for comparison in score.comparisons
+        if comparison.kind is ComparisonKind.EXACT
+    }
+    return item.local.kind.value == "comic" and {
+        "title", "sequence", "issue_title"
+    }.issubset(exact)
 
 
 
@@ -1067,8 +1091,9 @@ def _show_summary(
     *,
     repository: DecisionRepository | None = None,
     audit: AuditResult | None = None,
+    current_review: bool = False,
 ) -> None:
-    if repository is not None and audit is not None:
+    if repository is not None and audit is not None and not current_review:
         counts, no_decision = _persisted_review_counts(repository, audit)
     else:
         no_decision = max(total - sum(counts.values()), 0)

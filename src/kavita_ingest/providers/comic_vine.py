@@ -75,7 +75,11 @@ class ComicVineProvider:
             {
                 "query": query.series_title or query.title,
                 "resources": "volume",
-                "limit": "10",
+                # Long-lived titles commonly have more than ten volume search
+                # results. Run-first matching must see the plausible run set
+                # before it probes issue numbers; otherwise a historic result
+                # can look uniquely authoritative merely by truncation.
+                "limit": "100",
                 "field_list": "id,resource_type,api_detail_url,name,start_year,publisher",
             },
             self._secret(),
