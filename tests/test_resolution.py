@@ -73,6 +73,32 @@ def test_manual_canonical_comic_needs_no_provider_id(tmp_path: Path) -> None:
     assert resolved.identity is not None and not resolved.identity.provider_identity
 
 
+def test_manual_run_year_override_is_recorded_as_manual_provenance(tmp_path: Path) -> None:
+    database = tmp_path / "state.sqlite3"
+    migrate(database)
+    source = _source()
+    candidate = NormalizedCandidate(
+        ProviderName.COMIC_VINE,
+        "issue-24",
+        RecordType.COMIC_ISSUE,
+        MediaKind.COMIC,
+        "The Straw Man, Part 6",
+        series_title="Absolute Example",
+        sequence=SequenceNumber.parse("24"),
+        item_type="issue",
+        run_id="4050-example",
+    )
+    score = CandidateScore(candidate, 97, 0.98, (), (), False, True, eligible=False)
+    with connect(database) as connection:
+        repository = DecisionRepository(connection)
+        add_manual_override(repository, source, "evidence", "run_start_year", "2024")
+        accept_candidate(repository, source, score, Reconciliation(None, None, (), ()), "evidence")
+        resolved = resolve_explicit_identity(repository, source, MediaKind.COMIC)
+    assert resolved.eligible and resolved.identity is not None
+    assert resolved.identity.run_start_year == 2024
+    assert resolved.identity.provenance["run_start_year_source"] == "manual-confirmed"
+
+
 def test_latest_unresolved_decision_blocks_an_older_acceptance(tmp_path: Path) -> None:
     database = tmp_path / "state.sqlite3"
     migrate(database)

@@ -60,7 +60,9 @@ def _candidate(identifier: str, year: int, date: str) -> NormalizedCandidate:
     )
 
 
-def _audit(tmp_path: Path, *, eligible: bool = False) -> AuditResult:
+def _audit(
+    tmp_path: Path, *, eligible: bool = False, run_start_year: int | None = 1986
+) -> AuditResult:
     source = SourceRecord(
         tmp_path / "Watchmen 001.cbz", 10, 1, "a" * 64, SourceFormat.CBZ, "zip-cbz"
     )
@@ -71,6 +73,7 @@ def _audit(tmp_path: Path, *, eligible: bool = False) -> AuditResult:
         "Watchmen",
         series_title="Watchmen",
         sequence=SequenceNumber.parse("1"),
+        run_start_year=run_start_year,
     )
     settings = (
         MatchingSettings(eligible_score=0, eligible_margin=0) if eligible else MatchingSettings()
@@ -94,7 +97,7 @@ def _audit(tmp_path: Path, *, eligible: bool = False) -> AuditResult:
 
 
 def _unusable_audit(tmp_path: Path) -> AuditResult:
-    audit = _audit(tmp_path)
+    audit = _audit(tmp_path, run_start_year=None)
     item = audit.items[0]
     run = NormalizedCandidate(
         ProviderName.COMIC_VINE,
@@ -343,7 +346,7 @@ def test_granular_review_retains_next_as_default(
 def test_wizard_review_labels_local_run_evidence_without_confusing_provider_data(
     tmp_path: Path,
 ) -> None:
-    audit = _audit(tmp_path)
+    audit = _audit(tmp_path, run_start_year=None)
     output = io.StringIO()
     from kavita_ingest.review import _show_item
 

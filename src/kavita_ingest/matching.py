@@ -4,7 +4,7 @@ import hashlib
 import json
 import re
 from collections.abc import Iterable
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from difflib import SequenceMatcher
 from enum import StrEnum
 from typing import Any
@@ -151,6 +151,26 @@ def score_candidates(
     settings: MatchingSettings,
 ) -> list[CandidateScore]:
     raw = [_score(local, candidate) for candidate in candidates]
+    # Several provider runs for an otherwise exact numbered comic issue are an
+    # ambiguity in the identity, not a runner-up coincidence.  Preserve all
+    # candidates for explicit review, but none may look perfect or automatic
+    # until a local run discriminator or a persisted group choice constrains it.
+    run_ids = {
+        item.candidate.run_id
+        for item in raw
+        if (
+            local.kind is MediaKind.COMIC
+            and local.subtype in {"issue", "annual", "special"}
+            and item.candidate.run_id
+            and item.candidate.sequence
+            and local.sequence
+            and item.candidate.sequence.normalized == local.sequence.normalized
+            and _normalize(item.candidate.series_title or "")
+            == _normalize(local.series_title or "")
+        )
+    }
+    if local.run_start_year is None and len(run_ids) > 1:
+        raw = [_mark_run_ambiguous(item) for item in raw]
     raw.sort(key=lambda item: (-item.score, item.candidate.key))
     output: list[CandidateScore] = []
     for index, item in enumerate(raw):
@@ -655,9 +675,32 @@ def _score(local: LocalIdentity, candidate: NormalizedCandidate) -> CandidateSco
         contradictions=tuple(contradictions),
         hard_contradiction=hard,
         identity_fields_high=(
-            title_high and sequence_high and publisher_high and qualifier_high and year_high
+            title_high
+            and sequence_high
+            and publisher_high
+            and qualifier_high
+            and year_high
         ),
         material_conflicts=material_conflicts,
+    )
+
+
+def _mark_run_ambiguous(score: CandidateScore) -> CandidateScore:
+    comparison = _comparison(
+        "run_identity",
+        None,
+        score.candidate.run_id,
+        ComparisonKind.MISSING,
+        -15,
+        1,
+        "run ambiguous: title and issue number do not uniquely identify a comic run",
+    )
+    return replace(
+        score,
+        score=max(0.0, score.score - 15),
+        comparisons=(*score.comparisons, comparison),
+        contradictions=(*score.contradictions, comparison.reason),
+        identity_fields_high=False,
     )
 
 

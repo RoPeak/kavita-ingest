@@ -266,6 +266,11 @@ def _apply_overrides(identity: CanonicalIdentity, values: dict[str, Any]) -> Can
         updates["identifiers"] = identifiers
     if contributors != identity.contributors:
         updates["contributors"] = contributors
+    if "run_start_year" in values:
+        updates["provenance"] = {
+            **identity.provenance,
+            "run_start_year_source": "manual-confirmed",
+        }
     return replace(identity, **updates)
 
 

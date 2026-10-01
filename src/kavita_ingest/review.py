@@ -26,6 +26,7 @@ from .domain import SourceRecord
 from .hydration import HydrationResult, hydrate_candidate
 from .matching import (
     CandidateScore,
+    ComparisonKind,
     LocalIdentity,
     Reconciliation,
     candidate_planning_context_ready,
@@ -253,11 +254,35 @@ def interactive_review(
                     if not candidate_planning_context_ready(
                         current.local, selected.candidate
                     ):
-                        output.print(
-                            "This comic issue is missing a required run start year and cannot "
-                            "be accepted into a plan yet. Choose [G]roup-run first."
-                        )
-                        continue
+                        strong_match = {
+                            comparison.field
+                            for comparison in selected.comparisons
+                            if comparison.kind is ComparisonKind.EXACT
+                        }
+                        if (
+                            current.local.year is not None
+                            and {"title", "sequence"}.issubset(strong_match)
+                            and typer.confirm(
+                                "Provider run start year unavailable. Local run-year evidence: "
+                                f"{current.local.year}. Issue/title match: strong. Accept using "
+                                "local run-year evidence?",
+                                default=False,
+                            )
+                        ):
+                            add_manual_override(
+                                repository,
+                                current.scan.source,
+                                source_evidence_hash,
+                                "run_start_year",
+                                str(current.local.year),
+                            )
+                            output.print("Local run-year evidence recorded with user confirmation.")
+                        else:
+                            output.print(
+                                "This comic issue is missing a required run start year and cannot "
+                                "be accepted into a plan yet. Choose [G]roup-run first."
+                            )
+                            continue
                     if not selected.eligible and not _confirm_noneligible_candidate(
                         selected, output
                     ):

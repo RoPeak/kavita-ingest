@@ -1188,6 +1188,7 @@ def _reviewed_without_plan(
     paths = [
         Path(str(row["path"])).expanduser().resolve(strict=False)
         for row in rows
+        if Path(str(row["path"])).expanduser().exists()
     ]
     return _narrow_resume_scope(paths, config)
 
@@ -1215,6 +1216,7 @@ def _unresolved_review(
     paths = [
         Path(str(row["path"])).expanduser().resolve(strict=False)
         for row in rows
+        if Path(str(row["path"])).expanduser().exists()
     ]
     return _narrow_resume_scope(paths, config)
 
@@ -1226,8 +1228,7 @@ def _narrow_resume_scope(
     if not paths:
         return None
 
-    existing = [path for path in paths if path.exists()]
-    candidates = existing or paths
+    candidates = paths
 
     for configured in config.incoming_roots:
         root = configured.expanduser().resolve(strict=False)

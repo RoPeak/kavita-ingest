@@ -190,6 +190,44 @@ def test_issue_candidate_without_run_start_year_is_never_plan_eligible() -> None
     assert score.eligible is False
 
 
+def test_same_series_and_issue_in_multiple_runs_is_never_perfect_or_eligible() -> None:
+    local = LocalIdentity(
+        MediaKind.COMIC,
+        "issue",
+        0.98,
+        "Emerald Knight",
+        series_title="Emerald Knight",
+        sequence=SequenceNumber.parse("39"),
+    )
+    older = NormalizedCandidate(
+        ProviderName.COMIC_VINE,
+        "4000-old-39",
+        RecordType.COMIC_ISSUE,
+        MediaKind.COMIC,
+        "Unrelated chapter",
+        series_title="Emerald Knight",
+        sequence=SequenceNumber.parse("39"),
+        run_id="4050-old",
+        run_start_year=1960,
+    )
+    modern = NormalizedCandidate(
+        ProviderName.COMIC_VINE,
+        "4000-modern-39",
+        RecordType.COMIC_ISSUE,
+        MediaKind.COMIC,
+        "Orange Arc Part 1",
+        series_title="Emerald Knight",
+        sequence=SequenceNumber.parse("39"),
+        run_id="4050-modern",
+        run_start_year=2005,
+    )
+    scores = score_candidates(
+        local, [older, modern], MatchingSettings(eligible_score=0, eligible_margin=0)
+    )
+    assert all(score.score < 100 and not score.eligible for score in scores)
+    assert all("run ambiguous" in " ".join(score.contradictions) for score in scores)
+
+
 def test_collected_local_identity_uses_embedded_writer_and_publisher_evidence() -> None:
     classification = Classification(
         MediaKind.COMIC,
