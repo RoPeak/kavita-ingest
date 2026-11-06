@@ -12,6 +12,7 @@ from .models import NormalizedCandidate, ProviderName, canonical_request_key
 from .transport import Transport
 
 Normalizer = Callable[[object], list[NormalizedCandidate]]
+MAX_RETRY_AFTER_SECONDS = 300.0
 
 
 @dataclass(slots=True)
@@ -68,6 +69,7 @@ class CachedProviderClient:
         self.unavailable_reason = unavailable_reason
         self.max_retries = max_retries
         self.activity = ClientActivity()
+        self._cooldowns: dict[str, float] = {}
 
     def get(
         self,
@@ -121,6 +123,13 @@ class CachedProviderClient:
             )
 
         self.activity.cache_misses += 1
+        cooldown_until = self._cooldowns.get(bucket, 0.0)
+        if cooldown_until > time.time():
+            remaining = max(1, round(cooldown_until - time.time()))
+            raise ProviderUnavailable(
+                f"{self.provider.value} is cooling down after rate limiting "
+                f"({remaining}s remaining)"
+            )
         params = {**public_params, **secret_params}
         last_error: ProviderError | None = None
         for attempt in range(self.max_retries + 1):
@@ -146,7 +155,10 @@ class CachedProviderClient:
                 self.activity.rate_limit_events += 1
                 delay = _retry_after(response.headers.get("retry-after"))
                 self.limiter.block(self.provider.value, bucket, delay, "HTTP 429")
-                raise ProviderError(f"{self.provider.value} rate limited the request")
+                self._cooldowns[bucket] = time.time() + delay
+                raise ProviderError(
+                    f"{self.provider.value} rate limited the request; cooldown {delay:g}s"
+                )
             if response.status >= 500 and attempt < self.max_retries:
                 self.activity.errors += 1
                 last_error = ProviderError(f"provider HTTP {response.status}")
@@ -195,9 +207,12 @@ def _retry_after(value: str | None) -> float:
     if not value:
         return 60.0
     try:
-        return max(0.0, float(value))
+        return min(MAX_RETRY_AFTER_SECONDS, max(0.0, float(value)))
     except ValueError:
         try:
-            return max(0.0, parsedate_to_datetime(value).timestamp() - time.time())
+            return min(
+                MAX_RETRY_AFTER_SECONDS,
+                max(0.0, parsedate_to_datetime(value).timestamp() - time.time()),
+            )
         except (TypeError, ValueError):
             return 60.0

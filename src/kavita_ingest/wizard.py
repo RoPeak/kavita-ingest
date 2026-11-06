@@ -1104,7 +1104,13 @@ def _render_audit(audit: AuditResult, output: Console) -> None:
     output.print(f"Ready to confirm     {summary['eligible_high_confidence']}")
     output.print(f"Ambiguous            {summary['review_required']}")
     output.print(f"Unresolved           {summary['unresolved']}")
-    output.print(f"Provider problems    {problems}")
+    if problems:
+        output.print(
+            f"Provider problems    {problems} affected item(s) "
+            "(one aggregated incident; offline/manual review remains available)"
+        )
+    else:
+        output.print("Provider incident     none")
 
 
 def _render_build_result(result: PlanBuildResult, output: Console) -> None:

@@ -112,8 +112,8 @@ implementation included in the normal package.
 
 ### Cleanup provenance reports
 
-Completed `preserve` publications write an immutable
-`kavita-ingest-publication-v1` report below the directory containing the active
+Completed publications write an immutable `kavita-ingest-publication-v2` report
+with explicit per-item actions and source lifecycles below the directory containing the active
 state database, at `kavita-reports/<operation-id>.json`. With the default XDG
 database this is `~/.local/state/kavita-ingest/kavita-reports/`. A custom
 `[paths].database` therefore also changes the report root.
@@ -127,6 +127,13 @@ kavita-ingest provenance-backfill --apply --yes
 
 The backfill reads immutable plans and completed journals; it never changes
 media or manufactures evidence by hashing current files.
+
+Existing v1 reports remain valid input for compatible consumers. Backfill uses
+the same completed-journal checks and writes the current v2 schema. A staged
+output that is byte-identical to an existing canonical destination is recorded
+as `verified-existing-duplicate`; a differing, symlinked, or ambiguous existing
+destination is refused. Comparison is against the verified staged result, so
+deterministic metadata or container transformations are covered.
 
 ### Safe source bundles
 
@@ -453,6 +460,12 @@ Before media mutation, apply checks the entire plan: source fingerprints,
 destinations, capabilities, path permissions, format restrictions, lifecycle,
 atomic publication support, and aggregate temporary-space estimates.
 
+Manual review validates required titles, book authors, comic series/type/sequence,
+and run-year values inline and reprompts the current item. Provider `Retry-After`
+cooldowns are bounded and suppress repeated requests during the same cooldown;
+the wizard reports one aggregated incident count while offline/manual review
+remains available.
+
 Each item follows:
 
 ```text
@@ -462,8 +475,9 @@ source -> destination-filesystem stage -> independent verification
        -> planned source lifecycle
 ```
 
-Linux publication uses `link(2)`. It atomically creates a destination name and
-fails if that name already exists. A verified stage is immutable: all writer
+Linux publication uses `link(2)` for new output. If a destination already exists,
+the verified staged output must be byte-identical and structurally valid or the
+item fails closed; differing content is never overwritten. A verified stage is immutable: all writer
 handles are closed before `VERIFIED`, no writer is invoked again, and recovery
 only reads or unlinks a surviving staging hard link. Files, directories, and
 SQLite journal transitions have separate durability barriers.

@@ -37,11 +37,32 @@ from kavita_ingest.review import (
     _confirm_noneligible_candidate,
     _current_group_fingerprints,
     _hydrate_for_acceptance,
+    _manual_identity_fields,
     _mark_incompatible_group_decisions,
     _show_item,
     interactive_review,
 )
 from kavita_ingest.run_groups import run_group_key
+
+
+def test_manual_comic_identity_reprompts_blank_and_invalid_fields(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    item = _audit(tmp_path).items[0]
+    answers = iter(
+        ["", "Watchmen", "", "Issue One", "invalid", "issue", "", "1", "9999", "1986"]
+    )
+    monkeypatch.setattr(
+        "kavita_ingest.review.typer.prompt", lambda *args, **kwargs: next(answers)
+    )
+
+    fields = _manual_identity_fields(item)
+
+    assert fields["series_title"] == "Watchmen"
+    assert fields["title"] == "Issue One"
+    assert fields["item_type"] == "issue"
+    assert fields["sequence"] == "1"
+    assert fields["run_start_year"] == "1986"
 
 
 def _candidate(identifier: str, year: int, date: str) -> NormalizedCandidate:

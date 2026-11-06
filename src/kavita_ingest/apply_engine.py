@@ -681,8 +681,13 @@ class ApplyEngine:
         if not root.is_dir():
             raise ApplyRefused(f"destination root is unavailable: {root}")
         _require_usable_parent(item.destination)
-        if item.destination.exists():
-            raise StalePlan(f"planned destination now exists: {item.destination}")
+        if (
+            (item.destination.exists() or item.destination.is_symlink())
+            and (item.destination.is_symlink() or not item.destination.is_file())
+        ):
+            raise StalePlan(
+                f"planned destination is an unsafe existing path: {item.destination}"
+            )
         if item.archive_path:
             if not item.archive_path.is_absolute():
                 raise ApplyRefused("planned archive path must be absolute")
@@ -806,6 +811,11 @@ class ApplyEngine:
         self.filesystem.set_file_mode(staging, item.published_file_mode)
         self.filesystem.make_file_durable(staging)
         evidence = _output_evidence(staging, verified)
+        if item.destination.exists() or item.destination.is_symlink():
+            self._verify_existing_duplicate(item, evidence)
+            evidence["publication_action"] = "verified-existing-duplicate"
+        else:
+            evidence["publication_action"] = "published"
         journal.transition(
             run_id,
             item.item_id,
@@ -831,7 +841,20 @@ class ApplyEngine:
     ) -> None:
         self._revalidate_source(item)
         if item.destination.exists():
-            raise DestinationExists(f"destination appeared before commit: {item.destination}")
+            if evidence.get("publication_action") != "verified-existing-duplicate":
+                raise DestinationExists(f"destination appeared before commit: {item.destination}")
+            self._verify_existing_duplicate(item, evidence)
+            journal.transition(run_id, item.item_id, ItemState.COMMITTING)
+            journal.transition(
+                run_id,
+                item.item_id,
+                ItemState.COMMITTED,
+                detail={"publication_action": "verified-existing-duplicate"},
+                fields={"destination_hash": str(evidence["sha256"])},
+            )
+            self.filesystem.durable_unlink(staging)
+            self._finish_lifecycle(journal, run_id, item)
+            return
         self.filesystem.ensure_directory(
             self._root_for(item), item.destination.parent, item.created_directory_mode
         )
@@ -848,6 +871,22 @@ class ApplyEngine:
         )
         self.fault("after_committed", item.item_id)
         self._finish_lifecycle(journal, run_id, item)
+
+    def _verify_existing_duplicate(self, item: PreparedItem, evidence: Mapping[str, Any]) -> None:
+        if item.destination.is_symlink() or not item.destination.is_file():
+            raise DestinationExists(
+                "existing destination is not a regular non-symlink file: "
+                f"{item.destination}"
+            )
+        if (
+            item.destination.stat().st_size != evidence["size"]
+            or sha256_file(item.destination) != evidence["sha256"]
+        ):
+            raise DestinationExists(
+                f"existing destination differs from staged output: {item.destination}"
+            )
+        verified = self.writers.verify(item, item.destination)
+        verified.require_valid()
 
     def _verify_committed(self, item: PreparedItem, evidence: Mapping[str, Any]) -> None:
         if not item.destination.is_file():
@@ -969,6 +1008,22 @@ class ApplyEngine:
             return
         evidence = recorded.verification
         if item.destination.exists():
+            if (
+                recorded.state is ItemState.VERIFIED
+                and evidence.get("publication_action") == "verified-existing-duplicate"
+            ):
+                self._verify_existing_duplicate(item, evidence)
+                journal.transition(recorded.run_id, item.item_id, ItemState.COMMITTING)
+                journal.transition(
+                    recorded.run_id,
+                    item.item_id,
+                    ItemState.COMMITTED,
+                    detail={"publication_action": "verified-existing-duplicate"},
+                    fields={"destination_hash": recorded.staged_hash},
+                )
+                self.filesystem.durable_unlink(_required_staging(recorded))
+                self._finish_lifecycle(journal, recorded.run_id, item)
+                return
             if recorded.state is not ItemState.COMMITTING:
                 self._manual_recovery(
                     journal,
@@ -1246,9 +1301,6 @@ def _write_publication_report(
         planned = by_id.get(recorded.item_id)
         if planned is None or recorded.state is not ItemState.COMPLETE:
             raise ApplyRefused("completed journal does not match immutable plan")
-        if recorded.lifecycle_policy != "preserve":
-            # Other lifecycle modes are intentionally not cleanup evidence.
-            return Path()
         source = planned["source"]
         projection = planned["kavita_projection"]
         source_path = str(source["path"])
@@ -1271,7 +1323,10 @@ def _write_publication_report(
             "source_size_bytes": int(source["size"]),
             "source_sha256": str(source["sha256"]),
             "source_media_type": str(source["media_format"]),
-            "source_lifecycle": recorded.lifecycle_policy,
+            "source_lifecycle": (
+                "preserved" if recorded.lifecycle_policy == "preserve" else "removed"
+            ),
+            "action": str(recorded.verification.get("publication_action") or "published"),
             "transformations": transforms,
             "destination": destination_path,
             "destination_relative_path": str(projection.get("destination") or ""),
@@ -1287,13 +1342,17 @@ def _write_publication_report(
     directory.mkdir(mode=0o700, parents=True, exist_ok=True)
     target = directory / f"{run.id}.json"
     payload = {
-        "report_schema": "kavita-ingest-publication-v1",
+        "report_schema": "kavita-ingest-publication-v2",
         "operation_id": run.id,
         "plan_id": plan.id,
         "plan_digest": plan.sha256,
         "approved_apply": True,
         "status": "completed",
-        "source_lifecycle": "preserved",
+        "source_lifecycle": (
+            "preserved"
+            if all(item["source_lifecycle"] == "preserved" for item in items)
+            else "mixed"
+        ),
         "verification_completed": True,
         "recovery_required": False,
         "completed_at": run.completed_at,

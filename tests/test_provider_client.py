@@ -178,6 +178,21 @@ def test_http_429_persists_block_without_blind_retry(tmp_path: Path) -> None:
     assert connection.execute("SELECT count(*) FROM provider_rate_reservations").fetchone()[0] == 1
     block = connection.execute("SELECT reason FROM provider_blocks").fetchone()[0]
     assert block == "HTTP 429"
+    with pytest.raises(ProviderUnavailable, match="cooling down"):
+        client.get("search", "https://example.test", {"q": "another"}, {}, "books", _normalize)
+    assert len(transport.calls) == 1
+    connection.close()
+
+
+def test_retry_after_is_bounded(tmp_path: Path) -> None:
+    transport = FakeTransport([HttpResponse(429, {"retry-after": "999999"}, b"{}")])
+    client, connection = _client(tmp_path, transport)
+    with pytest.raises(ProviderError, match="cooldown 300s"):
+        client.get("search", "https://example.test", {}, {}, "books", _normalize)
+    wait = connection.execute(
+        "SELECT blocked_until - strftime('%s','now') FROM provider_blocks"
+    ).fetchone()[0]
+    assert 0 < float(wait) <= 301
     connection.close()
 
 

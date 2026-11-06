@@ -21,6 +21,7 @@ from .decisions import (
     batch_accept,
     batch_eligible_items,
     decision_needs_review,
+    validate_manual_override,
 )
 from .domain import SourceRecord
 from .hydration import HydrationResult, hydrate_candidate
@@ -207,12 +208,19 @@ def interactive_review(
                     continue
                 if action == "I":
                     fields = _manual_identity_fields(current)
-                    add_manual_identity(
-                        repository,
-                        current.scan.source,
-                        source_evidence_hash,
-                        fields,
-                    )
+                    try:
+                        add_manual_identity(
+                            repository,
+                            current.scan.source,
+                            source_evidence_hash,
+                            fields,
+                        )
+                    except ValueError as exc:
+                        output.print(f"Manual identity was not saved: {exc}")
+                        output.print(
+                            "Please correct the current item; no review progress was lost."
+                        )
+                        continue
                     output.print("Manual canonical identity explicitly approved.")
                     output.print("Decision saved.")
                     counts["manual"] += 1
@@ -1143,9 +1151,11 @@ def _manual_identity_fields(item: ReviewItem) -> dict[str, str]:
     local = item.local
     if local.kind.value == "book":
         fields = {
-            "title": typer.prompt("Canonical title", default=local.title),
-            "authors": typer.prompt(
-                "Author(s), comma separated", default=", ".join(local.creators)
+            "title": _required_prompt("Canonical title", local.title, field="title"),
+            "authors": _required_prompt(
+                "Author(s), comma separated",
+                ", ".join(local.creators),
+                field="authors",
             ),
         }
         _optional_prompt(fields, "series_title", "Series")
@@ -1156,14 +1166,14 @@ def _manual_identity_fields(item: ReviewItem) -> dict[str, str]:
         _optional_prompt(fields, "isbn", "ISBN")
         return fields
     fields = {
-        "series_title": typer.prompt("Canonical series", default=local.series_title or local.title),
-        "title": typer.prompt("Issue/collection title", default=local.title),
+        "series_title": _required_prompt(
+            "Canonical series",
+            local.series_title or local.title,
+            field="series_title",
+        ),
+        "title": _required_prompt("Issue/collection title", local.title, field="title"),
     }
-    item_type = typer.prompt(
-        "Comic item type",
-        default=local.subtype
-        if local.subtype
-        in {
+    allowed_types = {
             "issue",
             "annual",
             "special",
@@ -1173,12 +1183,16 @@ def _manual_identity_fields(item: ReviewItem) -> dict[str, str]:
             "omnibus",
             "graphic-novel",
         }
-        else "issue",
+    item_type = _required_prompt(
+        "Comic item type",
+        local.subtype if local.subtype in allowed_types else "issue",
+        allowed=allowed_types,
+        field="item_type",
     )
     fields["item_type"] = item_type
     if item_type in {"issue", "annual", "special"}:
-        fields["sequence"] = typer.prompt(
-            "Sequence", default=local.sequence.raw if local.sequence else "1"
+        fields["sequence"] = _required_prompt(
+            "Sequence", local.sequence.raw if local.sequence else "1", field="sequence"
         )
     elif item_type in {"trade", "collected-edition", "omnibus"}:
         sequence = typer.prompt(
@@ -1189,12 +1203,38 @@ def _manual_identity_fields(item: ReviewItem) -> dict[str, str]:
         if sequence:
             fields["sequence"] = sequence
     if item_type in {"issue", "annual", "special"}:
-        fields["run_start_year"] = typer.prompt(
-            "Run start year", default=str(local.run_start_year or "")
+        fields["run_start_year"] = _required_prompt(
+            "Run start year",
+            str(local.run_start_year or ""),
+            field="run_start_year",
         )
     if item_type in {"trade", "collected-edition", "omnibus"}:
         _optional_prompt(fields, "collection_volume", "Integer collection volume")
     return fields
+
+
+def _required_prompt(
+    label: str,
+    default: str,
+    *,
+    allowed: set[str] | None = None,
+    field: str | None = None,
+) -> str:
+    while True:
+        value = str(typer.prompt(label, default=default, show_default=bool(default))).strip()
+        if not value:
+            typer.echo(f"{label} is required.")
+            continue
+        if allowed is not None and value not in allowed:
+            typer.echo(f"{label} must be one of: {', '.join(sorted(allowed))}.")
+            continue
+        if field is not None:
+            try:
+                validate_manual_override(field, value)
+            except (TypeError, ValueError) as exc:
+                typer.echo(f"Invalid {label.casefold()}: {exc}")
+                continue
+        return value
 
 
 def _optional_prompt(fields: dict[str, str], key: str, label: str) -> None:

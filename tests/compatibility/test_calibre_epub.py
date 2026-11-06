@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -127,7 +128,11 @@ def test_ebook_meta_date_is_timezone_shifted_and_requires_native_writing(
     assert result.returncode == 0, result.stderr
     written = str(opf_snapshot(target)["date"])
     assert written != "2025-06-07"
-    assert written.startswith("2025-06-06T23:00:00")
+    # Calibre interprets a date-only value as local midnight, then serializes
+    # it in UTC. The offset is host/date dependent (including DST), so compare
+    # with the same local-time conversion instead of assuming UTC+1.
+    expected = datetime(2025, 6, 7).astimezone(UTC).isoformat()
+    assert written == expected
 
 
 def test_ebook_meta_preserves_package_structure_and_custom_metadata(

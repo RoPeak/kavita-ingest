@@ -177,9 +177,35 @@ def test_stale_or_missing_source_and_preexisting_destination_refuse_before_write
     collision = make_apply_fixture(tmp_path, "cbz", plan_name="collision")
     collision.destination.parent.mkdir(parents=True)
     collision.destination.write_bytes(b"existing")
-    with pytest.raises(StalePlan, match="destination now exists"):
-        ApplyEngine(collision.config).apply(collision.plan_id)
+    result = ApplyEngine(collision.config).apply(collision.plan_id)
+    assert result.status is RunState.RECOVERY_REQUIRED
     assert collision.source.exists() and collision.destination.read_bytes() == b"existing"
+
+
+def test_exact_existing_transformed_output_is_verified_and_reported(tmp_path: Path) -> None:
+    fixture = make_apply_fixture(
+        tmp_path, "cbz", plan_name="existing-identical", lifecycle="preserve"
+    )
+    engine = ApplyEngine(fixture.config)
+    assert fixture.config.database_path is not None
+    with connect(fixture.config.database_path) as connection:
+        _, document = engine._eligible_plan(connection, fixture.plan_id)
+    item = engine._prepare_items(document, run_id="fixture")[0]
+    staged = tmp_path / "expected.cbz"
+    engine.writers.stage(item, staged).require_valid()
+    engine.writers.verify(item, staged).require_valid()
+    fixture.destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(staged, fixture.destination)
+
+    summary = engine.apply(fixture.plan_id)
+
+    assert summary.status is RunState.COMPLETE
+    assert fixture.source.exists()
+    report = next((fixture.config.database_path.parent / "kavita-reports").glob("*.json"))
+    payload = json.loads(report.read_text())
+    assert payload["report_schema"] == "kavita-ingest-publication-v2"
+    assert payload["items"][0]["action"] == "verified-existing-duplicate"
+    assert payload["items"][0]["source_lifecycle"] == "preserved"
 
 
 def test_disk_space_refusal_is_plan_wide_and_source_safe(tmp_path: Path) -> None:

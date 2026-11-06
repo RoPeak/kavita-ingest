@@ -18,6 +18,7 @@ from .apply_engine import (
     ApplySummary,
     backfill_publication_reports,
 )
+from .apply_journal import RunState
 from .audit import run_audit
 from .config import load_config, write_initial_config
 from .db import connect
@@ -610,6 +611,13 @@ def apply_command(
             _emit_json("apply", {"preview": asdict(preview), "summary": asdict(summary)})
         else:
             _echo_apply_summary(summary)
+        if summary.status is not RunState.COMPLETE:
+            typer.echo(
+                "REFUSED: apply did not complete; a destination now exists with differing "
+                "or otherwise unsafe output. Inspect `kavita-ingest apply-status`.",
+                err=True,
+            )
+            raise typer.Exit(2)
     except (ApplyRefused, LockUnavailable) as exc:
         typer.echo(f"REFUSED: {exc}", err=True)
         raise typer.Exit(2) from exc

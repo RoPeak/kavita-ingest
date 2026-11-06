@@ -333,7 +333,10 @@ def _provider_checks(config: AppConfig) -> list[Check]:
             else (
                 "API key present"
                 if config.providers.comic_vine_api_key
-                else "not configured; local metadata, filenames, and manual review remain available"
+                else (
+                    "COMIC_VINE_API_KEY is missing; local metadata, filenames, "
+                    "and manual review remain available"
+                )
             ),
         ),
     ]
