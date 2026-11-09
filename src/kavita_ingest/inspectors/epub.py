@@ -5,8 +5,9 @@ from pathlib import Path
 
 from lxml import etree
 
-from ..archive_safety import ArchiveLimits, UnsafeArchive, validate_inventory
+from ..archive_safety import ArchiveLimits
 from ..domain import Evidence, InspectionResult, InspectionStatus, SourceFormat
+from ..epub_validation import EpubDisposition, validate_epub_container
 
 NS = {
     "container": "urn:oasis:names:tc:opendocument:xmlns:container",
@@ -18,16 +19,35 @@ XML_METADATA_MAX_BYTES = 8 * 1024 * 1024
 
 def inspect_epub(path: Path, limits: ArchiveLimits) -> InspectionResult:
     try:
+        validation = validate_epub_container(path, limits)
+        if not validation.valid:
+            status = (
+                InspectionStatus.BLOCKED
+                if validation.disposition
+                in {EpubDisposition.UNSUPPORTED, EpubDisposition.UNCERTAIN}
+                else InspectionStatus.FAILED
+            )
+            return InspectionResult(
+                status,
+                SourceFormat.EPUB,
+                metadata={
+                    "epub_validation": validation.disposition.value,
+                    "epub_findings": [item.code for item in validation.findings],
+                    "repairable": validation.may_repair,
+                },
+                error_code=(
+                    "unsupported_epub_protection"
+                    if validation.disposition is EpubDisposition.UNSUPPORTED
+                    else (
+                        "epub_review_required"
+                        if validation.disposition is EpubDisposition.UNCERTAIN
+                        else "invalid_epub_packaging"
+                    )
+                ),
+                error_message="; ".join(item.message for item in validation.findings),
+            )
         with zipfile.ZipFile(path) as archive:
             members = archive.infolist()
-            validate_inventory(
-                members, limits, encrypted_names={i.filename for i in members if i.flag_bits & 1}
-            )
-            if (
-                "mimetype" not in archive.namelist()
-                or archive.read("mimetype") != b"application/epub+zip"
-            ):
-                raise ValueError("EPUB mimetype entry is missing or invalid")
             _require_small_entry(archive, "META-INF/container.xml")
             container = _xml(archive.read("META-INF/container.xml"))
             roots = container.xpath("//container:rootfile/@full-path", namespaces=NS)
@@ -56,9 +76,7 @@ def inspect_epub(path: Path, limits: ArchiveLimits) -> InspectionResult:
         OSError,
         KeyError,
         ValueError,
-        zipfile.BadZipFile,
         etree.XMLSyntaxError,
-        UnsafeArchive,
     ) as exc:
         return InspectionResult(
             InspectionStatus.FAILED,

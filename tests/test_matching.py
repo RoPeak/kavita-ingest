@@ -100,6 +100,27 @@ def test_conflicting_exact_identifier_is_a_hard_contradiction() -> None:
     assert "conflicting exact isbn identifiers" in score.contradictions
 
 
+def test_irrelevant_book_candidate_with_title_and_author_conflicts_is_ineligible() -> None:
+    local = LocalIdentity(
+        MediaKind.BOOK,
+        "omnibus-book",
+        0.98,
+        "Zones of Thought Trilogy",
+        ("Vernor Vinge",),
+    )
+    irrelevant = NormalizedCandidate(
+        ProviderName.GOOGLE_BOOKS,
+        "afi",
+        RecordType.BOOK_WORK,
+        MediaKind.BOOK,
+        "The American Film Institute Catalog",
+        creators=(Contributor("American Film Institute", "author"),),
+    )
+    score = score_candidates(local, [irrelevant], SETTINGS)[0]
+    assert score.eligible is False
+    assert {"titles disagree", "creator names disagree"}.issubset(score.material_conflicts)
+
+
 def test_title_author_fuzzy_match_can_accept_work_but_not_edition() -> None:
     local = LocalIdentity(
         MediaKind.BOOK,

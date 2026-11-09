@@ -300,6 +300,16 @@ def interactive_review(
                         output.print("Not accepted; no decision was saved.")
                         continue
                     work_only = selected.candidate.record_type is RecordType.BOOK_WORK
+                    if (
+                        current.local.kind.value == "book"
+                        and not _has_candidate_author(selected.candidate)
+                    ):
+                        output.print(
+                            "This provider book has no resolved author. It cannot be accepted "
+                            "as a plannable book identity. Choose [I]dentity to review, correct, "
+                            "and explicitly verify the author with manual provenance."
+                        )
+                        continue
                     if work_only and not typer.confirm(
                         "This candidate identifies only the work, not this EPUB edition. "
                         "Accept it work-only?"
@@ -335,6 +345,12 @@ def interactive_review(
                     decided = True
                     break
                 if action == "W" and selected and current.local.kind.value == "book":
+                    if not _has_candidate_author(selected.candidate):
+                        output.print(
+                            "Work-only acceptance is unavailable because the provider record "
+                            "has no author. Choose [I]dentity to explicitly verify the author."
+                        )
+                        continue
                     hydrated = _hydrate_for_acceptance(selected, providers, output)
                     if hydrated is None:
                         continue
@@ -347,6 +363,7 @@ def interactive_review(
                         source_evidence_hash,
                         work_only=True,
                         hydration=hydration.to_dict(),
+                        local_identity=current.local,
                     )
                     output.print("Decision saved.")
                     counts["work_only"] += 1
@@ -826,6 +843,10 @@ def _collection_edition_summary(candidate: NormalizedCandidate) -> str:
 def _candidate_authors(candidate: NormalizedCandidate) -> str:
     names = [item.name for item in candidate.creators if item.role == "author"]
     return ", ".join(dict.fromkeys(names)) or "-"
+
+
+def _has_candidate_author(candidate: NormalizedCandidate) -> bool:
+    return any(item.role == "author" and item.name.strip() for item in candidate.creators)
 
 
 def _candidate_book_publication(candidate: NormalizedCandidate) -> str:

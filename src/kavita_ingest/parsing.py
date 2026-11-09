@@ -221,15 +221,43 @@ def _book_hypothesis(
     opf_creators = inspection.metadata.get("creators", [])
     if isinstance(opf_creators, list) and opf_creators:
         creators = tuple(str(item) for item in opf_creators)
-    title = str(inspection.metadata.get("title") or _clean_title(stem))
+    embedded_title = str(inspection.metadata.get("title") or "").strip()
+    title = embedded_title or _clean_title(stem)
     sequence = None
     series = inspection.metadata.get("series")
     series_index = inspection.metadata.get("series_index")
     if isinstance(series_index, str) and series_index:
         sequence = SequenceNumber.parse(series_index)
+    filename_series, filename_sequence = _filename_book_series(stem, embedded_title)
+    reasons: list[str] = [
+        "EPUB container" if path.suffix.casefold() == ".epub" else "book-like filename evidence"
+    ]
+    if filename_series:
+        if series and _normalize(str(series)) != _normalize(filename_series):
+            reasons.append(
+                "embedded series conflicts with filename series suggestion; "
+                "embedded metadata retained"
+            )
+        elif not series:
+            series = filename_series
+            sequence = filename_sequence
+            reasons.append("filename suffix supplies a series and Book N suggestion")
+        elif sequence is None:
+            sequence = filename_sequence
+            reasons.append("filename Book N suffix supplies missing embedded series index")
+    omnibus = bool(
+        re.search(r"[;]", path.stem)
+        or re.search(
+            r"\b(?:omnibus|anthology|trilogy|box\s*set|collected works|complete collection)\b",
+            f"{path.stem} {title}",
+            re.IGNORECASE,
+        )
+    )
+    if omnibus:
+        reasons.append("multi-work or collected-edition wording requires omnibus review")
     return ParseHypothesis(
         MediaKind.BOOK,
-        "series-book" if series else "standalone-book",
+        "omnibus-book" if omnibus else ("series-book" if series else "standalone-book"),
         confidence,
         title=title,
         series=str(series) if series else None,
@@ -237,12 +265,45 @@ def _book_hypothesis(
         year=year,
         creators=creators,
         evidence=evidence,
-        reasons=(
-            "EPUB container"
-            if path.suffix.casefold() == ".epub"
-            else "book-like filename evidence",
-        ),
+        reasons=tuple(reasons),
     )
+
+
+def _filename_book_series(
+    stem: str, embedded_title: str
+) -> tuple[str | None, SequenceNumber | None]:
+    """Extract an explicit trailing `Series Book N` after a known title boundary."""
+    for value in (embedded_title, stem):
+        separated = re.search(
+            r"(?:_|:|\s[-–—]\s)\s*([^_:–—]+?)\s+Book\s+(\d+(?:\.\d+)?)$",
+            value,
+            re.IGNORECASE,
+        )
+        if separated:
+            series, number = separated.groups()
+            cleaned = _clean_title(series)
+            if cleaned:
+                return cleaned, SequenceNumber.parse(number)
+    suffix = stem
+    if embedded_title:
+        normalized_stem = _normalize(stem)
+        normalized_title = _normalize(embedded_title)
+        if normalized_stem.startswith(normalized_title):
+            # Use token count rather than raw punctuation so curly quotes and
+            # separators cannot shift the trusted title boundary.
+            title_words = re.findall(r"[\w]+", embedded_title, flags=re.UNICODE)
+            match_words = list(re.finditer(r"[\w]+", stem, flags=re.UNICODE))
+            if len(match_words) >= len(title_words):
+                suffix = stem[match_words[len(title_words) - 1].end() :]
+    suffix = suffix.strip(" _:-–—,()[]")
+    match = re.fullmatch(
+        r"(.+?)\s*[,;:]?\s+Book\s+(\d+(?:\.\d+)?)", suffix, re.IGNORECASE
+    )
+    if not match:
+        return None, None
+    series, number = match.groups()
+    cleaned = _clean_title(series)
+    return (cleaned, SequenceNumber.parse(number)) if cleaned else (None, None)
 
 
 def _comic_hypothesis(

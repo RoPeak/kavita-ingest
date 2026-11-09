@@ -44,6 +44,14 @@ class FakeTransport:
         return response
 
 
+def _no_sleep(_: float) -> None:
+    return None
+
+
+def _no_jitter() -> float:
+    return 0.0
+
+
 def _client(
     tmp_path: Path,
     transport: FakeTransport,
@@ -53,6 +61,8 @@ def _client(
     network_enabled: bool = True,
     provider: ProviderName = ProviderName.GOOGLE_BOOKS,
     normalization_schema_version: int = 1,
+    retry_sleeper=_no_sleep,
+    jitter=_no_jitter,
 ) -> tuple[CachedProviderClient, sqlite3.Connection]:
     path = tmp_path / "state.sqlite3"
     migrate(path)
@@ -72,6 +82,8 @@ def _client(
             network_enabled=network_enabled,
             unavailable_reason="credential missing",
             max_retries=retries,
+            sleeper=retry_sleeper,
+            jitter=jitter,
         ),
         connection,
     )
@@ -141,16 +153,18 @@ def test_offline_mode_uses_stale_cache_and_fails_on_miss(tmp_path: Path) -> None
 
 
 def test_retries_reserve_each_attempt_and_network_errors_surface(tmp_path: Path) -> None:
+    waits: list[float] = []
     transport = FakeTransport(
         [HttpResponse(500, {}, b"{}"), HttpResponse(200, {}, b'{"title":"Recovered"}')]
     )
-    client, connection = _client(tmp_path, transport)
+    client, connection = _client(tmp_path, transport, retry_sleeper=waits.append)
     assert (
         client.get("search", "https://example.test", {}, {}, "books", _normalize)[0].title
         == "Recovered"
     )
     count = connection.execute("SELECT count(*) FROM provider_rate_reservations").fetchone()[0]
     assert count == 2
+    assert waits == [0.5]
     connection.close()
 
     transport = FakeTransport([ProviderError("timeout"), ProviderError("timeout")])
@@ -181,6 +195,34 @@ def test_http_429_persists_block_without_blind_retry(tmp_path: Path) -> None:
     with pytest.raises(ProviderUnavailable, match="cooling down"):
         client.get("search", "https://example.test", {"q": "another"}, {}, "books", _normalize)
     assert len(transport.calls) == 1
+    connection.close()
+
+
+def test_persisted_429_cooldown_blocks_a_new_client_without_sleep_or_network(
+    tmp_path: Path,
+) -> None:
+    transport = FakeTransport([HttpResponse(429, {"retry-after": "120"}, b"{}")])
+    client, connection = _client(tmp_path, transport)
+    with pytest.raises(ProviderUnavailable, match="rate limited"):
+        client.get("search", "https://example.test", {}, {}, "books", _normalize)
+    second_transport = FakeTransport([])
+    second = CachedProviderClient(
+        ProviderName.GOOGLE_BOOKS,
+        ProviderStore(connection),
+        DurableRateLimiter(connection, sleeper=lambda _: pytest.fail("must not sleep")),
+        second_transport,
+        RatePolicy(100, 3_600, 0),
+        user_agent="kavita-ingest/0.1 (contact@example.test)",
+        timeout=1,
+        ttl_seconds=3_600,
+        normalization_schema_version=1,
+        sleeper=lambda _: pytest.fail("must not retry"),
+    )
+    with pytest.raises(ProviderUnavailable, match="cooling down"):
+        second.get(
+            "search", "https://example.test", {"q": "different"}, {}, "books", _normalize
+        )
+    assert not second_transport.calls
     connection.close()
 
 

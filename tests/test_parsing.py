@@ -206,6 +206,81 @@ def test_tokenizer_retains_raw_spans() -> None:
     assert any(token.raw == "2025" and token.kind == "year" for token in tokens)
 
 
+@pytest.mark.parametrize("number", range(1, 6))
+def test_book_filename_suffix_supplies_consistent_series_suggestion(number: int) -> None:
+    titles = {
+        1: "Dungeon Crawler Carl",
+        2: "Carl's Doomsday Scenario",
+        3: "The Dungeon Anarchist's Cookbook",
+        4: "The Gate of the Feral Gods",
+        5: "The Butcher's Masquerade",
+    }
+    title = titles[number]
+    inspection = InspectionResult(
+        InspectionStatus.OK,
+        SourceFormat.EPUB,
+        metadata={"title": title, "creators": ["Matt Dinniman"]},
+    )
+    result = classify(
+        Path(f"{title} - Dungeon Crawler Carl Book {number}.epub"),
+        SourceFormat.EPUB,
+        inspection,
+    )
+    hypothesis = result.hypotheses[0]
+    assert hypothesis.subtype == "series-book"
+    assert hypothesis.series == "Dungeon Crawler Carl"
+    assert hypothesis.sequence and hypothesis.sequence.normalized == str(number)
+
+
+def test_embedded_book_series_wins_over_conflicting_filename_suggestion() -> None:
+    inspection = InspectionResult(
+        InspectionStatus.OK,
+        SourceFormat.EPUB,
+        metadata={"title": "Example", "series": "Embedded Series", "series_index": "2"},
+    )
+    result = classify(
+        Path("Example - Filename Series Book 7.epub"), SourceFormat.EPUB, inspection
+    )
+    hypothesis = result.hypotheses[0]
+    assert hypothesis.series == "Embedded Series"
+    assert hypothesis.sequence and hypothesis.sequence.normalized == "2"
+    assert any("conflicts" in reason for reason in hypothesis.reasons)
+
+
+def test_embedded_title_series_suffix_recovers_missing_dcc_series_fields() -> None:
+    inspection = InspectionResult(
+        InspectionStatus.OK,
+        SourceFormat.EPUB,
+        metadata={
+            "title": "The Butcher's Masquerade: Dungeon Crawler Carl Book 5",
+            "creators": ["Matt Dinniman"],
+        },
+    )
+    result = classify(
+        Path("The Butcher's Masquerade_ Dungeon Crawler Carl Book 5.epub"),
+        SourceFormat.EPUB,
+        inspection,
+    )
+    hypothesis = result.hypotheses[0]
+    assert hypothesis.series == "Dungeon Crawler Carl"
+    assert hypothesis.sequence and hypothesis.sequence.normalized == "5"
+
+
+def test_semicolon_trilogy_is_flagged_as_omnibus_for_review() -> None:
+    inspection = InspectionResult(
+        InspectionStatus.OK,
+        SourceFormat.EPUB,
+        metadata={"title": "Zones of Thought Trilogy", "creators": ["Vernor Vinge"]},
+    )
+    result = classify(
+        Path("A Fire Upon the Deep; A Deepness in the Sky; The Children of the Sky.epub"),
+        SourceFormat.EPUB,
+        inspection,
+    )
+    assert result.hypotheses[0].subtype == "omnibus-book"
+    assert any("omnibus review" in reason for reason in result.hypotheses[0].reasons)
+
+
 def test_structured_collection_filename_outweighs_overloaded_embedded_series() -> None:
     inspection = InspectionResult(
         InspectionStatus.OK,

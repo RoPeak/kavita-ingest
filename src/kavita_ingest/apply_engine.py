@@ -7,6 +7,7 @@ import re
 import shutil
 import sqlite3
 import subprocess
+import tempfile
 import zipfile
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
@@ -354,7 +355,7 @@ class ApplyEngine:
             finally:
                 self.progress(index, total, item.source.name)
         summary = self._finalize(journal, run.id)
-        if summary.status is RunState.COMPLETE:
+        if summary.status in {RunState.COMPLETE, RunState.RECOVERY_REQUIRED}:
             _write_publication_report(connection, plan, journal.get_run(run.id), document)
         return summary
 
@@ -393,7 +394,7 @@ class ApplyEngine:
             except (OSError, ValueError, ApplyRefused, subprocess.SubprocessError) as exc:
                 self._mark_failure(journal, run.id, recorded.item_id, exc)
         summary = self._finalize(journal, run.id)
-        if summary.status is RunState.COMPLETE:
+        if summary.status in {RunState.COMPLETE, RunState.RECOVERY_REQUIRED}:
             _write_publication_report(connection, plan, journal.get_run(run.id), document)
         return summary
 
@@ -1286,21 +1287,21 @@ def _write_publication_report(
     run: ApplyRun,
     document: dict[str, Any],
 ) -> Path:
-    """Materialize immutable completed-journal evidence for ingest-cleanup.
+    """Materialize item-scoped journal evidence for ingest-cleanup.
 
-    The SQLite journal remains authoritative.  This report is a read-only
-    bridge for a separate tool, written only after every item and the run are
-    complete; historical runs are never reconstructed or guessed.
+    The SQLite journal remains authoritative. A recovery-required batch may
+    expose only its independently complete items; failed or uncertain items
+    never become accepted cleanup evidence.
     """
-    if run.status is not RunState.COMPLETE or run.completed_at is None:
-        raise ApplyRefused("cannot publish cleanup evidence for an incomplete apply run")
+    if run.status not in {RunState.COMPLETE, RunState.RECOVERY_REQUIRED}:
+        raise ApplyRefused("cannot publish cleanup evidence for an active apply run")
     journal = JournalRepository(connection)
     by_id = {str(item["item_id"]): item for item in document["items"]}
     items: list[dict[str, Any]] = []
     for recorded in journal.items(run.id):
         planned = by_id.get(recorded.item_id)
-        if planned is None or recorded.state is not ItemState.COMPLETE:
-            raise ApplyRefused("completed journal does not match immutable plan")
+        if planned is None:
+            raise ApplyRefused("journal does not match immutable plan")
         source = planned["source"]
         projection = planned["kavita_projection"]
         source_path = str(source["path"])
@@ -1309,8 +1310,24 @@ def _write_publication_report(
             raise ApplyRefused("journal paths do not match immutable plan")
         if recorded.planned_source_hash != str(source["sha256"]):
             raise ApplyRefused("journal source hash does not match immutable plan")
+        if recorded.state is not ItemState.COMPLETE:
+            items.append(
+                {
+                    "item_id": recorded.item_id,
+                    "item_state": recorded.state.value,
+                    "source": source_path,
+                    "source_relative_path": str(source.get("relative_path") or ""),
+                    "source_lifecycle": (
+                        "preserved" if recorded.lifecycle_policy == "preserve" else "removed"
+                    ),
+                    "destination": destination_path,
+                    "destination_relative_path": str(projection.get("destination") or ""),
+                    "cleanup_eligible": False,
+                }
+            )
+            continue
         if not recorded.destination_hash or not recorded.verification:
-            raise ApplyRefused("completed journal lacks destination verification")
+            raise ApplyRefused("completed journal item lacks destination verification")
         transforms: list[str] = []
         if str(source["media_format"]) == "cbr":
             transforms.append("cbr-to-cbz")
@@ -1318,6 +1335,7 @@ def _write_publication_report(
             transforms.append("metadata-write")
         items.append({
             "item_id": recorded.item_id,
+            "item_state": "complete",
             "source": source_path,
             "source_relative_path": str(source.get("relative_path") or ""),
             "source_size_bytes": int(source["size"]),
@@ -1335,37 +1353,63 @@ def _write_publication_report(
             "staged_verification": bool(recorded.verification),
             "destination_verification": True,
             "recovery_state": "complete",
-            "completed_at": run.completed_at,
+            "cleanup_eligible": True,
+            "completed_at": run.completed_at or run.updated_at,
         })
+    completed = [item for item in items if item["item_state"] == "complete"]
+    if not completed:
+        # No cleanup evidence exists yet. Do not create a report whose mere
+        # presence could be mistaken for successful publication.
+        return Path()
     state_root = Path(connection.execute("PRAGMA database_list").fetchone()[2]).parent
     directory = state_root / "kavita-reports"
     directory.mkdir(mode=0o700, parents=True, exist_ok=True)
     target = directory / f"{run.id}.json"
     payload = {
-        "report_schema": "kavita-ingest-publication-v2",
+        "report_schema": "kavita-ingest-publication-v3",
         "operation_id": run.id,
         "plan_id": plan.id,
         "plan_digest": plan.sha256,
         "approved_apply": True,
-        "status": "completed",
+        "status": "completed" if run.status is RunState.COMPLETE else "partial",
         "source_lifecycle": (
             "preserved"
-            if all(item["source_lifecycle"] == "preserved" for item in items)
+            if all(item["source_lifecycle"] == "preserved" for item in completed)
             else "mixed"
         ),
         "verification_completed": True,
-        "recovery_required": False,
+        "recovery_required": run.status is RunState.RECOVERY_REQUIRED,
         "completed_at": run.completed_at,
+        "evidence_updated_at": run.updated_at,
         "items": items,
     }
-    temporary = target.with_suffix(".json.tmp")
-    temporary.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    os.replace(temporary, target)
+    _atomic_private_json(target, payload)
     return target
 
 
+def _atomic_private_json(target: Path, payload: dict[str, Any]) -> None:
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{target.name}.", suffix=".tmp", dir=target.parent
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            json.dump(payload, stream, indent=2, sort_keys=True)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, target)
+        directory = os.open(target.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def backfill_publication_reports(connection: sqlite3.Connection, *, dry_run: bool) -> list[str]:
-    """Materialize only fully evidenced historical completed preserve runs.
+    """Materialize only independently evidenced historical preserve items.
 
     This deliberately reads recorded hashes and paths from immutable plan/journal
     state; it never hashes current media to manufacture historical provenance.
@@ -1375,25 +1419,26 @@ def backfill_publication_reports(connection: sqlite3.Connection, *, dry_run: boo
     result: list[str] = []
     rows = connection.execute(
         "SELECT id, plan_id, plan_digest, status, completed_at "
-        "FROM apply_runs WHERE status='complete'"
+        "FROM apply_runs WHERE status IN ('complete', 'recovery_required')"
     ).fetchall()
     state_root = Path(connection.execute("PRAGMA database_list").fetchone()[2]).parent
     for row in rows:
         run = journal.get_run(str(row[0]))
         plan = plans.get(int(row[1]))
         if (
-            run.completed_at is None
-            or plan.status != "approved"
+            plan.status != "approved"
             or plan.approval_digest != plan.sha256
             or run.plan_digest != plan.sha256
             or any(
-                item.state is not ItemState.COMPLETE
-                or item.lifecycle_policy != "preserve"
+                item.lifecycle_policy != "preserve"
                 or len(item.planned_source_hash) != 64
-                or not item.destination_hash
-                or not item.verification
+                or (
+                    item.state is ItemState.COMPLETE
+                    and (not item.destination_hash or not item.verification)
+                )
                 for item in journal.items(run.id)
             )
+            or not any(item.state is ItemState.COMPLETE for item in journal.items(run.id))
         ):
             continue
         target = state_root / "kavita-reports" / f"{run.id}.json"

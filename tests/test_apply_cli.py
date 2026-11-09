@@ -65,6 +65,13 @@ def test_recovery_cli_explains_and_recovers_crash_after_commit(tmp_path: Path) -
     assert status.exit_code == 0
     assert "state=committing" in status.output
     assert "recognize verified destination commit" in status.output
+    preview = runner.invoke(
+        app, ["recover", str(fixture.plan_id), "--dry-run", "--config", str(config)]
+    )
+    assert preview.exit_code == 0, preview.output
+    assert "no files changed" in preview.output
+    assert f"To execute: kavita-ingest recover {fixture.plan_id}" in preview.output
+    assert fixture.destination.exists()
     recovered = runner.invoke(app, ["recover", str(fixture.plan_id), "--config", str(config)])
     assert recovered.exit_code == 0, recovered.output
     assert "Status: complete" in recovered.output

@@ -56,6 +56,46 @@ def test_work_only_decision_resolves_work_but_does_not_invent_edition(tmp_path: 
     assert resolved.identity.language is None
 
 
+def test_reviewed_local_book_series_fills_sparse_work_candidate(tmp_path: Path) -> None:
+    database = tmp_path / "state.sqlite3"
+    migrate(database)
+    source = _source()
+    candidate = NormalizedCandidate(
+        ProviderName.OPEN_LIBRARY,
+        "work-5",
+        RecordType.BOOK_WORK,
+        MediaKind.BOOK,
+        "The Butcher's Masquerade",
+        creators=(Contributor("Matt Dinniman", "author"),),
+    )
+    score = CandidateScore(candidate, 96, 0.99, (), (), False, True, eligible=True)
+    local = LocalIdentity(
+        MediaKind.BOOK,
+        "series-book",
+        0.98,
+        "The Butcher's Masquerade: Dungeon Crawler Carl Book 5",
+        ("Matt Dinniman",),
+        series_title="Dungeon Crawler Carl",
+        sequence=SequenceNumber.parse("5"),
+    )
+    with connect(database) as connection:
+        repository = DecisionRepository(connection)
+        accept_candidate(
+            repository,
+            source,
+            score,
+            Reconciliation("accepted", "unresolved", (), ()),
+            "evidence",
+            work_only=True,
+            local_identity=local,
+        )
+        resolved = resolve_explicit_identity(repository, source, MediaKind.BOOK)
+    assert resolved.eligible and resolved.identity is not None
+    assert resolved.identity.series_title == "Dungeon Crawler Carl"
+    assert resolved.identity.sequence == SequenceNumber.parse("5")
+    assert resolved.identity.provenance["series_source"] == "explicitly-reviewed-local-evidence"
+
+
 def test_manual_canonical_comic_needs_no_provider_id(tmp_path: Path) -> None:
     database = tmp_path / "state.sqlite3"
     migrate(database)

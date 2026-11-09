@@ -182,6 +182,7 @@ def score_candidates(
             and margin >= settings.eligible_margin
             and local.classification_confidence >= settings.classification_confidence
             and not item.hard_contradiction
+            and not item.material_conflicts
             and item.identity_fields_high
             and candidate_planning_context_ready(local, item.candidate)
         )
@@ -645,6 +646,10 @@ def _score(local: LocalIdentity, candidate: NormalizedCandidate) -> CandidateSco
         item.field == "publisher" and item.kind is ComparisonKind.CONFLICT
         for item in comparisons
     )
+    creators_high = not any(
+        item.field == "creators" and item.kind is ComparisonKind.CONFLICT
+        for item in comparisons
+    )
     qualifier_high = (
         not local.edition_qualifiers
         or all(
@@ -676,6 +681,7 @@ def _score(local: LocalIdentity, candidate: NormalizedCandidate) -> CandidateSco
         hard_contradiction=hard,
         identity_fields_high=(
             title_high
+            and creators_high
             and sequence_high
             and publisher_high
             and qualifier_high
@@ -707,8 +713,6 @@ def _mark_run_ambiguous(score: CandidateScore) -> CandidateScore:
 def _material_conflicts(
     comparisons: list[FieldComparison], *, collected: bool
 ) -> tuple[str, ...]:
-    if not collected:
-        return ()
     reasons: list[str] = []
     for item in comparisons:
         publisher_conflict = (
@@ -724,7 +728,12 @@ def _material_conflicts(
             and "materially" in item.reason
         )
         title_conflict = item.field == "title" and item.kind is ComparisonKind.CONFLICT
-        if publisher_conflict or qualifier_conflict or year_conflict or title_conflict:
+        creator_conflict = item.field == "creators" and item.kind is ComparisonKind.CONFLICT
+        if (
+            title_conflict
+            or creator_conflict
+            or (collected and (publisher_conflict or qualifier_conflict or year_conflict))
+        ):
             reasons.append(item.reason)
     return tuple(dict.fromkeys(reasons))
 

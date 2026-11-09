@@ -203,7 +203,7 @@ def test_exact_existing_transformed_output_is_verified_and_reported(tmp_path: Pa
     assert fixture.source.exists()
     report = next((fixture.config.database_path.parent / "kavita-reports").glob("*.json"))
     payload = json.loads(report.read_text())
-    assert payload["report_schema"] == "kavita-ingest-publication-v2"
+    assert payload["report_schema"] == "kavita-ingest-publication-v3"
     assert payload["items"][0]["action"] == "verified-existing-duplicate"
     assert payload["items"][0]["source_lifecycle"] == "preserved"
 
@@ -320,6 +320,17 @@ def test_recovery_retries_only_four_failed_items_from_18_complete(tmp_path: Path
     initial_writer = SelectiveMetadataFailureWriter(failed_ids)
     first = ApplyEngine(fixture.config, writers=initial_writer).apply(plan.id)
     assert first.counts == {"complete": 18, "failed": 4}
+    partial_report_path = next((database.parent / "kavita-reports").glob("*.json"))
+    partial_report = json.loads(partial_report_path.read_text())
+    assert partial_report_path.stat().st_mode & 0o777 == 0o600
+    assert partial_report["status"] == "partial"
+    assert partial_report["recovery_required"] is True
+    assert sum(item["cleanup_eligible"] for item in partial_report["items"]) == 18
+    assert {
+        item["item_id"]
+        for item in partial_report["items"]
+        if not item["cleanup_eligible"]
+    } == failed_ids
     completed_evidence = {
         item_id: (
             fixture.destination.with_name(f"{item_id}.cbz").stat().st_mtime_ns,
@@ -336,6 +347,12 @@ def test_recovery_retries_only_four_failed_items_from_18_complete(tmp_path: Path
 
     assert recovered.status is RunState.COMPLETE
     assert set(recovery_writer.staged) == failed_ids
+    completed_report = json.loads(
+        next((database.parent / "kavita-reports").glob("*.json")).read_text()
+    )
+    assert completed_report["status"] == "completed"
+    assert completed_report["recovery_required"] is False
+    assert all(item["cleanup_eligible"] for item in completed_report["items"])
     for item_id, evidence in completed_evidence.items():
         destination = fixture.destination.with_name(f"{item_id}.cbz")
         assert (destination.stat().st_mtime_ns, sha256_file(destination)) == evidence

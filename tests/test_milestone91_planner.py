@@ -61,6 +61,18 @@ class _BookWorkProvider:
         return [self.candidate]
 
 
+class _AuthorlessEditionProvider(_BookWorkProvider):
+    def __init__(self) -> None:
+        self.candidate = NormalizedCandidate(
+            ProviderName.GOOGLE_BOOKS,
+            "authorless-edition",
+            RecordType.BOOK_EDITION,
+            MediaKind.BOOK,
+            "Fixture Book",
+            identifiers=(Identifier("isbn", "9780000000002"),),
+        )
+
+
 class _ComicVineFixtureClient:
     def __init__(self) -> None:
         self.operations: list[str] = []
@@ -300,9 +312,10 @@ def test_book_work_normal_accept_is_confirmed_and_persisted_work_only(
 
     item = document["items"][0]
     ownership = item["ownership_manifest"]
-    destination = tmp_path / "books" / "Fixture Book" / "Fixture Book.epub"
+    destination = Path(item["kavita_projection"]["absolute_destination"])
     assert item["partial_resolution"]["level"] == "work_only"
     assert item["provenance"]["decision_type"] == "work_accepted"
+    assert item["canonical"]["series_title"] == "Fixture Series"
     assert set(ownership["preserve"]) >= {
         "publisher",
         "date",
@@ -311,6 +324,35 @@ def test_book_work_normal_accept_is_confirmed_and_persisted_work_only(
     }
     assert applied["summary"]["status"] == "complete"
     assert source.is_file() and destination.is_file()
+
+
+def test_authorless_edition_is_redirected_to_explicit_manual_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    incoming = tmp_path / "incoming"
+    incoming.mkdir()
+    source_path = create_epub(incoming / "Fixture Book.epub")
+    source = inspect_source(source_path)
+    config_path = _config(tmp_path, incoming, lifecycle="preserve")
+    provider = (_AuthorlessEditionProvider(),)
+    monkeypatch.setattr("kavita_ingest.audit.build_providers", lambda *_: provider)
+    monkeypatch.setattr("kavita_ingest.review.build_providers", lambda *_: provider)
+    runner = CliRunner()
+    assert runner.invoke(app, ["scan", str(incoming), "--config", str(config_path)]).exit_code == 0
+    reviewed = runner.invoke(
+        app,
+        ["review", str(incoming), "--config", str(config_path)],
+        input="A\nI\nThe Dice Man\nLuke Rhinehart\n\n\n\n\n\n9780007322244\n",
+    )
+    assert reviewed.exit_code == 0, reviewed.output
+    assert "provider book has no resolved author" in reviewed.output
+    settings = load_config(config_path)
+    assert settings.database_path is not None
+    with connect(settings.database_path) as connection:
+        decision = DecisionRepository(connection).latest(source)
+    assert decision is not None and decision.decision_type is DecisionType.MANUAL_IDENTITY
+    assert decision.payload["identity"]["authors"] == ["Luke Rhinehart"]
+    assert decision.payload["provenance"] == "user"
 
 
 def test_generated_cbz_freezes_symbolic_naming_and_preserve_policy(tmp_path: Path) -> None:

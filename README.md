@@ -112,8 +112,9 @@ implementation included in the normal package.
 
 ### Cleanup provenance reports
 
-Completed publications write an immutable `kavita-ingest-publication-v2` report
-with explicit per-item actions and source lifecycles below the directory containing the active
+Apply runs write an atomic `kavita-ingest-publication-v3` report as soon as one
+item is durably complete, with explicit per-item journal state, cleanup eligibility,
+actions, and source lifecycles below the directory containing the active
 state database, at `kavita-reports/<operation-id>.json`. With the default XDG
 database this is `~/.local/state/kavita-ingest/kavita-reports/`. A custom
 `[paths].database` therefore also changes the report root.
@@ -125,15 +126,40 @@ kavita-ingest provenance-backfill --dry-run
 kavita-ingest provenance-backfill --apply --yes
 ```
 
-The backfill reads immutable plans and completed journals; it never changes
+The backfill reads immutable plans and durable item journals; it never changes
 media or manufactures evidence by hashing current files.
 
-Existing v1 reports remain valid input for compatible consumers. Backfill uses
-the same completed-journal checks and writes the current v2 schema. A staged
+Existing v1/v2 reports remain valid input for compatible consumers. In a partial
+v3 report, only items whose journal state is `complete` can have
+`cleanup_eligible: true`; failed, stale, blocked, or uncertain items are retained
+in the report but cannot support cleanup. Recovery atomically refreshes the same
+run report. Backfill uses the same per-item journal checks and writes v3. A staged
 output that is byte-identical to an existing canonical destination is recorded
 as `verified-existing-duplicate`; a differing, symlinked, or ambiguous existing
 destination is refused. Comparison is against the verified staged result, so
 deterministic metadata or container transformations are covered.
+
+### EPUB container validation and repair
+
+EPUB inspection validates the bounded ZIP inventory, safe and unique paths,
+encryption/signature markers, CRCs, central directory, `container.xml`, package
+document and manifest resources. The OCF `mimetype` entry must be unique, first,
+stored, exact, and free of a local-header extra field. A known packaging defect
+therefore blocks review/planning instead of first appearing during Apply.
+
+Repair is separate, opt-in, and never edits or publishes the source:
+
+```bash
+kavita-ingest epub-repair SOURCE.epub --output repaired.epub --dry-run
+kavita-ingest epub-repair SOURCE.epub --output repaired.epub --apply --yes
+```
+
+The source and output must be in the same configured Incoming root. Only OCF
+`mimetype` packaging defects are repairable. DRM/encryption,
+signatures, unsafe/duplicate paths, corrupt content, missing packages and
+resource-limit violations are refused. The new no-clobber output is independently
+validated and receives a private `.repair.json` content-hash manifest. Rescan and
+explicitly review that new file as a new source; the original remains preserved.
 
 ### Safe source bundles
 
@@ -280,6 +306,7 @@ kavita-ingest plan show 1
 kavita-ingest plan approve 1 --digest DISPLAYED_SHA256
 kavita-ingest apply 1
 kavita-ingest apply-status 1 --details
+kavita-ingest recover 1 --dry-run
 kavita-ingest recover 1
 kavita-ingest abandon 1 --reason "start over after reviewing durable state"
 kavita-ingest status
@@ -334,6 +361,15 @@ book authors/series/edition fields and comic run year, type, sequence, and
 collection volume. A high confidence score means
 only that a candidate is eligible for convenient review; it never authorizes a
 filesystem change.
+
+An authorless provider book cannot be accepted as a plannable identity.
+Review directs the operator to `[I]dentity`, where title and author are shown,
+corrected if needed, and stored as explicit user provenance rather than being
+misrepresented as provider data. Explicit `Series Book N` filename suffixes can
+suggest a missing series/index after an embedded-title boundary; conflicting OPF
+series metadata wins and the conflict remains visible. Semicolon-separated or
+omnibus/anthology/trilogy wording is classified for omnibus review and must not
+silently resolve to one constituent work.
 
 Comic run selection is separate from issue acceptance. Use `run-group choose`,
 `run-group history`, and `run-group clear` to resolve same-named provider runs
@@ -515,11 +551,21 @@ This appends a `review_reopened` marker rather than deleting history or changing
 media bytes, causing the next wizard run to treat that source as pending review.
 
 Use `kavita-ingest apply-status PLAN_ID` for a human summary, add `--details` to
-inspect per-item recovery evidence, and use
+inspect per-item recovery evidence. `kavita-ingest recover PLAN_ID --dry-run`
+prints the exact per-item actions and the copyable execution command without
+changing files. Then use
 `kavita-ingest recover PLAN_ID` to resume only transitions proven safe by the
 immutable plan, journal, source, stage, destination, and recorded hashes. It
 never rematches metadata, queries providers, invents a destination, or repairs a
 published file through a surviving hard link.
+
+Provider 429 responses persist a bounded `Retry-After` cooldown in SQLite. New
+client instances consult that durable block before reserving or sleeping, so a
+batch does not repeatedly hit or wait on a provider known to be unavailable.
+Transient transport/5xx retries use bounded exponential backoff with jitter;
+tests inject deterministic time functions. Cached and offline/manual workflows
+remain available. Strong title or author conflicts are material conflicts and
+cannot become eligible merely through a high aggregate score.
 
 If a failed/recovery-required run is safely abandonable and you deliberately want
 to start over, use `kavita-ingest abandon PLAN_ID` after inspecting

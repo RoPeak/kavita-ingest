@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import random
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -54,6 +55,8 @@ class CachedProviderClient:
         network_enabled: bool = True,
         unavailable_reason: str | None = None,
         max_retries: int = 1,
+        sleeper: Callable[[float], None] = time.sleep,
+        jitter: Callable[[], float] = random.random,
     ) -> None:
         self.provider = provider
         self.store = store
@@ -68,6 +71,8 @@ class CachedProviderClient:
         self.network_enabled = network_enabled
         self.unavailable_reason = unavailable_reason
         self.max_retries = max_retries
+        self.sleeper = sleeper
+        self.jitter = jitter
         self.activity = ClientActivity()
         self._cooldowns: dict[str, float] = {}
 
@@ -123,6 +128,14 @@ class CachedProviderClient:
             )
 
         self.activity.cache_misses += 1
+        _, durable_cooldown = self.limiter.state(
+            self.provider.value, bucket, self.policy
+        )
+        if durable_cooldown > 0:
+            raise ProviderUnavailable(
+                f"{self.provider.value} is cooling down after rate limiting "
+                f"({max(1, round(durable_cooldown))}s remaining)"
+            )
         cooldown_until = self._cooldowns.get(bucket, 0.0)
         if cooldown_until > time.time():
             remaining = max(1, round(cooldown_until - time.time()))
@@ -148,6 +161,7 @@ class CachedProviderClient:
                 self.activity.errors += 1
                 last_error = exc
                 if attempt < self.max_retries:
+                    self._retry_pause(attempt)
                     continue
                 raise
             if response.status == 429:
@@ -156,12 +170,13 @@ class CachedProviderClient:
                 delay = _retry_after(response.headers.get("retry-after"))
                 self.limiter.block(self.provider.value, bucket, delay, "HTTP 429")
                 self._cooldowns[bucket] = time.time() + delay
-                raise ProviderError(
+                raise ProviderUnavailable(
                     f"{self.provider.value} rate limited the request; cooldown {delay:g}s"
                 )
             if response.status >= 500 and attempt < self.max_retries:
                 self.activity.errors += 1
                 last_error = ProviderError(f"provider HTTP {response.status}")
+                self._retry_pause(attempt)
                 continue
             if response.status < 200 or response.status >= 300:
                 self.activity.errors += 1
@@ -180,6 +195,11 @@ class CachedProviderClient:
             )
             return candidates
         raise last_error or ProviderError("provider request failed")
+
+    def _retry_pause(self, attempt: int) -> None:
+        """Bound retry pacing; 429 responses are deliberately never retried here."""
+        delay = min(8.0, 0.5 * (2**attempt)) + min(0.25, max(0.0, self.jitter()) * 0.25)
+        self.sleeper(delay)
 
     def _normalize(
         self, normalize: Normalizer, raw: object, *, source: str

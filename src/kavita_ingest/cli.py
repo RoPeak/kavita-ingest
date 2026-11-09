@@ -25,6 +25,7 @@ from .db import connect
 from .decisions import DecisionRepository, reopen_review
 from .discovery import inspect_source
 from .doctor import checks
+from .epub_repair import repair_epub
 from .library_check import check_library, render_library_check
 from .library_repair import (
     apply_library_repairs,
@@ -90,6 +91,10 @@ ROOT_EPILOG = """Common commands:
   kavita-ingest provenance-backfill --apply --yes
       Inspect whether historical completed preserve runs can safely emit reports.
 
+  kavita-ingest epub-repair SOURCE --output NEW.epub --dry-run
+  kavita-ingest epub-repair SOURCE --output NEW.epub --apply --yes
+      Validate or explicitly rebuild repairable EPUB packaging into a new file.
+
 Use `kavita-ingest COMMAND --help` for command-specific arguments and options.
 """
 
@@ -107,6 +112,65 @@ app.add_typer(plan_app, name="plan")
 app.add_typer(run_group_app, name="run-group")
 
 OUTPUT_VERSION = "1"
+
+
+@app.command("epub-repair")
+def epub_repair_command(
+    source: Annotated[
+        Path, typer.Argument(exists=True, dir_okay=False, resolve_path=False)
+    ],
+    output: Annotated[Path, typer.Option("--output", help="New EPUB path; never overwritten.")],
+    config: Annotated[Path | None, typer.Option("--config")] = None,
+    dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
+    apply: Annotated[bool, typer.Option("--apply")] = False,
+    yes: Annotated[bool, typer.Option("--yes")] = False,
+    as_json: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Safely rebuild only repairable EPUB packaging into a separate file."""
+    if dry_run and apply:
+        typer.echo("REFUSED: choose either --dry-run or --apply", err=True)
+        raise typer.Exit(2)
+    if apply and not yes:
+        typer.echo("REFUSED: use --apply --yes to create the repaired copy", err=True)
+        raise typer.Exit(2)
+    if yes and not apply:
+        typer.echo("REFUSED: --yes requires --apply", err=True)
+        raise typer.Exit(2)
+    settings = load_config(config)
+    try:
+        source_root = next(
+            root.resolve(strict=True)
+            for root in settings.incoming_roots
+            if source.resolve(strict=True).is_relative_to(root.resolve(strict=True))
+        )
+        output_parent = output.expanduser().absolute().parent.resolve(strict=True)
+        if not output_parent.is_relative_to(source_root):
+            raise ValueError("repair output must remain inside the source Incoming root")
+    except StopIteration as exc:
+        typer.echo("REFUSED: EPUB source is outside configured Incoming roots", err=True)
+        raise typer.Exit(2) from exc
+    except (OSError, ValueError) as exc:
+        typer.echo(f"REFUSED: {exc}", err=True)
+        raise typer.Exit(2) from exc
+    try:
+        result = repair_epub(
+            source,
+            output,
+            settings.archive_limits(),
+            dry_run=not apply,
+        )
+    except (OSError, ValueError) as exc:
+        typer.echo(f"REFUSED: {exc}", err=True)
+        raise typer.Exit(2) from exc
+    if result is None:
+        typer.echo("Repairable EPUB packaging confirmed; source remains unchanged.")
+        typer.echo(f"Proposed new output: {output.expanduser().absolute()}")
+    elif as_json:
+        _emit_json("epub-repair", {"repair": asdict(result)})
+    else:
+        typer.echo(f"Created repaired EPUB: {result.output}")
+        typer.echo(f"Created content-hash manifest: {result.report}")
+        typer.echo("Original source was not modified.")
 
 
 @app.command("provenance-backfill")
@@ -627,11 +691,38 @@ def apply_command(
 def recover_command(
     plan_id: int,
     config: Annotated[Path | None, typer.Option("--config")] = None,
+    dry_run: Annotated[
+        bool, typer.Option("--dry-run", help="Inspect recovery actions without changing files.")
+    ] = False,
     as_json: Annotated[bool, typer.Option("--json", help="Emit versioned JSON.")] = False,
 ) -> None:
     """Recover a prior apply run using only its immutable plan and durable journal."""
     try:
-        summary = _apply_engine(config).recover(plan_id)
+        engine = _apply_engine(config)
+        if dry_run:
+            summary = engine.status(plan_id)
+            if summary is None:
+                raise ApplyRefused(f"plan {plan_id} has no apply run to recover")
+            inspections = engine.inspect_recovery(plan_id)
+            if as_json:
+                _emit_json(
+                    "recover-preview",
+                    {
+                        "summary": asdict(summary),
+                        "items": [asdict(item) for item in inspections],
+                    },
+                )
+            else:
+                typer.echo(f"Recovery preview for Plan {plan_id} (no files changed):")
+                for item in inspections:
+                    typer.echo(
+                        f"  {item.item_id}: {item.state.value} -> {item.proposed_action}"
+                    )
+                    if item.detail:
+                        typer.echo(f"    {item.detail}")
+                typer.echo(f"To execute: kavita-ingest recover {plan_id}")
+            return
+        summary = engine.recover(plan_id)
         if as_json:
             _emit_json("recover", {"summary": asdict(summary)})
         else:

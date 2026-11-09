@@ -80,12 +80,13 @@ def _candidate_identity(decision: DecisionRecord) -> CanonicalIdentity:
     identifiers = {} if work_only else {item.scheme: item.value for item in candidate.identifiers}
     collection_volume = _candidate_collection_volume(candidate)
     title, title_source = _resolved_candidate_title(decision, candidate)
+    series_title, sequence, series_source = _resolved_book_series(decision, candidate)
     return CanonicalIdentity(
         media_kind=candidate.media_kind,
         title=title,
         creators=creators,
-        series_title=candidate.series_title,
-        sequence=candidate.sequence,
+        series_title=series_title,
+        sequence=sequence,
         run_start_year=candidate.run_start_year,
         item_type=candidate.item_type,
         collection_volume=collection_volume,
@@ -109,6 +110,7 @@ def _candidate_identity(decision: DecisionRecord) -> CanonicalIdentity:
             "decision_id": str(decision.id),
             "decision_type": decision.decision_type.value,
             "title_source": title_source,
+            **({"series_source": series_source} if series_source else {}),
             **(
                 {"provider_format": candidate.provider_metadata["raw_format"]}
                 if candidate.provider_metadata.get("raw_format")
@@ -121,6 +123,29 @@ def _candidate_identity(decision: DecisionRecord) -> CanonicalIdentity:
             },
         },
     )
+
+
+def _resolved_book_series(
+    decision: DecisionRecord, candidate: NormalizedCandidate
+) -> tuple[str | None, SequenceNumber | None, str | None]:
+    if candidate.media_kind is not MediaKind.BOOK:
+        return candidate.series_title, candidate.sequence, None
+    presentation = decision.payload.get("local_presentation")
+    if not isinstance(presentation, dict):
+        return candidate.series_title, candidate.sequence, None
+    local_series = str(presentation.get("series_title") or "").strip()
+    local_sequence = str(presentation.get("sequence") or "").strip()
+    series = candidate.series_title
+    sequence = candidate.sequence
+    source: str | None = None
+    if not series and local_series:
+        series = local_series
+        source = "explicitly-reviewed-local-evidence"
+    same_series = bool(series and local_series and _title_key(series) == _title_key(local_series))
+    if sequence is None and local_sequence and same_series:
+        sequence = SequenceNumber.parse(local_sequence)
+        source = "explicitly-reviewed-local-evidence"
+    return series, sequence, source
 
 
 def _candidate_collection_volume(candidate: NormalizedCandidate) -> int | None:

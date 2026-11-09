@@ -11,10 +11,12 @@ from pathlib import Path
 
 from lxml import etree
 
+from ..archive_safety import ArchiveLimits
 from ..calibre import (
     require_safe_calibre_executable,
     safe_calibre_environment,
 )
+from ..epub_validation import validate_epub_container
 from .common import VerificationResult
 
 CONTAINER = "META-INF/container.xml"
@@ -121,12 +123,9 @@ def verify_epub(
             errors.append("OPF metadata missing")
         else:
             _verify_fields(metadata, calibre_fields, exact_date, contributor_roles, errors)
-        with zipfile.ZipFile(candidate) as archive:
-            if archive.testzip() is not None:
-                errors.append("EPUB ZIP CRC verification failed")
-            first = archive.infolist()[0]
-            if first.filename != "mimetype" or first.compress_type != zipfile.ZIP_STORED:
-                errors.append("EPUB mimetype is not the first stored entry")
+        container = validate_epub_container(candidate, ArchiveLimits())
+        if not container.valid:
+            errors.extend(item.message for item in container.findings)
     except (OSError, zipfile.BadZipFile, etree.XMLSyntaxError) as exc:
         errors.append(str(exc))
     checks = (
