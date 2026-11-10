@@ -42,6 +42,21 @@ from .plan_store import PlanStore
 from .planning_service import PlanBuilder
 from .presentation import render_human_status, render_plan_summary
 from .providers.models import NormalizedCandidate, ProviderName, RecordType
+from .reconciliation import (
+    ReconciliationRefused,
+    approve_plan,
+    compare_publications,
+    create_state_template,
+)
+from .reconciliation import (
+    create_plan as create_reconciliation_plan,
+)
+from .reconciliation import (
+    execute as execute_reconciliation,
+)
+from .reconciliation import (
+    preview as preview_reconciliation,
+)
 from .repair import reset_verified_publication
 from .review import interactive_review
 from .rollback import preview_rollback
@@ -95,6 +110,12 @@ ROOT_EPILOG = """Common commands:
   kavita-ingest epub-repair SOURCE --output NEW.epub --apply --yes
       Validate or explicitly rebuild repairable EPUB packaging into a new file.
 
+  kavita-ingest reconcile analyze OLD NEW
+      Compare two EPUB publications without changing either file.
+
+  kavita-ingest reconcile status PLAN.json
+      Preview an immutable, explicitly approved publication-supersession plan.
+
 Use `kavita-ingest COMMAND --help` for command-specific arguments and options.
 """
 
@@ -108,10 +129,217 @@ app = typer.Typer(
 )
 plan_app = typer.Typer(help="Create and approve immutable offline execution plans.")
 run_group_app = typer.Typer(help="Inspect and manage explicit comic run-group choices.")
+reconcile_app = typer.Typer(help="Safely analyze and supersede duplicate publications.")
 app.add_typer(plan_app, name="plan")
 app.add_typer(run_group_app, name="run-group")
+app.add_typer(reconcile_app, name="reconcile")
 
 OUTPUT_VERSION = "1"
+
+
+@reconcile_app.command("analyze")
+def reconcile_analyze(
+    old: Annotated[Path, typer.Argument(exists=True, dir_okay=False, resolve_path=True)],
+    new: Annotated[Path, typer.Argument(exists=True, dir_okay=False, resolve_path=True)],
+    config: Annotated[Path | None, typer.Option("--config")] = None,
+    as_json: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Read-only comparison of a superseded and canonical EPUB publication."""
+    try:
+        result = compare_publications(old, new, load_config(config))
+    except (OSError, ValueError, ReconciliationRefused) as exc:
+        _expected_error(exc)
+    if as_json:
+        _emit_json("reconcile-analyze", result)
+        return
+    comparison = result["comparison"]
+    typer.echo(f"Old: {result['old']['path']}")
+    typer.echo(f"New: {result['new']['path']}")
+    typer.echo(f"Old SHA-256: {result['old']['sha256']}")
+    typer.echo(f"New SHA-256: {result['new']['sha256']}")
+    typer.echo(
+        f"Old identity: size={result['old']['size']} device={result['old']['device']} "
+        f"inode={result['old']['inode']} links={result['old']['links']}"
+    )
+    typer.echo(
+        f"New identity: size={result['new']['size']} device={result['new']['device']} "
+        f"inode={result['new']['inode']} links={result['new']['links']}"
+    )
+    typer.echo(
+        "Metadata: "
+        f"{result['old']['title']} / {', '.join(result['old']['creators'])} -> "
+        f"{result['new']['title']} / {', '.join(result['new']['creators'])}"
+    )
+    typer.echo(
+        f"Old series: {result['old']['series'] or '(none)'} "
+        f"#{result['old']['series_index'] or '(none)'}"
+    )
+    typer.echo(
+        f"New series: {result['new']['series']} #{result['new']['series_index']}"
+    )
+    typer.echo(
+        f"Content: {result['old']['resource_count']} vs "
+        f"{result['new']['resource_count']} non-OPF resources; "
+        f"equal={comparison['resources_match']}"
+    )
+    typer.echo(
+        f"Chapters/images: {result['old']['chapter_count']}/{result['old']['image_count']} "
+        f"vs {result['new']['chapter_count']}/{result['new']['image_count']}"
+    )
+    typer.echo(f"Assessment: {comparison['outcome']}")
+    typer.echo("No files were changed.")
+
+
+@reconcile_app.command("plan")
+def reconcile_plan(
+    pair: Annotated[
+        list[str],
+        typer.Option(
+            "--pair",
+            help="Exact OLD::NEW EPUB paths; repeat once per publication pair.",
+        ),
+    ],
+    archive_root: Annotated[Path, typer.Option("--archive-root")],
+    output: Annotated[Path, typer.Option("--output")],
+    config: Annotated[Path | None, typer.Option("--config")] = None,
+) -> None:
+    """Create an immutable reconciliation plan; media remains unchanged."""
+    try:
+        pairs = [_parse_reconciliation_pair(value) for value in pair]
+        plan, digest = create_reconciliation_plan(
+            pairs, archive_root, output, load_config(config)
+        )
+    except (OSError, ValueError, ReconciliationRefused) as exc:
+        _expected_error(exc)
+    typer.echo(f"Plan: {plan['plan_id']}")
+    typer.echo(f"File: {output.expanduser().absolute()}")
+    typer.echo(f"SHA-256: {digest}")
+    for item in plan["items"]:
+        typer.echo(
+            f"  {item['item_id']}: {item['comparison']['outcome']} "
+            f"-> {item['archive']}"
+        )
+    typer.echo("No media files were changed. Create and review a Kavita state template next.")
+
+
+@reconcile_app.command("state-template")
+def reconcile_state_template(
+    plan: Path,
+    output: Annotated[Path, typer.Option("--output")],
+) -> None:
+    """Create the required manual/API progress and cover review template."""
+    try:
+        target = create_state_template(plan, output)
+    except (OSError, ValueError, ReconciliationRefused) as exc:
+        _expected_error(exc)
+    typer.echo(f"State review template: {target}")
+    typer.echo(
+        "Record old/new Kavita IDs and resolve progress and custom-cover state for every item."
+    )
+
+
+@reconcile_app.command("approve")
+def reconcile_approve(
+    plan: Path,
+    digest: Annotated[str, typer.Option("--digest")],
+    state_report: Annotated[Path, typer.Option("--state-report")],
+    yes: Annotated[bool, typer.Option("--yes")] = False,
+) -> None:
+    """Approve one exact plan only after Kavita application state is resolved."""
+    if not yes:
+        typer.echo("REFUSED: use --yes after reviewing the exact plan and state report", err=True)
+        raise typer.Exit(2)
+    try:
+        approval = approve_plan(plan, digest, state_report)
+    except (OSError, ValueError, ReconciliationRefused) as exc:
+        _expected_error(exc)
+    typer.echo(f"Approved exact plan digest: {digest}")
+    typer.echo(f"Approval: {approval}")
+    typer.echo("No media files were changed.")
+
+
+@reconcile_app.command("status")
+def reconcile_status(plan: Path, as_json: Annotated[bool, typer.Option("--json")] = False) -> None:
+    """Read-only filesystem preview for a reconciliation plan."""
+    try:
+        result = preview_reconciliation(plan)
+    except (OSError, ValueError, ReconciliationRefused) as exc:
+        _expected_error(exc)
+    if as_json:
+        _emit_json("reconcile-status", result)
+        return
+    typer.echo(f"Plan: {result['plan_id']}")
+    typer.echo(f"SHA-256: {result['digest']}")
+    for item in result["items"]:
+        typer.echo(f"\n{item['item_id']}: {item['outcome']}")
+        typer.echo(f"  old: {item['old']} (exists={item['old_exists']})")
+        typer.echo(f"  new: {item['new']} (exists={item['new_exists']})")
+        typer.echo(f"  archive: {item['archive']} (exists={item['archive_exists']})")
+    typer.echo("No files were changed.")
+
+
+def _reconcile_execute_command(
+    plan: Path,
+    config: Path | None,
+    *,
+    apply: bool,
+    yes: bool,
+    rollback: bool,
+) -> None:
+    if not apply:
+        reconcile_status(plan)
+        typer.echo("Preview only. Use --apply --yes for the approved per-file operation.")
+        return
+    if not yes:
+        typer.echo("REFUSED: --apply requires --yes", err=True)
+        raise typer.Exit(2)
+    try:
+        journal = execute_reconciliation(plan, load_config(config), rollback=rollback)
+    except (OSError, ValueError, ReconciliationRefused, LockUnavailable) as exc:
+        _expected_error(exc)
+    typer.echo(f"Reconciliation state: {journal['state']}")
+    for item in journal["items"]:
+        typer.echo(f"  {item['item_id']}: {item['state']}")
+
+
+@reconcile_app.command("archive")
+def reconcile_archive(
+    plan: Path,
+    config: Annotated[Path | None, typer.Option("--config")] = None,
+    apply: Annotated[bool, typer.Option("--apply")] = False,
+    yes: Annotated[bool, typer.Option("--yes")] = False,
+) -> None:
+    """Preview or execute an approved reversible per-file archival plan."""
+    _reconcile_execute_command(plan, config, apply=apply, yes=yes, rollback=False)
+
+
+@reconcile_app.command("recover")
+def reconcile_recover(
+    plan: Path,
+    config: Annotated[Path | None, typer.Option("--config")] = None,
+    apply: Annotated[bool, typer.Option("--apply")] = False,
+    yes: Annotated[bool, typer.Option("--yes")] = False,
+) -> None:
+    """Resume an interrupted approved archival operation idempotently."""
+    _reconcile_execute_command(plan, config, apply=apply, yes=yes, rollback=False)
+
+
+@reconcile_app.command("rollback")
+def reconcile_rollback(
+    plan: Path,
+    config: Annotated[Path | None, typer.Option("--config")] = None,
+    apply: Annotated[bool, typer.Option("--apply")] = False,
+    yes: Annotated[bool, typer.Option("--yes")] = False,
+) -> None:
+    """Restore archived files to their exact no-clobber original paths."""
+    _reconcile_execute_command(plan, config, apply=apply, yes=yes, rollback=True)
+
+
+def _parse_reconciliation_pair(value: str) -> tuple[Path, Path]:
+    old, separator, new = value.partition("::")
+    if not separator or not old or not new:
+        raise ReconciliationRefused("--pair must be exactly OLD::NEW")
+    return Path(old), Path(new)
 
 
 @app.command("epub-repair")

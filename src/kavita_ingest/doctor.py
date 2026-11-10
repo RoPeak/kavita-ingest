@@ -5,6 +5,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+from contextlib import closing
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -73,7 +74,7 @@ def _database_status(path: Path | None) -> tuple[str, str]:
     if not path.exists():
         return "INFO", f"not created yet: {path}"
     try:
-        with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as connection:
+        with closing(sqlite3.connect(f"file:{path}?mode=ro", uri=True)) as connection:
             result = connection.execute("PRAGMA integrity_check").fetchone()
             migration = connection.execute("SELECT max(version) FROM schema_migrations").fetchone()
         if not result or result[0] != "ok":
@@ -376,7 +377,7 @@ def _provider_database_checks(path: Path | None) -> list[Check]:
     if path is None or not path.exists():
         return [Check("providers", "cache", "INFO", "state database has not been created")]
     try:
-        with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as connection:
+        with closing(sqlite3.connect(f"file:{path}?mode=ro", uri=True)) as connection:
             tables = {
                 row[0]
                 for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")
@@ -408,7 +409,7 @@ def _apply_database_checks(path: Path | None) -> list[Check]:
     if path is None or not path.exists():
         return [Check("application", "apply-state", "INFO", "state database not created")]
     try:
-        with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as connection:
+        with closing(sqlite3.connect(f"file:{path}?mode=ro", uri=True)) as connection:
             tables = {
                 row[0]
                 for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")

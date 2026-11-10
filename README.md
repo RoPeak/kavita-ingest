@@ -139,6 +139,43 @@ as `verified-existing-duplicate`; a differing, symlinked, or ambiguous existing
 destination is refused. Comparison is against the verified staged result, so
 deterministic metadata or container transformations are covered.
 
+### Explicit publication reconciliation
+
+Duplicate historical publications are never selected by filename or timestamp.
+The `reconcile` workflow compares exact EPUB identities, metadata, OPF-independent
+resource manifests, chapters and images, then binds an immutable plan to the old,
+canonical and archive paths and hashes:
+
+```bash
+kavita-ingest reconcile analyze OLD.epub NEW.epub
+kavita-ingest reconcile plan --pair 'OLD.epub::NEW.epub' \
+  --archive-root /path/outside/library --output reconciliation.json
+kavita-ingest reconcile state-template reconciliation.json --output kavita-state.json
+kavita-ingest reconcile status reconciliation.json
+```
+
+The state template is a mandatory gate for recording distinct positive old/new Kavita IDs and
+whether reading progress and custom covers are absent or were preserved manually.
+Unknown application state blocks approval. After resolving every item, approval
+is bound to both the exact plan digest and state-report hash:
+
+```bash
+kavita-ingest reconcile approve reconciliation.json \
+  --digest DISPLAYED_SHA256 --state-report kavita-state.json --yes
+kavita-ingest reconcile archive reconciliation.json       # dry preview
+kavita-ingest reconcile archive reconciliation.json --apply --yes
+kavita-ingest reconcile recover reconciliation.json --apply --yes
+kavita-ingest reconcile rollback reconciliation.json --apply --yes
+```
+
+Execution checks that no ingest apply/recovery is active, rehashes every endpoint,
+requires a separate same-filesystem archive root, refuses collisions, moves only
+the exact old file, journals after each move, and emits an additive supersession
+report. Recovery recognizes a verified move that occurred immediately before a
+crash. Rollback restores only to an absent exact original path. It never moves a
+series directory, rewrites historical publication reports, or treats supersession
+as backup proof.
+
 ### EPUB container validation and repair
 
 EPUB inspection validates the bounded ZIP inventory, safe and unique paths,

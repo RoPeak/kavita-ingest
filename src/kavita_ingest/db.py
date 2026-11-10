@@ -3,9 +3,12 @@ from __future__ import annotations
 import importlib.resources
 import re
 import sqlite3
+from contextlib import closing
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from types import TracebackType
+from typing import Literal
 
 
 @dataclass(frozen=True, slots=True)
@@ -14,9 +17,24 @@ class MigrationResult:
     backup_path: Path | None
 
 
+class ManagedConnection(sqlite3.Connection):
+    """Connection whose context manager also releases SQLite descriptors."""
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> Literal[False]:
+        try:
+            return super().__exit__(exc_type, exc, traceback)
+        finally:
+            self.close()
+
+
 def connect(path: Path, *, enable_wal: bool = True) -> sqlite3.Connection:
     path.parent.mkdir(parents=True, exist_ok=True)
-    connection = sqlite3.connect(path)
+    connection = sqlite3.connect(path, factory=ManagedConnection)
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys = ON")
     if enable_wal:
@@ -80,9 +98,9 @@ def _validated_backup(connection: sqlite3.Connection, path: Path) -> Path:
     while candidate.exists():
         candidate = path.with_name(f"{path.name}.backup-{stamp}-{suffix}")
         suffix += 1
-    with sqlite3.connect(candidate) as backup:
+    with closing(sqlite3.connect(candidate)) as backup:
         connection.backup(backup)
-    with sqlite3.connect(candidate) as check:
+    with closing(sqlite3.connect(candidate)) as check:
         result = check.execute("PRAGMA integrity_check").fetchone()
     if result is None or result[0] != "ok":
         candidate.unlink(missing_ok=True)

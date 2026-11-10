@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gc
 import importlib.resources
 import sqlite3
 import tomllib
@@ -10,6 +11,35 @@ import pytest
 from kavita_ingest.config import load_config
 from kavita_ingest.db import connect, migrate
 from kavita_ingest.paths import AppPaths
+
+
+def test_managed_connection_context_closes_database(tmp_path: Path) -> None:
+    database = tmp_path / "managed.sqlite3"
+
+    with connect(database) as connection:
+        connection.execute("CREATE TABLE fixture(value INTEGER)")
+
+    with pytest.raises(sqlite3.ProgrammingError, match="closed database"):
+        connection.execute("SELECT 1")
+
+
+@pytest.mark.skipif(not Path("/proc/self/fd").is_dir(), reason="Linux descriptor accounting")
+def test_repeated_migrations_do_not_accumulate_file_descriptors(tmp_path: Path) -> None:
+    def descriptors() -> int:
+        return len(tuple(Path("/proc/self/fd").iterdir()))
+
+    before = descriptors()
+    was_enabled = gc.isenabled()
+    gc.disable()
+    try:
+        for number in range(40):
+            migrate(tmp_path / f"state-{number}.sqlite3")
+        after = descriptors()
+    finally:
+        if was_enabled:
+            gc.enable()
+
+    assert after <= before + 3
 
 
 def _paths(root: Path) -> AppPaths:
