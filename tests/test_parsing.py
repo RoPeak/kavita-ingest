@@ -281,6 +281,23 @@ def test_semicolon_trilogy_is_flagged_as_omnibus_for_review() -> None:
     assert any("omnibus review" in reason for reason in result.hypotheses[0].reasons)
 
 
+def test_bibliographic_year_semicolon_does_not_make_dice_man_an_omnibus() -> None:
+    inspection = InspectionResult(
+        InspectionStatus.OK,
+        SourceFormat.EPUB,
+        metadata={"title": "The Dice Man", "creators": ["Luke Rhinehart"]},
+    )
+    result = classify(
+        Path(
+            "The Dice Man -- Luke Rhinehart -- Dice Man 1, 2012;1999 -- "
+            "HarperCollins Publishers Limited -- isbn13 9780007322244.epub"
+        ),
+        SourceFormat.EPUB,
+        inspection,
+    )
+    assert result.hypotheses[0].subtype == "standalone-book"
+
+
 def test_structured_collection_filename_outweighs_overloaded_embedded_series() -> None:
     inspection = InspectionResult(
         InspectionStatus.OK,

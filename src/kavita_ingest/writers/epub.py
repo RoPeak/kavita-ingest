@@ -81,12 +81,18 @@ def write_epub(
                 source,
                 staged,
             )
-        if exact_date is not None or contributor_roles or native_fields:
+        series_fields = {
+            field: calibre_fields[field]
+            for field in ("series", "series_index")
+            if field in calibre_fields
+        }
+        if exact_date is not None or contributor_roles or native_fields or series_fields:
             _patch_opf(
                 staged,
                 exact_date=exact_date,
                 contributor_roles=contributor_roles or {},
                 native_fields=native_fields or {},
+                series_fields=series_fields,
             )
         expected_fields = {**calibre_fields, **(native_fields or {})}
         result = verify_epub(source, staged, expected_fields, exact_date, contributor_roles or {})
@@ -227,6 +233,7 @@ def _patch_opf(
     exact_date: str | None,
     contributor_roles: Mapping[str, Sequence[str]],
     native_fields: Mapping[str, object] | None = None,
+    series_fields: Mapping[str, object] | None = None,
 ) -> None:
     invalid = set(contributor_roles) - OWNABLE_ROLES
     if invalid:
@@ -246,6 +253,7 @@ def _patch_opf(
         date_node.text = exact_date
         if not dates:
             metadata.append(date_node)
+    _patch_series_fields(metadata, series_fields or {})
     _patch_native_work_fields(metadata, native_fields or {})
     _patch_roles(metadata, contributor_roles)
     payloads[opf_path] = etree.tostring(root, encoding="utf-8", xml_declaration=True)
@@ -259,6 +267,84 @@ def _patch_opf(
         os.replace(temporary, epub)
     finally:
         temporary.unlink(missing_ok=True)
+
+
+def _patch_series_fields(metadata: etree._Element, fields: Mapping[str, object]) -> None:
+    """Make Calibre's EPUB2/EPUB3 series output match the immutable plan exactly.
+
+    Calibre legitimately renders an integer ``--index 1`` as ``1.0`` in EPUB2
+    metadata.  That numeric value is equivalent, but it is not the exact
+    canonical value frozen into a plan.  Rewriting only the owned OPF fields
+    after Calibre also prevents a stale EPUB3 collection refinement from taking
+    precedence over freshly written legacy Calibre metadata during read-back.
+    """
+    invalid = set(fields) - {"series", "series_index"}
+    if invalid:
+        raise ValueError(f"unsupported series fields: {sorted(invalid)}")
+    if not fields:
+        return
+
+    legacy_names = {
+        "series": "calibre:series",
+        "series_index": "calibre:series_index",
+    }
+    for field, name in legacy_names.items():
+        if field not in fields:
+            continue
+        nodes = metadata.xpath(
+            "opf:meta[@name=$name]",
+            namespaces=NS,
+            name=name,
+        )
+        if len(nodes) > 1:
+            raise ValueError(f"ambiguous duplicate OPF {name} metadata")
+        node = nodes[0] if nodes else etree.Element(f"{{{NS['opf']}}}meta", name=name)
+        node.set("content", str(fields[field]))
+        if not nodes:
+            metadata.append(node)
+
+    collections: list[etree._Element] = []
+    for node in metadata.findall("opf:meta", NS):
+        if node.get("property") != "belongs-to-collection" or not node.get("id"):
+            continue
+        ref = f"#{node.get('id')}"
+        collection_type = metadata.xpath(
+            "string(opf:meta[@refines=$ref and @property='collection-type'][1])",
+            namespaces=NS,
+            ref=ref,
+        )
+        if collection_type == "series":
+            collections.append(node)
+    if len(collections) > 1:
+        raise ValueError("ambiguous duplicate EPUB3 series collections")
+    if not collections:
+        return
+
+    collection = collections[0]
+    if "series" in fields:
+        collection.text = str(fields["series"])
+    if "series_index" not in fields:
+        return
+    ref = f"#{collection.get('id')}"
+    positions = metadata.xpath(
+        "opf:meta[@refines=$ref and @property='group-position']",
+        namespaces=NS,
+        ref=ref,
+    )
+    if len(positions) > 1:
+        raise ValueError("ambiguous duplicate EPUB3 series positions")
+    position = (
+        positions[0]
+        if positions
+        else etree.Element(
+            f"{{{NS['opf']}}}meta",
+            refines=ref,
+            property="group-position",
+        )
+    )
+    position.text = str(fields["series_index"])
+    if not positions:
+        metadata.append(position)
 
 
 def _patch_roles(metadata: etree._Element, updates: Mapping[str, Sequence[str]]) -> None:

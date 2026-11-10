@@ -246,7 +246,7 @@ def _book_hypothesis(
             sequence = filename_sequence
             reasons.append("filename Book N suffix supplies missing embedded series index")
     omnibus = bool(
-        re.search(r"[;]", path.stem)
+        _has_multiple_constituent_titles(path.stem)
         or re.search(
             r"\b(?:omnibus|anthology|trilogy|box\s*set|collected works|complete collection)\b",
             f"{path.stem} {title}",
@@ -267,6 +267,24 @@ def _book_hypothesis(
         evidence=evidence,
         reasons=tuple(reasons),
     )
+
+
+def _has_multiple_constituent_titles(stem: str) -> bool:
+    """Recognize title lists without treating bibliographic semicolons as works.
+
+    Release filenames commonly put catalogue fields after `` -- ``.  In
+    particular, year lists such as ``2012;1999`` are not evidence that a book
+    contains multiple works.  Only semicolon-separated, title-like fragments in
+    the leading title field count as omnibus evidence.
+    """
+    title_field = re.split(r"\s+--\s+", stem, maxsplit=1)[0]
+    fragments = [part.strip(" _-–—,()[]") for part in title_field.split(";")]
+    title_like = [
+        fragment
+        for fragment in fragments
+        if len(re.findall(r"[^\W\d_]+", fragment, flags=re.UNICODE)) >= 2
+    ]
+    return len(title_like) >= 2
 
 
 def _filename_book_series(

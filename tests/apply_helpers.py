@@ -152,6 +152,7 @@ def make_apply_fixture(
     )
     database = tmp_path / name / "state.sqlite3"
     config = AppConfig(
+        incoming_roots=(incoming,),
         database_path=database,
         books_root=books,
         comics_root=comics,

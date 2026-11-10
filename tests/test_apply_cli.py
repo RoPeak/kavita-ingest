@@ -18,6 +18,7 @@ def _config(path: Path, fixture) -> Path:  # type: ignore[no-untyped-def]
         f"""
 [paths]
 database = "{fixture.config.database_path}"
+incoming = ["{fixture.source.parent}"]
 books = "{fixture.config.books_root}"
 comics = "{fixture.config.comics_root}"
 """,

@@ -64,11 +64,82 @@ RESOURCES = {
 }
 
 
-def create_epub(path: Path) -> Path:
+def create_epub(
+    path: Path,
+    *,
+    version: str = "3.0",
+    title: str = "Fixture Book",
+    author: str = "Alex Author",
+    embedded_series: tuple[str, str] | None = ("Fixture Series", "1.5"),
+    epub3_collection: tuple[str, str] | None = None,
+) -> Path:
+    root = etree.fromstring(OPF)
+    root.set("version", version)
+    metadata = root.find("opf:metadata", NS)
+    assert metadata is not None
+    title_node = metadata.find("dc:title", NS)
+    author_node = metadata.find("dc:creator[@id='creator-author']", NS)
+    assert title_node is not None and author_node is not None
+    title_node.text = title
+    author_node.text = author
+    if version == "2.0":
+        creators = {
+            node.get("id"): node
+            for node in metadata.findall("dc:creator", NS)
+            if node.get("id")
+        }
+        for node in list(metadata.findall("opf:meta", NS)):
+            if node.get("property") != "role" or not node.get("refines", "").startswith("#"):
+                continue
+            creator = creators.get(node.get("refines", "")[1:])
+            if creator is not None:
+                creator.set(f"{{{NS['opf']}}}role", str(node.text or "aut"))
+            metadata.remove(node)
+    for node in list(metadata.findall("opf:meta", NS)):
+        if node.get("name") in {"calibre:series", "calibre:series_index"}:
+            metadata.remove(node)
+    if embedded_series is not None:
+        series, index = embedded_series
+        metadata.append(
+            etree.Element(
+                f"{{{NS['opf']}}}meta",
+                name="calibre:series",
+                content=series,
+            )
+        )
+        metadata.append(
+            etree.Element(
+                f"{{{NS['opf']}}}meta",
+                name="calibre:series_index",
+                content=index,
+            )
+        )
+    if epub3_collection is not None:
+        series, index = epub3_collection
+        collection = etree.Element(
+            f"{{{NS['opf']}}}meta",
+            id="fixture-series-collection",
+            property="belongs-to-collection",
+        )
+        collection.text = series
+        collection_type = etree.Element(
+            f"{{{NS['opf']}}}meta",
+            refines="#fixture-series-collection",
+            property="collection-type",
+        )
+        collection_type.text = "series"
+        group_position = etree.Element(
+            f"{{{NS['opf']}}}meta",
+            refines="#fixture-series-collection",
+            property="group-position",
+        )
+        group_position.text = index
+        metadata.extend((collection, collection_type, group_position))
+    opf = etree.tostring(root, encoding="utf-8", xml_declaration=True)
     with zipfile.ZipFile(path, "w") as archive:
         archive.writestr("mimetype", MIMETYPE, compress_type=zipfile.ZIP_STORED)
         archive.writestr(CONTAINER_PATH, CONTAINER)
-        archive.writestr(OPF_PATH, OPF)
+        archive.writestr(OPF_PATH, opf)
         for name, payload in RESOURCES.items():
             archive.writestr(name, payload)
     return path

@@ -356,7 +356,9 @@ class ApplyEngine:
                 self.progress(index, total, item.source.name)
         summary = self._finalize(journal, run.id)
         if summary.status in {RunState.COMPLETE, RunState.RECOVERY_REQUIRED}:
-            _write_publication_report(connection, plan, journal.get_run(run.id), document)
+            _write_publication_report(
+                connection, plan, journal.get_run(run.id), document, self.config
+            )
         return summary
 
     def recover(self, plan_id: int) -> ApplySummary:
@@ -395,7 +397,9 @@ class ApplyEngine:
                 self._mark_failure(journal, run.id, recorded.item_id, exc)
         summary = self._finalize(journal, run.id)
         if summary.status in {RunState.COMPLETE, RunState.RECOVERY_REQUIRED}:
-            _write_publication_report(connection, plan, journal.get_run(run.id), document)
+            _write_publication_report(
+                connection, plan, journal.get_run(run.id), document, self.config
+            )
         return summary
 
     def abandon(self, plan_id: int, *, reason: str) -> ApplySummary:
@@ -1286,6 +1290,7 @@ def _write_publication_report(
     plan: StoredPlan,
     run: ApplyRun,
     document: dict[str, Any],
+    config: AppConfig,
 ) -> Path:
     """Materialize item-scoped journal evidence for ingest-cleanup.
 
@@ -1306,6 +1311,16 @@ def _write_publication_report(
         projection = planned["kavita_projection"]
         source_path = str(source["path"])
         destination_path = str(projection["absolute_destination"])
+        source_root = _configured_root(
+            source_path,
+            config.incoming_roots,
+            label="source",
+        )
+        library_root = _configured_root(
+            destination_path,
+            tuple(root for root in (config.books_root, config.comics_root) if root),
+            label="destination",
+        )
         if recorded.source_path != source_path or recorded.destination_path != destination_path:
             raise ApplyRefused("journal paths do not match immutable plan")
         if recorded.planned_source_hash != str(source["sha256"]):
@@ -1317,11 +1332,13 @@ def _write_publication_report(
                     "item_state": recorded.state.value,
                     "source": source_path,
                     "source_relative_path": str(source.get("relative_path") or ""),
+                    "source_root": source_root,
                     "source_lifecycle": (
                         "preserved" if recorded.lifecycle_policy == "preserve" else "removed"
                     ),
                     "destination": destination_path,
                     "destination_relative_path": str(projection.get("destination") or ""),
+                    "library_root": library_root,
                     "cleanup_eligible": False,
                 }
             )
@@ -1338,6 +1355,7 @@ def _write_publication_report(
             "item_state": "complete",
             "source": source_path,
             "source_relative_path": str(source.get("relative_path") or ""),
+            "source_root": source_root,
             "source_size_bytes": int(source["size"]),
             "source_sha256": str(source["sha256"]),
             "source_media_type": str(source["media_format"]),
@@ -1348,6 +1366,7 @@ def _write_publication_report(
             "transformations": transforms,
             "destination": destination_path,
             "destination_relative_path": str(projection.get("destination") or ""),
+            "library_root": library_root,
             "destination_size_bytes": int(recorded.staged_size or 0),
             "destination_sha256": recorded.destination_hash,
             "staged_verification": bool(recorded.verification),
@@ -1387,6 +1406,20 @@ def _write_publication_report(
     return target
 
 
+def _configured_root(absolute: str, roots: tuple[Path, ...], *, label: str) -> str:
+    absolute_path = Path(absolute)
+    if not absolute_path.is_absolute() or ".." in absolute_path.parts:
+        raise ApplyRefused(f"{label} report path is unsafe")
+    matches = [
+        root.expanduser().resolve(strict=False)
+        for root in roots
+        if absolute_path.is_relative_to(root.expanduser().resolve(strict=False))
+    ]
+    if len(matches) != 1:
+        raise ApplyRefused(f"{label} report path does not match one configured root")
+    return str(matches[0])
+
+
 def _atomic_private_json(target: Path, payload: dict[str, Any]) -> None:
     descriptor, temporary_name = tempfile.mkstemp(
         prefix=f".{target.name}.", suffix=".tmp", dir=target.parent
@@ -1408,7 +1441,12 @@ def _atomic_private_json(target: Path, payload: dict[str, Any]) -> None:
         temporary.unlink(missing_ok=True)
 
 
-def backfill_publication_reports(connection: sqlite3.Connection, *, dry_run: bool) -> list[str]:
+def backfill_publication_reports(
+    connection: sqlite3.Connection,
+    config: AppConfig,
+    *,
+    dry_run: bool,
+) -> list[str]:
     """Materialize only independently evidenced historical preserve items.
 
     This deliberately reads recorded hashes and paths from immutable plan/journal
@@ -1447,7 +1485,13 @@ def backfill_publication_reports(connection: sqlite3.Connection, *, dry_run: boo
         # `_write_publication_report` additionally cross-checks the immutable
         # canonical plan item identities against every journal row.
         if not dry_run:
-            _write_publication_report(connection, plan, run, json.loads(plan.canonical_json))
+            _write_publication_report(
+                connection,
+                plan,
+                run,
+                json.loads(plan.canonical_json),
+                config,
+            )
         result.append(run.id)
     return result
 

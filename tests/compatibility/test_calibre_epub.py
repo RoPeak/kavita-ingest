@@ -94,6 +94,27 @@ def test_ebook_meta_field_capabilities(
         assert after[field] == expected
 
 
+def test_ebook_meta_epub2_normalizes_integer_series_index_to_decimal_text(
+    tmp_path: Path,
+) -> None:
+    target = create_epub(
+        tmp_path / "epub2-series.epub",
+        version="2.0",
+        embedded_series=("Old Series", "9"),
+    )
+
+    result = run_ebook_meta(
+        target,
+        ["--series", "Dungeon Crawler Carl", "--index", "1"],
+        tmp_path / "calibre-config",
+    )
+
+    assert result.returncode == 0, result.stderr
+    after = opf_snapshot(target)
+    assert after["series"] == "Dungeon Crawler Carl"
+    assert after["series_index"] == "1.0"
+
+
 def test_ebook_meta_preservation_of_existing_contributor_role_refinements(
     base_epub: Path, tmp_path: Path
 ) -> None:

@@ -75,6 +75,15 @@ class PlanBuilder:
         included = work_only = manual = skipped = blocked = unapproved = 0
         for row in self._reviewed_sources(scope):
             source = _source(row)
+            if not source.path.exists():
+                exclusions.append(
+                    PlanningExclusion(
+                        str(source.path),
+                        "historical_missing",
+                        "historical source record no longer present; ignored for this plan",
+                    )
+                )
+                continue
             latest = self.decisions.latest(source)
             if latest is None:
                 unapproved += 1
@@ -101,19 +110,12 @@ class PlanBuilder:
             try:
                 current = inspect_source(source.path)
             except OSError as exc:
-                missing = not source.path.exists()
-                if not missing:
-                    blocked += 1
+                blocked += 1
                 exclusions.append(
                     PlanningExclusion(
                         str(source.path),
-                        "historical_missing" if missing else "unreadable_source",
-                        (
-                            "historical reviewed source no longer exists; "
-                            "ignored for this plan"
-                            if missing
-                            else f"reviewed source could not be inspected: {exc}"
-                        ),
+                        "unreadable_source",
+                        f"current source could not be inspected: {exc}",
                     )
                 )
                 continue

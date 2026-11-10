@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+from collections import Counter
 from dataclasses import replace
 from pathlib import Path
 
@@ -68,6 +70,11 @@ def interactive_review(
     )
     collection_search_hints: dict[str, tuple[str, ...]] = {}
     restart_requested = False
+    provider_incidents = _provider_incidents(audit, review_fingerprints)
+    if provider_incidents:
+        output.print("Provider availability notices (aggregated for this review):")
+        for message, count in provider_incidents:
+            output.print(f"  {count} source{'s' if count != 1 else ''}: {message}")
     try:
         for item in audit.items:
             if (
@@ -100,7 +107,11 @@ def interactive_review(
             while True:
                 if render_needed:
                     _show_item(
-                        output, current, selected_rank, compact=wizard_mode and not advanced
+                        output,
+                        current,
+                        selected_rank,
+                        compact=wizard_mode and not advanced,
+                        hidden_unavailable=frozenset(message for message, _ in provider_incidents),
                     )
                     render_needed = False
                 prompt = _action_prompt(
@@ -651,7 +662,12 @@ def _show_hydrated_metadata(output: Console, result: HydrationResult) -> None:
 
 
 def _show_item(
-    console: Console, item: ReviewItem, selected_rank: int | None, *, compact: bool = False
+    console: Console,
+    item: ReviewItem,
+    selected_rank: int | None,
+    *,
+    compact: bool = False,
+    hidden_unavailable: frozenset[str] = frozenset(),
 ) -> None:
     console.rule(item.scan.source.path.name)
     console.print(
@@ -764,8 +780,33 @@ def _show_item(
         console.print(
             f"Work: {item.reconciliation.work_state}; Edition: {item.reconciliation.edition_state}"
         )
-    if item.generation.unavailable:
-        console.print("Unavailable: " + "; ".join(item.generation.unavailable))
+    visible_unavailable = [
+        message
+        for message in item.generation.unavailable
+        if _provider_incident_key(message) not in hidden_unavailable
+    ]
+    if visible_unavailable:
+        console.print("Unavailable: " + "; ".join(visible_unavailable))
+
+
+def _provider_incident_key(message: str) -> str:
+    normalized = re.sub(r"\(\d+s remaining\)", "(cooldown active)", message)
+    return re.sub(r"cooldown \d+(?:\.\d+)?s", "cooldown active", normalized)
+
+
+def _provider_incidents(
+    audit: AuditResult,
+    review_fingerprints: frozenset[str] | None,
+) -> tuple[tuple[str, int], ...]:
+    counts: Counter[str] = Counter()
+    for item in audit.items:
+        if (
+            review_fingerprints is not None
+            and item.scan.source.sha256 not in review_fingerprints
+        ):
+            continue
+        counts.update({_provider_incident_key(message) for message in item.generation.unavailable})
+    return tuple(sorted(counts.items()))
 
 
 def _show_candidate_diagnostics(console: Console, item: ReviewItem) -> None:

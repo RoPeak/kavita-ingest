@@ -624,7 +624,7 @@ def test_build_result_collapses_historical_missing_exclusions() -> None:
     rendered = buffer.getvalue()
 
     assert (
-        "Prepared 2 items; left out 0 unapproved, "
+        "Current Incoming plan: prepared 2 items; left out 0 current unapproved, "
         "0 unresolved, 1 blocked and 0 skipped."
         in rendered
     )
@@ -640,6 +640,7 @@ def test_build_result_collapses_historical_missing_exclusions() -> None:
     # A genuinely current problem remains visible.
     assert "Broken Book.epub" in rendered
     assert "could not be inspected" in rendered
+    assert "Existing library inventory and historical journal entries" in rendered
 
 
 def test_invalidation_notice_remains_until_completed_replacement(
@@ -1159,6 +1160,10 @@ def test_plan_builder_excludes_missing_historical_source_after_rename(
     )
     migrate(database)
 
+    never_reviewed = create_pdf(incoming / "Never Reviewed.pdf")
+    scan(incoming, settings, persist=True)
+    never_reviewed.unlink()
+
     old_scan = scan(incoming, settings, persist=True)[0]
 
     with connect(database) as connection:
@@ -1199,6 +1204,12 @@ def test_plan_builder_excludes_missing_historical_source_after_rename(
         for exclusion in result.exclusions
     )
     assert result.unresolved_blocked == 0
+    assert result.unapproved_excluded == 0
+    assert any(
+        exclusion.path == str(never_reviewed.resolve(strict=False))
+        and exclusion.category == "historical_missing"
+        for exclusion in result.exclusions
+    )
 
 
 def test_reprocess_plan_preserves_destination_no_clobber_conflict(tmp_path: Path) -> None:

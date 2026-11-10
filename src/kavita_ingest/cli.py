@@ -198,7 +198,7 @@ def provenance_backfill(
         typer.echo("REFUSED: use --apply --yes to write reports", err=True)
         raise typer.Exit(2)
     with connect(settings.database_path) as connection:
-        report_ids = backfill_publication_reports(connection, dry_run=not apply)
+        report_ids = backfill_publication_reports(connection, settings, dry_run=not apply)
     if report_ids:
         action = "Backfilled" if apply else "Would backfill"
         typer.echo(f"{action} {len(report_ids)} trusted provenance report(s).")

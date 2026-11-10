@@ -39,6 +39,7 @@ from kavita_ingest.review import (
     _hydrate_for_acceptance,
     _manual_identity_fields,
     _mark_incompatible_group_decisions,
+    _provider_incidents,
     _show_item,
     interactive_review,
 )
@@ -933,6 +934,42 @@ def test_collection_review_labels_sequence_as_collection_volume(tmp_path: Path) 
     text = output.getvalue()
     assert "Collection volume: 2" in text
     assert "Issue: 2" not in text
+
+
+def test_provider_cooldown_messages_are_aggregated_across_review_items(
+    tmp_path: Path,
+) -> None:
+    base = _audit(tmp_path)
+    first = replace(
+        base.items[0],
+        generation=replace(
+            base.items[0].generation,
+            unavailable=("google_books: is cooling down after rate limiting (299s remaining)",),
+        ),
+    )
+    second = replace(
+        base.items[0],
+        generation=replace(
+            base.items[0].generation,
+            unavailable=("google_books: is cooling down after rate limiting (297s remaining)",),
+        ),
+    )
+    audit = replace(base, items=(first, second))
+
+    incidents = _provider_incidents(audit, None)
+
+    assert incidents == ((
+        "google_books: is cooling down after rate limiting (cooldown active)",
+        2,
+    ),)
+    output = io.StringIO()
+    _show_item(
+        Console(file=output, force_terminal=False),
+        first,
+        selected_rank=None,
+        hidden_unavailable=frozenset(message for message, _ in incidents),
+    )
+    assert "Unavailable:" not in output.getvalue()
 
 
 def test_material_conflict_requires_exact_typed_acceptance(

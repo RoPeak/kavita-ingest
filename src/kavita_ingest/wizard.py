@@ -1136,9 +1136,9 @@ def _render_build_result(result: PlanBuildResult, output: Console) -> None:
     )
 
     output.print(
-        f"Prepared {result.accepted_included} "
+        f"Current Incoming plan: prepared {result.accepted_included} "
         f"item{'s' if result.accepted_included != 1 else ''}; "
-        f"left out {result.unapproved_excluded} unapproved, "
+        f"left out {result.unapproved_excluded} current unapproved, "
         f"{unresolved} unresolved, "
         f"{result.unresolved_blocked} blocked and "
         f"{skipped} skipped."
@@ -1150,6 +1150,11 @@ def _render_build_result(result: PlanBuildResult, output: Console) -> None:
             f"Ignored {len(historical)} historical source {noun} "
             "no longer present."
         )
+
+    output.print(
+        "Existing library inventory and historical journal entries are context only; "
+        "they are not members of this Incoming plan."
+    )
 
     for exclusion in actionable:
         output.print(

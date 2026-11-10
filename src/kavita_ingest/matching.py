@@ -343,6 +343,7 @@ def _score(local: LocalIdentity, candidate: NormalizedCandidate) -> CandidateSco
     _identifier_score(local, candidate, comparisons, contradictions)
     local_title: str | None
     candidate_title: str | None
+    descriptor_removed = False
     if collected:
         local_title, similarity = _collection_title_similarity(local, candidate.title)
         candidate_title = candidate.title
@@ -351,6 +352,8 @@ def _score(local: LocalIdentity, candidate: NormalizedCandidate) -> CandidateSco
         candidate_title = (
             candidate.series_title if local.kind is MediaKind.COMIC else candidate.title
         )
+        if local.kind is MediaKind.BOOK:
+            local_title, descriptor_removed = _book_work_title(local, candidate)
         similarity = _similarity(local_title or "", candidate_title or "")
     if similarity >= 0.96:
         comparisons.append(
@@ -361,7 +364,11 @@ def _score(local: LocalIdentity, candidate: NormalizedCandidate) -> CandidateSco
                 ComparisonKind.EXACT,
                 32,
                 similarity,
-                "normalized titles agree",
+                (
+                    "titles agree after removing a verified series descriptor"
+                    if descriptor_removed
+                    else "normalized titles agree"
+                ),
             )
         )
     elif similarity >= 0.82:
@@ -373,7 +380,11 @@ def _score(local: LocalIdentity, candidate: NormalizedCandidate) -> CandidateSco
                 ComparisonKind.SIMILAR,
                 22,
                 similarity,
-                "titles are strongly similar",
+                (
+                    "titles are strongly similar after removing a verified series descriptor"
+                    if descriptor_removed
+                    else "titles are strongly similar"
+                ),
             )
         )
     elif similarity >= 0.65:
@@ -708,6 +719,45 @@ def _mark_run_ambiguous(score: CandidateScore) -> CandidateScore:
         contradictions=(*score.contradictions, comparison.reason),
         identity_fields_high=False,
     )
+
+
+def _book_work_title(
+    local: LocalIdentity,
+    candidate: NormalizedCandidate,
+) -> tuple[str, bool]:
+    """Return the work title when a trailing series descriptor is corroborated.
+
+    A suffix is removed only when its series and number agree with both the
+    independently resolved local identity and the provider candidate.  A merely
+    title-shaped suffix cannot hide a genuine work-title conflict.
+    """
+    if not (
+        local.series_title
+        and local.sequence
+        and candidate.series_title
+        and candidate.sequence
+        and _normalize(local.series_title) == _normalize(candidate.series_title)
+        and local.sequence.normalized == candidate.sequence.normalized
+    ):
+        return local.title, False
+    match = re.fullmatch(
+        r"(?P<title>.+?)\s*:\s*(?P<series>.+?)\s+Book\s+"
+        r"(?P<number>\d+(?:\.\d+)?)",
+        local.title.strip(),
+        re.IGNORECASE,
+    )
+    if match is None:
+        return local.title, False
+    try:
+        number = SequenceNumber.parse(match.group("number"))
+    except ValueError:
+        return local.title, False
+    if (
+        _normalize(match.group("series")) != _normalize(local.series_title)
+        or number.normalized != local.sequence.normalized
+    ):
+        return local.title, False
+    return match.group("title").strip(), True
 
 
 def _material_conflicts(

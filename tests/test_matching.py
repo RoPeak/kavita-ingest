@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from kavita_ingest.config import MatchingSettings
 from kavita_ingest.domain import Classification, MediaKind, ParseHypothesis, SequenceNumber
 from kavita_ingest.matching import (
@@ -370,6 +372,80 @@ def test_issue_title_conflict_is_explained_but_not_a_hard_identity_contradiction
     comparison = next(item for item in score.comparisons if item.field == "issue_title")
     assert comparison.kind is ComparisonKind.CONFLICT
     assert score.hard_contradiction is False
+
+
+@pytest.mark.parametrize(
+    ("number", "local_title", "provider_title"),
+    [
+        ("1", "Dungeon Crawler Carl: Dungeon Crawler Carl Book 1", "Dungeon Crawler Carl"),
+        ("2", "Carl's Doomsday Scenario: Dungeon Crawler Carl Book 2", "Carl's Doomsday Scenario"),
+        (
+            "3",
+            "The Dungeon Anarchist's Cookbook: Dungeon Crawler Carl Book 3",
+            "The Dungeon Anarchist's Cookbook",
+        ),
+        (
+            "4",
+            "The Gate of the Feral Gods: Dungeon Crawler Carl Book 4",
+            "The Gate of the Feral Gods",
+        ),
+        ("5", "The Butcher's Masquerade: Dungeon Crawler Carl Book 5", "The Butcher's Masquerade"),
+    ],
+)
+def test_verified_book_series_suffix_is_not_a_material_title_conflict(
+    number: str, local_title: str, provider_title: str
+) -> None:
+    local = LocalIdentity(
+        MediaKind.BOOK,
+        "series-book",
+        0.98,
+        local_title,
+        creators=("Matt Dinniman",),
+        series_title="Dungeon Crawler Carl",
+        sequence=SequenceNumber.parse(number),
+    )
+    candidate = NormalizedCandidate(
+        ProviderName.GOOGLE_BOOKS,
+        f"dcc-{number}",
+        RecordType.BOOK_EDITION,
+        MediaKind.BOOK,
+        provider_title,
+        creators=(Contributor("Matt Dinniman", "author"),),
+        series_title="Dungeon Crawler Carl",
+        sequence=SequenceNumber.parse(number),
+    )
+
+    score = score_candidates(local, [candidate], SETTINGS)[0]
+    title = next(item for item in score.comparisons if item.field == "title")
+    assert title.kind is ComparisonKind.EXACT
+    assert "verified series descriptor" in title.reason
+    assert "titles disagree" not in score.material_conflicts
+
+
+def test_unverified_book_suffix_cannot_hide_a_different_work_title() -> None:
+    local = LocalIdentity(
+        MediaKind.BOOK,
+        "series-book",
+        0.98,
+        "Different Work: Dungeon Crawler Carl Book 2",
+        creators=("Matt Dinniman",),
+        series_title="Dungeon Crawler Carl",
+        sequence=SequenceNumber.parse("2"),
+    )
+    candidate = NormalizedCandidate(
+        ProviderName.GOOGLE_BOOKS,
+        "wrong-sequence",
+        RecordType.BOOK_EDITION,
+        MediaKind.BOOK,
+        "Carl's Doomsday Scenario",
+        creators=(Contributor("Matt Dinniman", "author"),),
+        series_title="Dungeon Crawler Carl",
+        sequence=SequenceNumber.parse("3"),
+    )
+    score = score_candidates(local, [candidate], SETTINGS)[0]
+    title = next(item for item in score.comparisons if item.field == "title")
+    assert title.kind is ComparisonKind.CONFLICT
+    assert "titles disagree" in score.material_conflicts
 
 
 def test_collected_edition_is_blocked_from_issue_candidate_path() -> None:

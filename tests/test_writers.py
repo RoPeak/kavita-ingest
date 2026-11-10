@@ -8,8 +8,14 @@ from pathlib import Path
 import pikepdf
 import pytest
 
-from compatibility.helpers.epub_factory import create_epub, publication_hashes
+from compatibility.helpers.epub_factory import (
+    create_epub,
+    opf_snapshot,
+    publication_hashes,
+    validate_epub,
+)
 from compatibility.helpers.pdf_factory import create_pdf
+from kavita_ingest.archive_safety import ArchiveLimits
 from kavita_ingest.canonical import CanonicalIdentity
 from kavita_ingest.comicinfo import (
     COMICINFO_PROFILE_IMAGEHASH,
@@ -18,7 +24,9 @@ from kavita_ingest.comicinfo import (
     patch_comicinfo,
     read_comicinfo,
 )
-from kavita_ingest.domain import MediaKind, SequenceNumber
+from kavita_ingest.domain import MediaKind, SequenceNumber, SourceFormat
+from kavita_ingest.inspectors import inspect
+from kavita_ingest.parsing import classify
 from kavita_ingest.projection import project_comic
 from kavita_ingest.writers.comic import write_cbz_metadata
 from kavita_ingest.writers.epub import write_epub
@@ -481,6 +489,88 @@ def test_epub_writer_reads_back_every_calibre_owned_field(tmp_path: Path) -> Non
         "unowned_metadata",
         "metadata_readback",
     }
+
+
+@pytest.mark.skipif(shutil.which("ebook-meta") is None, reason="Calibre ebook-meta unavailable")
+@pytest.mark.parametrize(
+    ("number", "title", "embedded_series"),
+    [
+        ("1", "Dungeon Crawler Carl", ("Wrong Series", "9")),
+        ("2", "Carl's Doomsday Scenario", ("Dungeon Crawler Carl", "22")),
+        ("3", "The Dungeon Anarchist's Cookbook", None),
+        ("4", "The Gate of the Feral Gods", None),
+        ("5", "The Butcher's Masquerade", None),
+    ],
+)
+def test_epub2_dcc_series_indexes_are_written_exactly_and_preserve_publication(
+    tmp_path: Path,
+    number: str,
+    title: str,
+    embedded_series: tuple[str, str] | None,
+) -> None:
+    source = create_epub(
+        tmp_path / f"{title} - Dungeon Crawler Carl Book {number}.epub",
+        version="2.0",
+        title=title,
+        author="Matt Dinniman",
+        embedded_series=embedded_series,
+    )
+    destination = tmp_path / f"out-{number}.epub"
+    before = source.read_bytes()
+    resources = publication_hashes(source)
+    planned_series = "Dungeon Crawler Carl"
+    planned_index = number
+    if embedded_series is None:
+        inspected = inspect(source, SourceFormat.EPUB, ArchiveLimits())
+        hypothesis = classify(source, SourceFormat.EPUB, inspected).hypotheses[0]
+        assert hypothesis.series == "Dungeon Crawler Carl"
+        assert hypothesis.sequence is not None
+        planned_series = hypothesis.series
+        planned_index = hypothesis.sequence.normalized
+
+    result = write_epub(
+        source,
+        destination,
+        calibre_fields={
+            "series": planned_series,
+            "series_index": planned_index,
+        },
+        native_fields={
+            "title": title,
+            "authors": ("Matt Dinniman",),
+        },
+    )
+
+    assert result.valid
+    assert source.read_bytes() == before
+    assert publication_hashes(destination) == resources
+    validate_epub(destination)
+    after = opf_snapshot(destination)
+    assert after["title"] == title
+    assert after["creators"]["aut"] == "Matt Dinniman"
+    assert after["series"] == "Dungeon Crawler Carl"
+    assert after["series_index"] == number
+
+
+@pytest.mark.skipif(shutil.which("ebook-meta") is None, reason="Calibre ebook-meta unavailable")
+def test_epub3_collection_and_legacy_series_are_synchronized_to_plan(tmp_path: Path) -> None:
+    source = create_epub(
+        tmp_path / "source.epub",
+        embedded_series=("Legacy Wrong", "8"),
+        epub3_collection=("Collection Wrong", "9"),
+    )
+    destination = tmp_path / "out.epub"
+
+    result = write_epub(
+        source,
+        destination,
+        calibre_fields={"series": "Resolved Series", "series_index": "2"},
+    )
+
+    assert result.valid
+    after = opf_snapshot(destination)
+    assert after["series"] == "Resolved Series"
+    assert after["series_index"] == "2"
 
 
 class _SyntheticPdfStream:

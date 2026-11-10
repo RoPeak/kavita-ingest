@@ -206,6 +206,8 @@ def test_exact_existing_transformed_output_is_verified_and_reported(tmp_path: Pa
     assert payload["report_schema"] == "kavita-ingest-publication-v3"
     assert payload["items"][0]["action"] == "verified-existing-duplicate"
     assert payload["items"][0]["source_lifecycle"] == "preserved"
+    assert payload["items"][0]["source_root"] == str(fixture.source.parent)
+    assert payload["items"][0]["library_root"] == str(fixture.config.comics_root)
 
 
 def test_disk_space_refusal_is_plan_wide_and_source_safe(tmp_path: Path) -> None:
@@ -356,6 +358,76 @@ def test_recovery_retries_only_four_failed_items_from_18_complete(tmp_path: Path
     for item_id, evidence in completed_evidence.items():
         destination = fixture.destination.with_name(f"{item_id}.cbz")
         assert (destination.stat().st_mtime_ns, sha256_file(destination)) == evidence
+
+
+def test_recovery_retries_five_failed_items_after_two_completions_without_touching_history(
+    tmp_path: Path,
+) -> None:
+    fixture = make_apply_fixture(
+        tmp_path, "cbz", plan_name="plan-five-shape", lifecycle="preserve"
+    )
+    database = fixture.config.database_path
+    assert database is not None
+    historical = [
+        fixture.destination.with_name(f"historical-dcc-{number}.cbz")
+        for number in range(1, 6)
+    ]
+    for number, path in enumerate(historical, 1):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(f"historical-{number}".encode())
+    historical_hashes = {path: sha256_file(path) for path in historical}
+
+    with connect(database) as connection:
+        original = PlanStore(connection).get(fixture.plan_id)
+        document = json.loads(original.canonical_json)
+        template = document["items"][0]
+        items = []
+        for number in range(1, 8):
+            item = copy.deepcopy(template)
+            source = fixture.source.with_name(f"current-{number}.cbz")
+            if source != fixture.source:
+                shutil.copy2(fixture.source, source)
+            destination = fixture.destination.with_name(f"planned-{number}.cbz")
+            item["item_id"] = f"current-{number}"
+            item["source"]["path"] = str(source)
+            item["source"]["size"] = source.stat().st_size
+            item["source"]["mtime_ns"] = source.stat().st_mtime_ns
+            item["kavita_projection"]["destination"] = str(
+                destination.relative_to(fixture.config.comics_root)  # type: ignore[arg-type]
+            )
+            item["kavita_projection"]["absolute_destination"] = str(destination)
+            items.append(item)
+        document["plan_id"] = "two-complete-five-failed"
+        document["items"] = items
+        payload = json.dumps(
+            document, ensure_ascii=True, sort_keys=True, separators=(",", ":")
+        ).encode()
+        plan = PlanStore(connection).import_bytes(payload)
+        PlanStore(connection).approve(plan.id, plan.sha256)
+
+    failed_ids = {f"current-{number}" for number in range(3, 8)}
+    first = ApplyEngine(
+        fixture.config,
+        writers=SelectiveMetadataFailureWriter(failed_ids),
+    ).apply(plan.id)
+
+    assert first.counts == {"complete": 2, "failed": 5}
+    for number in range(3, 8):
+        assert not fixture.destination.with_name(f"planned-{number}.cbz").exists()
+    source_hashes = {
+        fixture.source.with_name(f"current-{number}.cbz"): sha256_file(
+            fixture.source.with_name(f"current-{number}.cbz")
+        )
+        for number in range(1, 8)
+    }
+
+    recovery_writer = RecordingWriter()
+    recovered = ApplyEngine(fixture.config, writers=recovery_writer).recover(plan.id)
+
+    assert recovered.status is RunState.COMPLETE
+    assert set(recovery_writer.staged) == failed_ids
+    assert all(sha256_file(path) == digest for path, digest in source_hashes.items())
+    assert all(sha256_file(path) == digest for path, digest in historical_hashes.items())
 
 
 class RacingFilesystem(LinuxFilesystem):
